@@ -302,10 +302,6 @@ impl Searcher {
         }
         alpha = alpha.max(best);
 
-        // Delta pruning is unsound while in check (a pruned capture may be the
-        // only legal escape, and stand-pat is meaningless), so gate it on this.
-        let in_check = board.in_check(board.side_to_move());
-
         // No capture-only generator: generate all moves and filter to
         // captures/promotions below.
         let mut moves = MoveList::new();
@@ -315,17 +311,16 @@ impl Searcher {
             if !(mv.flag().is_capture() || mv.flag().is_promotion()) {
                 continue; // quiet move: not searched in quiescence
             }
-            // Delta pruning: even winning the captured piece outright (plus a
-            // margin for follow-up gains) can't lift alpha, so don't search it.
-            // Skipped for promotions - they swing by more than the victim - and
-            // when in check (see above). Captures are MVV-LVA ordered, but
-            // non-capture promotions sort after them, so `continue` not `break`.
-            if !in_check
-                && !mv.flag().is_promotion()
-                && stand_pat + captured_value(board, *mv) + DELTA_MARGIN < alpha
-            {
-                continue;
-            }
+            // Delta pruning is disabled: it cut ~23% of qnodes but its per-node
+            // `board.in_check()` probe dropped NPS 4.49M -> 3.50M (equal-time
+            // SPRT -77 +/- 28 Elo). Re-enable with a SEE primitive for in_check.
+            //
+            // let in_check = board.in_check(board.side_to_move());
+            // if !in_check
+            //     && !mv.flag().is_promotion()
+            //     && stand_pat + captured_value(board, *mv) + DELTA_MARGIN < alpha
+            // { continue; }
+
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 let score = -self.quiescence(board, qply + 1, -beta, -alpha);
@@ -352,24 +347,26 @@ const ORDER_MIN_DEPTH: u32 = 2;
 
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
-/// Safety margin for quiescence delta pruning (~two pawns). A capture is only
-/// pruned when the static eval plus the victim's value plus this margin still
-/// falls short of alpha, so the margin is the slack that keeps a capture which
-/// sets up a *further* gain (a discovered threat, a follow-up win) from being
-/// pruned on its immediate material alone.
-const DELTA_MARGIN: i32 = 200;
-
-/// Centipawn value of the piece a capture removes - the gain estimate delta
-/// pruning tests against alpha. En passant takes a pawn (the destination is
-/// empty); every other capture takes whatever sits on the destination square.
-fn captured_value(board: &Board, mv: Move) -> i32 {
-    let victim = if mv.flag() == MoveFlag::EnPassant {
-        PieceType::Pawn
-    } else {
-        board.piece_at(mv.to()).unwrap().kind()
-    };
-    VAL[victim as usize]
-}
+// Delta-pruning helpers, disabled with the pruning itself (see `quiescence`).
+//
+// /// Safety margin for quiescence delta pruning (~two pawns). A capture is only
+// /// pruned when the static eval plus the victim's value plus this margin still
+// /// falls short of alpha, so the margin is the slack that keeps a capture which
+// /// sets up a *further* gain (a discovered threat, a follow-up win) from being
+// /// pruned on its immediate material alone.
+// const DELTA_MARGIN: i32 = 200;
+//
+// /// Centipawn value of the piece a capture removes - the gain estimate delta
+// /// pruning tests against alpha. En passant takes a pawn (the destination is
+// /// empty); every other capture takes whatever sits on the destination square.
+// fn captured_value(board: &Board, mv: Move) -> i32 {
+//     let victim = if mv.flag() == MoveFlag::EnPassant {
+//         PieceType::Pawn
+//     } else {
+//         board.piece_at(mv.to()).unwrap().kind()
+//     };
+//     VAL[victim as usize]
+// }
 
 /// Ordering bonus that floats the previous iteration's best move ahead of every
 /// capture.
