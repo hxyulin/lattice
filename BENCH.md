@@ -125,3 +125,7 @@ NPS is M3 Pro, `--release`, and noisy run-to-run - read the trend, not the digit
 |--------|-------:|-------:|
 | baseline (mailbox eval, ray-step sliders) | 10.1M | 10.1M |
 | bitboard eval (10 popcounts, no mailbox walk) | 19.0M | 24.9M |
+| in-place `generate_moves` (no return copy) | 19.0M | 24.5M (noise) |
+
+The in-place move buffer was a **no-op on NPS** - the optimizer already elided
+the 512-byte return copy (NRVO). 

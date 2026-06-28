@@ -3,7 +3,7 @@
 //!  - Alpha-beta pruning
 //!  - MVV-LVA capture move ordering
 
-use lattice_board::{Board, Move, MoveFlag, PieceType};
+use lattice_board::{Board, Move, MoveFlag, MoveList, PieceType};
 
 use crate::{MATE, Score, evaluate};
 
@@ -36,7 +36,8 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     let mut best = -MATE;
 
     // same as negamax loop but records the best move
-    let mut moves = board.pseudo_legal_moves();
+    let mut moves = MoveList::new();
+    board.generate_moves(&mut moves);
     moves.sort_by_key(|&m| -(order_score(board, m)));
     for mv in &moves {
         let undo = board.make_move(*mv);
@@ -91,7 +92,8 @@ impl Searcher {
         let mut best = -MATE;
         let mut legal = 0u32;
 
-        let mut moves = board.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
         if depth >= ORDER_MIN_DEPTH {
             moves.sort_by_key(|&m| -(order_score(board, m)));
         }
