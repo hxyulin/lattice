@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 lattice-board.workspace = true
 bstr.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

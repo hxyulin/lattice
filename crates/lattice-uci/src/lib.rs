@@ -10,26 +10,11 @@ use bstr::{BString, ByteSlice};
 use lattice_board::{PieceType, Square};
 
 /// An error from the UCI IO layer.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum UciError {
     /// An underlying read/write failed.
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for UciError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UciError::Io(e) => write!(f, "io error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for UciError {}
-
-impl From<std::io::Error> for UciError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// A move in UCI long algebraic notation (`e2e4`, `e7e8q`).

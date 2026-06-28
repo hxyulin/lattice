@@ -19,6 +19,7 @@ repository = "https://github.com/hxyulin/lattice"
 lattice-board = { path = "crates/lattice-board", version = "0.0.0" }
 lattice-engine = { path = "crates/lattice-engine", version = "0.0.0" }
 lattice-uci = { path = "crates/lattice-uci", version = "0.0.0" }
+thiserror = "2"
 
 bstr = "1"
 

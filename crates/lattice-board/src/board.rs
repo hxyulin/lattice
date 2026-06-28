@@ -455,23 +455,31 @@ fn castle_rook_squares(color: Color, flag: MoveFlag) -> (Square, Square) {
 }
 
 /// Why a FEN string failed to parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, thiserror::Error)]
 pub enum ParseFenError {
     /// Input ended where a required field was expected.
+    #[error("FEN ended before a required field")]
     IncompleteFen,
     /// An unexpected byte at the given offset.
+    #[error("unexpected byte at offset {0}")]
     UnexpectedChar(usize),
     /// The castling field was malformed (empty, duplicate, or bad letter).
+    #[error("malformed castling-rights field")]
     InvalidCastlingRights,
     /// The piece-placement field did not describe exactly 64 squares.
+    #[error("piece placement did not describe exactly 64 squares")]
     InvalidPlacement,
     /// The en-passant field was not `-` or a square on rank 3 or 6.
+    #[error("en passant target was not `-` or a square on rank 3 or 6")]
     InvalidEnpassentSquare,
     /// A numeric field overflowed or contained no digits.
+    #[error("numeric field was empty or overflowed")]
     InvalidNumber,
     /// The half-move clock did not fit in a `u8`.
+    #[error("half-move clock did not fit in a u8")]
     InvalidHalfMoveClock,
     /// The full-move counter was `0` or did not fit in a `u16`.
+    #[error("full-move counter was 0 or out of range")]
     InvalidFullMove,
 }
 
