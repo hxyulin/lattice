@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use lattice_board::{Board, Move, MoveFlag, MoveList, PieceType};
 
-use crate::{MATE, Score, evaluate};
+use crate::{Bound, MATE, Score, TranspositionTable, evaluate};
 
 /// Upper bound on iterative-deepening depth when no explicit depth cap is given;
 /// bounds the loop so the search always terminates.
@@ -96,7 +96,8 @@ pub struct SearchResult {
 /// node, and time limits fires first. A bare [`Limits::default`] runs to
 /// [`MAX_PLY`].
 #[must_use]
-pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
+pub fn search(board: &mut Board, limits: &Limits, tt: &mut TranspositionTable) -> SearchResult {
+    tt.new_search(); // age the previous move's entries before this search reuses them
     let mut searcher = Searcher {
         nodes: 0,
         qnodes: 0,
@@ -104,6 +105,7 @@ pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
         deadline: limits.move_time.map(|t| Instant::now() + t),
         stopped: false,
         armed: false,
+        tt,
     };
     let mut best_move: Option<Move> = None;
     let mut score = -MATE;
@@ -129,7 +131,7 @@ pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
 }
 
 /// Mutable search state threaded through the recursion
-struct Searcher {
+struct Searcher<'a> {
     nodes: u64,
     /// Subset of `nodes` spent in [`Searcher::quiescence`]. Surfaced in
     /// [`SearchResult`] for debugging the quiescence/main-search split.
@@ -143,9 +145,12 @@ struct Searcher {
     /// False during depth 1 so the first iteration always completes and yields a
     /// legal move even under a tiny budget. True after depth 1.
     armed: bool,
+    /// Transposition table, owned by the caller and reused across moves. Probed
+    /// for cutoffs and a move-ordering hint, and written after each node.
+    tt: &'a mut TranspositionTable,
 }
 
-impl Searcher {
+impl Searcher<'_> {
     /// Whether a node/time budget has been hit.
     ///
     /// # Performance
@@ -236,27 +241,52 @@ impl Searcher {
             return self.quiescence(board, 0, alpha, beta);
         }
 
+        // Transposition probe. A stored entry whose search was at least as deep
+        // (`entry.depth() >= depth`) can cut this node outright, subject to its
+        // bound; either way its best move is the ordering hint (see below).
+        let orig_alpha = alpha;
+        let hash = board.zobrist();
+        let mut tt_move = None;
+        if let Some(e) = self.tt.probe(hash) {
+            tt_move = e.best();
+            if u32::from(e.depth()) >= depth {
+                let s = e.score(ply);
+                match e.bound() {
+                    Bound::Exact => return s,
+                    Bound::Lower if s >= beta => return s,
+                    Bound::Upper if s <= alpha => return s,
+                    _ => {}
+                }
+            }
+        }
+
         let mut best = -MATE;
+        let mut best_move = None;
         let mut legal = 0u32;
 
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
         if depth >= ORDER_MIN_DEPTH {
-            // No hint at interior nodes yet - per-node best moves need a
-            // transposition table, which is the next step after this.
-            moves.sort_by_key(|&m| -(order_score(board, m, None)));
+            // The TT move (this position's best from a previous, possibly
+            // shallower, search) is ordered first - the strongest hint there is.
+            moves.sort_by_key(|&m| -order_score(board, m, tt_move));
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
                 let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
+                if score > best {
+                    best = score;
+                    best_move = Some(*mv);
+                }
                 if score >= beta {
                     board.unmake_move(*mv, undo);
-                    return score; // beta cutoff
+                    // Fail-high: `best` is a lower bound on the true score.
+                    self.store(hash, best_move, best, depth, Bound::Lower, ply);
+                    return best;
                 }
                 alpha = alpha.max(score);
-                best = best.max(score);
             }
             board.unmake_move(*mv, undo);
         }
@@ -265,14 +295,41 @@ impl Searcher {
             // Terminal node:
             //  - checkmate is `MATE` discounted by distance from the root
             //  - if not in check, then it is stalemate (draw)
-            return if board.in_check(board.side_to_move()) {
+            let score = if board.in_check(board.side_to_move()) {
                 -(MATE - ply as Score)
             } else {
                 0
             };
+            self.store(hash, None, score, depth, Bound::Exact, ply);
+            return score;
         }
 
+        // A score that beat `orig_alpha` was searched inside the window -> exact;
+        // otherwise every move failed low and `best` is only an upper bound.
+        let bound = if best > orig_alpha {
+            Bound::Exact
+        } else {
+            Bound::Upper
+        };
+        self.store(hash, best_move, best, depth, bound, ply);
         best
+    }
+
+    /// Write a node's result to the transposition table, but only while the
+    /// search is running: an aborted iteration's children return the sentinel `0`,
+    /// so storing its garbage scores would poison the table.
+    fn store(
+        &mut self,
+        hash: lattice_board::ZobristHash,
+        best: Option<Move>,
+        score: Score,
+        depth: u32,
+        bound: Bound,
+        ply: u32,
+    ) {
+        if !self.stopped {
+            self.tt.store(hash, best, score, depth as u8, bound, ply);
+        }
     }
 
     /// Quiescence search: resolve captures and promotions from a leaf until the
@@ -405,11 +462,17 @@ mod tests {
         Square::from_ascii(s.as_bytes()).unwrap()
     }
 
+    /// Run a search with a throwaway 1 MB table - these tests probe behaviour,
+    /// not cross-move reuse.
+    fn go(b: &mut Board, limits: &Limits) -> SearchResult {
+        search(b, limits, &mut TranspositionTable::new(1))
+    }
+
     #[test]
     fn grabs_a_hanging_queen() {
         // White pawn e2 can capture an undefended Black queen on d3.
         let mut b = board("4k3/8/8/8/8/3q4/4P3/4K3 w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(1));
+        let r = go(&mut b, &Limits::to_depth(1));
         let mv = r.best_move.expect("a legal move exists");
         assert_eq!(mv.from(), sq("e2"));
         assert_eq!(mv.to(), sq("d3"));
@@ -422,7 +485,7 @@ mod tests {
         // Needs depth 2: the mated node must be expanded (depth >= 1 there) to
         // discover it has no legal replies
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(2));
+        let r = go(&mut b, &Limits::to_depth(2));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
@@ -434,7 +497,7 @@ mod tests {
     fn stalemate_scores_zero() {
         // Classic stalemate: Black to move, not in check, no legal move.
         let mut b = board("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(1));
+        let r = go(&mut b, &Limits::to_depth(1));
         assert_eq!(r.best_move, None);
         assert_eq!(r.score, 0);
     }
@@ -448,7 +511,7 @@ mod tests {
         // recapture is resolved, Qxd5 scores as losing the queen, and the engine
         // keeps its material instead.
         let mut b = board("4k3/8/2p5/3p4/8/8/8/3QK3 w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(1));
+        let r = go(&mut b, &Limits::to_depth(1));
         let mv = r.best_move.expect("a legal move exists");
         assert_ne!(mv.to(), sq("d5"), "must not grab the defended pawn");
         assert!(r.score < 800, "no phantom won pawn: {}", r.score);
@@ -460,7 +523,7 @@ mod tests {
         // A tiny node budget must still yield a legal move - depth 1 always
         // completes (see `armed`) - while keeping the search short.
         let mut b = board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        let r = search(&mut b, &Limits::to_nodes(5_000));
+        let r = go(&mut b, &Limits::to_nodes(5_000));
         assert!(r.best_move.is_some(), "must return a move under any budget");
         assert!(
             r.nodes < 50_000,

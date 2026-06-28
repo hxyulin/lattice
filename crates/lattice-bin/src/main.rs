@@ -4,7 +4,7 @@ use std::io::{self, BufReader};
 use std::time::{Duration, Instant};
 
 use lattice_board::{Board, Color, Move};
-use lattice_engine::{Limits, MATE, Score, bench, budget, nps, search};
+use lattice_engine::{Limits, MATE, Score, TranspositionTable, bench, budget, nps, search};
 use lattice_uci::{Go, StartPos, UciCommand, UciInterface, UciMove};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
@@ -12,6 +12,13 @@ const DEFAULT_DEPTH: u32 = 4;
 
 /// Depth for `lattice bench [depth]` when none is given.
 const DEFAULT_BENCH_DEPTH: u32 = 4;
+
+/// Default transposition-table size in MB.
+///
+/// # Notes
+/// Used until a GUI overrides it via `setoption name Hash`; matches the
+/// advertised `Hash` default.
+const DEFAULT_HASH_MB: usize = 16;
 
 fn main() -> io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("bench") {
@@ -26,6 +33,9 @@ fn main() -> io::Result<()> {
     let stdin = io::stdin();
     let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::stdout().lock());
     let mut board = Board::starting_position();
+    // Persistent across the session and across moves: each `go` reuses what the
+    // previous search learned. `setoption Hash` resizes it; `ucinewgame` clears.
+    let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
 
     while let Some(cmd) = uci.poll().map_err(io_err)? {
         match cmd {
@@ -66,7 +76,7 @@ fn main() -> io::Result<()> {
                 } else {
                     let limits = limits_from_go(&go, board.side_to_move());
                     let start = Instant::now();
-                    let result = search(&mut board, &limits);
+                    let result = search(&mut board, &limits, &mut tt);
                     let elapsed = start.elapsed();
 
                     // Integer nps; clamp elapsed up to 1us so a sub-microsecond
