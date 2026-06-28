@@ -46,6 +46,19 @@ pub struct Go {
     pub depth: Option<u32>,
     /// Fixed time per move, in milliseconds.
     pub movetime: Option<u64>,
+    /// Node budget for the search.
+    pub nodes: Option<u64>,
+    /// White's clock remaining, in milliseconds.
+    pub wtime: Option<u64>,
+    /// Black's clock remaining, in milliseconds.
+    pub btime: Option<u64>,
+    /// White's per-move increment, in milliseconds.
+    pub winc: Option<u64>,
+    /// Black's per-move increment, in milliseconds.
+    pub binc: Option<u64>,
+    /// Moves until the next time control. Parsed but not yet used - the time
+    /// budget assumes sudden death.
+    pub movestogo: Option<u32>,
     /// Search until `stop`.
     pub infinite: bool,
 }
@@ -164,6 +177,12 @@ fn parse_go<'a>(mut toks: impl Iterator<Item = &'a [u8]>) -> Go {
             b"perft" => go.perft = toks.next().and_then(parse_num),
             b"depth" => go.depth = toks.next().and_then(parse_num),
             b"movetime" => go.movetime = toks.next().and_then(parse_num),
+            b"nodes" => go.nodes = toks.next().and_then(parse_num),
+            b"wtime" => go.wtime = toks.next().and_then(parse_num),
+            b"btime" => go.btime = toks.next().and_then(parse_num),
+            b"winc" => go.winc = toks.next().and_then(parse_num),
+            b"binc" => go.binc = toks.next().and_then(parse_num),
+            b"movestogo" => go.movestogo = toks.next().and_then(parse_num),
             b"infinite" => go.infinite = true,
             _ => {} // ignore params we don't model
         }

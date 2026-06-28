@@ -1,11 +1,11 @@
 //! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
 
 use std::io::{self, BufReader};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use lattice_board::{Board, Move};
-use lattice_engine::{MATE, Score, bench, nps, search};
-use lattice_uci::{StartPos, UciCommand, UciInterface, UciMove};
+use lattice_board::{Board, Color, Move};
+use lattice_engine::{Limits, MATE, Score, bench, budget, nps, search};
+use lattice_uci::{Go, StartPos, UciCommand, UciInterface, UciMove};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
 const DEFAULT_DEPTH: u32 = 4;
@@ -64,9 +64,9 @@ fn main() -> io::Result<()> {
                     uci.send(&format!("\nNodes searched: {total}"))
                         .map_err(io_err)?;
                 } else {
-                    let depth = go.depth.unwrap_or(DEFAULT_DEPTH);
+                    let limits = limits_from_go(&go, board.side_to_move());
                     let start = Instant::now();
-                    let result = search(&mut board, depth);
+                    let result = search(&mut board, &limits);
                     let elapsed = start.elapsed();
 
                     // Integer nps; clamp elapsed up to 1us so a sub-microsecond
@@ -79,7 +79,8 @@ fn main() -> io::Result<()> {
 
                     let nodes = result.nodes;
                     uci.send(&format!(
-                        "info depth {depth} score {} nodes {nodes} nps {nps} pv {pv}",
+                        "info depth {} score {} nodes {nodes} nps {nps} pv {pv}",
+                        result.depth,
                         format_score(result.score),
                     ))
                     .map_err(io_err)?;
@@ -92,6 +93,36 @@ fn main() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Translate a parsed UCI `go` into engine [`Limits`].
+fn limits_from_go(go: &Go, stm: Color) -> Limits {
+    let move_time = go.movetime.map(Duration::from_millis).or_else(|| {
+        let (remaining, inc) = match stm {
+            Color::White => (go.wtime, go.winc),
+            Color::Black => (go.btime, go.binc),
+        };
+        remaining.map(|r| {
+            budget(
+                Duration::from_millis(r),
+                Duration::from_millis(inc.unwrap_or(0)),
+            )
+        })
+    });
+    let mut limits = Limits {
+        depth: go.depth,
+        nodes: go.nodes,
+        move_time,
+    };
+
+    if !go.infinite
+        && limits.depth.is_none()
+        && limits.nodes.is_none()
+        && limits.move_time.is_none()
+    {
+        limits.depth = Some(DEFAULT_DEPTH);
+    }
+    limits
 }
 
 /// Run the fixed-suite search benchmark to `depth` and print a human-readable

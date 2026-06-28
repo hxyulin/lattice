@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use lattice_board::Board;
 
-use crate::search;
+use crate::{Limits, search};
 
 /// `(label, FEN)` for each benchmark position: the six standard perft positions.
 const SUITE: &[(&str, &str)] = &[
@@ -96,7 +96,7 @@ pub fn bench(depth: u32) -> BenchReport {
         .map(|&(name, fen)| {
             let mut board = Board::from_fen(fen.as_bytes()).expect("suite FEN must parse");
             let start = Instant::now();
-            let result = search(&mut board, depth);
+            let result = search(&mut board, &Limits::to_depth(depth));
             BenchEntry {
                 name,
                 nodes: result.nodes,
