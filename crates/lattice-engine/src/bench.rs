@@ -89,6 +89,8 @@ pub fn nps(nodes: u64, elapsed: Duration) -> u64 {
 /// not a runtime condition.
 #[must_use]
 pub fn bench(depth: u32) -> BenchReport {
+    // Build the magic slider tables before timing
+    lattice_board::init_tables();
     let entries = SUITE
         .iter()
         .map(|&(name, fen)| {

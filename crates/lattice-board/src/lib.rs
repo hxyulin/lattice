@@ -7,10 +7,12 @@
 
 mod bitboard;
 mod board;
+mod magic;
 mod r#move;
 mod movegen;
 mod movelist;
 mod piece;
 mod square;
 
+pub use magic::init_tables;
 pub use {bitboard::*, board::*, r#move::*, movelist::*, piece::*, square::*};

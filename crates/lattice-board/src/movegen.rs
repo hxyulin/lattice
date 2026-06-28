@@ -57,40 +57,8 @@ const KING_ATTACKS: [Bitboard; 64] = {
     table
 };
 
-const ROOK_DIRS: [(i8, i8); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-
-/// Sliding attacks by stepping along `dirs` until the board edge or the first
-/// occupied square (which is included - it's a capture or a friendly blocker,
-/// sorted out by the caller's `& !friendly`).
-///
-/// This is the simple, obviously-correct slider. Magic bitboards will later
-/// replace it behind the same signature for speed.
-fn ray_attacks(from: Square, occ: Bitboard, dirs: &[(i8, i8)]) -> Bitboard {
-    let mut attacks = Bitboard::EMPTY;
-    for &(df, dr) in dirs {
-        let mut f = from.file() as i8 + df;
-        let mut r = from.rank() as i8 + dr;
-        while (0..8).contains(&f) && (0..8).contains(&r) {
-            let sq = Square::new(r as u8, f as u8);
-            attacks.set(sq);
-            if occ.contains(sq) {
-                break;
-            }
-            f += df;
-            r += dr;
-        }
-    }
-    attacks
-}
-
-fn rook_attacks(from: Square, occ: Bitboard) -> Bitboard {
-    ray_attacks(from, occ, &ROOK_DIRS)
-}
-
-fn bishop_attacks(from: Square, occ: Bitboard) -> Bitboard {
-    ray_attacks(from, occ, &BISHOP_DIRS)
-}
+// Sliding attacks via the magic-bitboard tables: one multiply-shift-load per query.
+use crate::magic::{bishop_attacks, rook_attacks};
 
 /// Squares attacked by a set of `color` pawns, as raw bits.
 ///
