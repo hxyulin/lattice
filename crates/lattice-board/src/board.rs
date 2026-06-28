@@ -119,7 +119,7 @@ impl Not for CastlingRights {
 pub struct Board {
     /// Piece bitboards, index corresponds with [`Piece::as_u8']
     bitboards: [Bitboard; 12],
-    en_passent: Option<Square>,
+    en_passant: Option<Square>,
     castling_rights: CastlingRights,
     side_to_move: Color,
     half_move_clock: u8,
@@ -132,7 +132,7 @@ pub struct Board {
 pub struct Undo {
     captured_piece: Option<Piece>,
     castling_rights: CastlingRights,
-    en_passent: Option<Square>,
+    en_passant: Option<Square>,
     half_move_clock: u8,
 }
 
@@ -174,7 +174,7 @@ impl Board {
 
         Self {
             bitboards,
-            en_passent: None,
+            en_passant: None,
             castling_rights: CastlingRights::ALL,
             side_to_move: Color::White,
             half_move_clock: 0,
@@ -189,7 +189,7 @@ impl Board {
     pub const fn empty() -> Self {
         Self {
             bitboards: [Bitboard::EMPTY; 12],
-            en_passent: None,
+            en_passant: None,
             castling_rights: CastlingRights::ALL,
             side_to_move: Color::White,
             half_move_clock: 0,
@@ -248,7 +248,7 @@ impl Board {
     #[inline]
     #[must_use]
     pub fn en_passant(&self) -> Option<Square> {
-        self.en_passent
+        self.en_passant
     }
 
     /// The castling rights still available to either side.
@@ -312,7 +312,7 @@ impl Board {
         let undo = Undo {
             captured_piece,
             castling_rights: self.castling_rights,
-            en_passent: self.en_passent,
+            en_passant: self.en_passant,
             half_move_clock: self.half_move_clock,
         };
 
@@ -328,17 +328,14 @@ impl Board {
         }
 
         // The en-passant target lives for exactly one ply: clear it, re-arm on double pawn push
-        self.en_passent = None;
+        self.en_passant = None;
 
         match flag {
             MoveFlag::DoublePawnPush => {
-                // En passent target rank is 3 for White, 6 for Black
-                //
-                // Branchless rank calculation:
-                // White: 2 + (3 * 0) = 2 (Rank 3)
-                // Black: 2 + (3 * 1) = 5 (Rank 6)
+                // En-passant target rank, branchless: White 2+3*0=2 (rank 3),
+                // Black 2+3*1=5 (rank 6).
                 let ep_rank = 2 + (3 * us.as_u8());
-                self.en_passent = Some(Square::new(ep_rank, mv.src().file()));
+                self.en_passant = Some(Square::new(ep_rank, mv.src().file()));
             }
             MoveFlag::KingCastle | MoveFlag::QueenCastle => {
                 let (rook_src, rook_dest) = castle_rook_squares(us, flag);
@@ -413,7 +410,7 @@ impl Board {
         }
 
         self.castling_rights = undo.castling_rights;
-        self.en_passent = undo.en_passent;
+        self.en_passant = undo.en_passant;
         self.half_move_clock = undo.half_move_clock;
     }
 
@@ -471,7 +468,7 @@ pub enum ParseFenError {
     InvalidPlacement,
     /// The en-passant field was not `-` or a square on rank 3 or 6.
     #[error("en passant target was not `-` or a square on rank 3 or 6")]
-    InvalidEnpassentSquare,
+    InvalidEnPassantSquare,
     /// A numeric field overflowed or contained no digits.
     #[error("numeric field was empty or overflowed")]
     InvalidNumber,
@@ -507,7 +504,7 @@ impl Board {
         if !cur.next_field()? {
             return Ok(board);
         }
-        board.en_passent = cur.parse_en_passant()?;
+        board.en_passant = cur.parse_en_passant()?;
         if !cur.next_field()? {
             return Ok(board);
         }
@@ -677,10 +674,10 @@ impl FenCursor<'_> {
         let file = self.bump().ok_or(ParseFenError::IncompleteFen)?;
         let rank = self.bump().ok_or(ParseFenError::IncompleteFen)?;
         let square =
-            Square::from_ascii(&[file, rank]).map_err(|_| ParseFenError::InvalidEnpassentSquare)?;
+            Square::from_ascii(&[file, rank]).map_err(|_| ParseFenError::InvalidEnPassantSquare)?;
         // A real en passant target is always on rank 3 (index 2) or 6 (index 5).
         if square.rank() != 2 && square.rank() != 5 {
-            return Err(ParseFenError::InvalidEnpassentSquare);
+            return Err(ParseFenError::InvalidEnPassantSquare);
         }
         Ok(Some(square))
     }
@@ -912,7 +909,7 @@ mod tests {
         assert_eq!(board.half_move_clock, 0);
         assert_eq!(board.full_moves, 1);
         assert_eq!(board.castling_rights, CastlingRights::ALL);
-        assert_eq!(board.en_passent, None);
+        assert_eq!(board.en_passant, None);
         // 32 pieces at the start, and the white king sits on e1.
         let occupied: u32 = board.bitboards.iter().map(|bb| bb.count()).sum();
         assert_eq!(occupied, 32);
@@ -924,7 +921,7 @@ mod tests {
     fn parses_en_passant_and_clocks() {
         let fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 1 2";
         let board = Board::from_fen(fen.as_bytes()).expect("valid fen should parse");
-        assert_eq!(board.en_passent, ep("e6"));
+        assert_eq!(board.en_passant, ep("e6"));
         assert_eq!(board.half_move_clock, 1);
         assert_eq!(board.full_moves, 2);
 
@@ -943,7 +940,7 @@ mod tests {
         let board = Board::from_fen(b"8/8/8/8/8/8/8/8 b").expect("partial fen should parse");
         assert_eq!(board.side_to_move, Color::Black);
         assert_eq!(board.castling_rights, CastlingRights::NONE);
-        assert_eq!(board.en_passent, None);
+        assert_eq!(board.en_passant, None);
         assert_eq!(board.half_move_clock, 0);
         assert_eq!(board.full_moves, 1);
     }
@@ -959,7 +956,7 @@ mod tests {
             (b"8/8/8/8/8/8/8/8 x", UnexpectedChar(0)),  // bad side-to-move byte
             (b"8/8/8/8/8/8/8/8 ", IncompleteFen),       // separator, then nothing
             (b"8/8/8/8/8/8/8/8 w KK", InvalidCastlingRights), // duplicate right
-            (b"8/8/8/8/8/8/8/8 w KQkq e4", InvalidEnpassentSquare), // ep off rank 3/6
+            (b"8/8/8/8/8/8/8/8 w KQkq e4", InvalidEnPassantSquare), // ep off rank 3/6
             (b"8/8/8/8/8/8/8/8 w KQkq - 99999999999 1", InvalidNumber), // u32 overflow
             (b"8/8/8/8/8/8/8/8 w KQkq - 300 1", InvalidHalfMoveClock), // > u8::MAX
             (b"8/8/8/8/8/8/8/8 w KQkq - 0 0", InvalidFullMove), // full-move 0
@@ -984,9 +981,9 @@ mod tests {
         let board = Board::from_fen(b"8/8/8/8/8/8/8/8 w KQkq e3 255 65535").expect("valid fen");
         assert_eq!(board.half_move_clock, 255);
         assert_eq!(board.full_moves, 65535);
-        assert_eq!(board.en_passent, ep("e3"));
+        assert_eq!(board.en_passant, ep("e3"));
 
         let board = Board::from_fen(b"8/8/8/8/8/8/8/8 b - c6").expect("valid fen");
-        assert_eq!(board.en_passent, ep("c6"));
+        assert_eq!(board.en_passant, ep("c6"));
     }
 }
