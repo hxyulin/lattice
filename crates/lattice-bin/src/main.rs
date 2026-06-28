@@ -132,21 +132,25 @@ fn limits_from_go(go: &Go, stm: Color) -> Limits {
 fn print_bench(depth: u32) {
     let report = bench(depth);
     println!(
-        "{:<11} {:>5} {:>12} {:>12}",
-        "position", "depth", "nodes", "nps"
+        "{:<11} {:>5} {:>12} {:>12} {:>12} {:>12}",
+        "position", "depth", "nodes", "qnodes", "nps", "qnps"
     );
     for e in &report.entries {
         println!(
-            "{:<11} {:>5} {:>12} {:>12}",
+            "{:<11} {:>5} {:>12} {:>12} {:>12} {:>12}",
             e.name,
             depth,
             e.nodes,
+            e.qnodes,
             nps(e.nodes, e.elapsed),
+            nps(e.qnodes, e.elapsed),
         );
     }
     println!();
-    println!("Nodes searched: {}", report.total_nodes());
-    println!("Nodes/second:   {}", report.nps());
+    println!("Nodes searched:   {}", report.total_nodes());
+    println!("Q-nodes searched: {}", report.total_qnodes());
+    println!("Nodes/second:     {}", report.nps());
+    println!("Q-nodes/second:   {}", report.qnps());
     println!("{} nodes {} nps", report.total_nodes(), report.nps());
 }
 

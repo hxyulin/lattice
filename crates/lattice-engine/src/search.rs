@@ -3,6 +3,7 @@
 //!  - Alpha-beta pruning
 //!  - MVV-LVA capture move ordering
 //!  - Iterative-deepening
+//!  - Quiescence search
 
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,9 @@ use crate::{MATE, Score, evaluate};
 /// Upper bound on iterative-deepening depth when no explicit depth cap is given;
 /// bounds the loop so the search always terminates.
 pub const MAX_PLY: u32 = 64;
+
+/// Hard cap on quiescence recursion depth
+const MAX_QPLY: u32 = 32;
 
 /// Stopping conditions for a [`search`].
 ///
@@ -76,8 +80,11 @@ pub struct SearchResult {
     pub best_move: Option<Move>,
     /// Score of the position from the side-to-move's perspective
     pub score: Score,
-    /// Nodes visited during the search
+    /// Nodes visited during the search (including quiescence nodes)
     pub nodes: u64,
+    /// Subset of [`Self::nodes`] spent in quiescence. Split out for debugging -
+    /// a runaway ratio flags a quiescence explosion.
+    pub qnodes: u64,
     /// The deepest iterative-deepening iteration that completed. Less than the
     /// requested depth when a node or time budget aborted the search.
     pub depth: u32,
@@ -92,6 +99,7 @@ pub struct SearchResult {
 pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
     let mut searcher = Searcher {
         nodes: 0,
+        qnodes: 0,
         node_limit: limits.nodes,
         deadline: limits.move_time.map(|t| Instant::now() + t),
         stopped: false,
@@ -115,6 +123,7 @@ pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
         best_move,
         score,
         nodes: searcher.nodes,
+        qnodes: searcher.qnodes,
         depth: completed,
     }
 }
@@ -122,6 +131,9 @@ pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
 /// Mutable search state threaded through the recursion
 struct Searcher {
     nodes: u64,
+    /// Subset of `nodes` spent in [`Searcher::quiescence`]. Surfaced in
+    /// [`SearchResult`] for debugging the quiescence/main-search split.
+    qnodes: u64,
     /// Stop once `nodes` reaches this. `None` = unlimited.
     node_limit: Option<u64>,
     /// Wall-clock stop time. `None` = unlimited.
@@ -219,7 +231,9 @@ impl Searcher {
         }
 
         if depth == 0 {
-            return evaluate(board);
+            // Resolve pending captures before evaluating, so the static eval
+            // only ever sees a quiet position (no piece hanging mid-exchange).
+            return self.quiescence(board, 0, alpha, beta);
         }
 
         let mut best = -MATE;
@@ -256,6 +270,58 @@ impl Searcher {
             } else {
                 0
             };
+        }
+
+        best
+    }
+
+    /// Quiescence search: resolve captures and promotions from a leaf until the
+    /// position is quiet, then evaluate. Fixes the horizon problem.
+    ///
+    /// # Notes
+    /// Bounded by the stand-pat cutoff (`evaluate` is a lower bound, since the
+    /// side can decline to capture), captures/promotions only (every ply removes
+    /// material), and the [`MAX_QPLY`] cap; `should_stop` bounds it by time/nodes.
+    fn quiescence(&mut self, board: &mut Board, qply: u32, mut alpha: Score, beta: Score) -> Score {
+        self.nodes += 1;
+        self.qnodes += 1;
+        if self.should_stop() {
+            return 0; // abort: the whole partial iteration is discarded
+        }
+
+        // Stand-pat: the score if the side to move makes no capture at all. It's
+        // a lower bound on this node (a quiet move is always available in a real
+        // game), so it seeds `best` and gates the alpha-beta window.
+        let stand_pat = evaluate(board);
+        let mut best = stand_pat;
+        if best >= beta {
+            return best; // already too good; the opponent won't enter this line
+        }
+        if qply >= MAX_QPLY {
+            return best; // hard depth backstop
+        }
+        alpha = alpha.max(best);
+
+        // No capture-only generator: generate all moves and filter to
+        // captures/promotions below.
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
+        moves.sort_by_key(|&m| -order_score(board, m, None));
+        for mv in &moves {
+            if !(mv.flag().is_capture() || mv.flag().is_promotion()) {
+                continue; // quiet move: not searched in quiescence
+            }
+            let undo = board.make_move(*mv);
+            if board.is_legal() {
+                let score = -self.quiescence(board, qply + 1, -beta, -alpha);
+                if score >= beta {
+                    board.unmake_move(*mv, undo);
+                    return score; // fail-soft beta cutoff
+                }
+                best = best.max(score);
+                alpha = alpha.max(best);
+            }
+            board.unmake_move(*mv, undo);
         }
 
         best
@@ -340,6 +406,22 @@ mod tests {
         let r = search(&mut b, &Limits::to_depth(1));
         assert_eq!(r.best_move, None);
         assert_eq!(r.score, 0);
+    }
+
+    #[test]
+    fn quiescence_avoids_a_defended_capture() {
+        // White is up a queen for two pawns. Qxd5 grabs a pawn but the d5 pawn
+        // is defended by c6 - c6xd5 wins the queen back. A depth-1 search WITHOUT
+        // quiescence stops right after Qxd5 and scores it +800 (a "free" pawn on
+        // top of the queen), so it plays the blunder. With quiescence the
+        // recapture is resolved, Qxd5 scores as losing the queen, and the engine
+        // keeps its material instead.
+        let mut b = board("4k3/8/2p5/3p4/8/8/8/3QK3 w - - 0 1");
+        let r = search(&mut b, &Limits::to_depth(1));
+        let mv = r.best_move.expect("a legal move exists");
+        assert_ne!(mv.to(), sq("d5"), "must not grab the defended pawn");
+        assert!(r.score < 800, "no phantom won pawn: {}", r.score);
+        assert!(r.qnodes > 0, "leaves should reach quiescence");
     }
 
     #[test]
