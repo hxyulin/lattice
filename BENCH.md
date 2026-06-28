@@ -64,3 +64,52 @@ drops ~28% (11.9M -> 8.6M) - the per-node cost of sorting (`sort_by_key` re-runs
 the key during comparisons). Net wall-clock is still ~3.7x faster. If NPS
 matters later: `sort_by_cached_key`, or score once and lazy-select the max per
 iteration so an early cutoff skips the full sort.
+
+## Frontier ordering guardrail
+
+Ordering is skipped at the depth-1 frontier (`ORDER_MIN_DEPTH = 2`). That layer
+holds the most nodes, but its children are leaves (static eval), so sorting it
+costs more than the few sibling evals it saves. Sweep at depth 5:
+
+| `ORDER_MIN_DEPTH` | what | nodes | nps | wall |
+|------------------:|------|------:|----:|-----:|
+| 1 | order everywhere       | 1,147,271 |  4.8M | 239ms |
+| **2** | **skip depth-1 frontier** | 1,597,733 | 10.0M | **160ms** |
+| 3 | skip depth <= 2         | 3,837,692 | 10.7M | 359ms |
+
+Threshold 2 wins: ~2x NPS for a modest node increase -> ~1.5x faster wall-clock.
+Threshold 3 explodes the node count - depth-2 subtrees are large enough that a
+cutoff there saves an exponential amount, so ordering stays essential. The win
+grows with depth (negligible at d4, clear at d5), so it matters more as search
+deepens.
+
+## Current baseline (depth 5 & 6)
+
+The reference for future work, measured on the current engine
+(alpha-beta + MVV-LVA + frontier guardrail). As the engine speeds up, depth 4
+finishes too fast to be a useful signal - depth 5/6 are the comparison points
+going forward. Node counts remain the deterministic signature; NPS is M3 Pro.
+
+Depth 5 (~0.17s):
+
+| position  | nodes     | nps (M3 Pro) |
+|-----------|----------:|-------------:|
+| startpos  |   236,809 |   12,227,448 |
+| kiwipete  |   339,220 |    8,789,904 |
+| endgame   |    22,502 |   10,886,308 |
+| position4 |    39,265 |    8,788,048 |
+| position5 |   287,237 |    9,408,660 |
+| position6 |   672,700 |   10,683,373 |
+| **total** | **1,597,733** | **10,112,746** |
+
+Depth 6 (~1.6s):
+
+| position  | nodes     | nps (M3 Pro) |
+|-----------|----------:|-------------:|
+| startpos  |   933,184 |   12,387,453 |
+| kiwipete  | 3,905,909 |    9,325,272 |
+| endgame   |    82,908 |   11,386,897 |
+| position4 |   559,457 |   10,128,485 |
+| position5 | 1,785,429 |    8,753,819 |
+| position6 | 9,269,531 |   10,653,065 |
+| **total** | **16,536,418** | **10,140,108** |
