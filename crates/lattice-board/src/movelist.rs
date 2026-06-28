@@ -2,7 +2,7 @@
 //! replacement for `Vec<Move>` on the movegen and search hot paths.
 
 use std::mem::MaybeUninit;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 use crate::Move;
 
@@ -90,6 +90,16 @@ impl Deref for MoveList {
     }
 }
 
+impl DerefMut for MoveList {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Move] {
+        // SAFETY: `push` initializes `moves[0..len]` in order and `len` never
+        // exceeds that prefix. `MaybeUninit<Move>` shares `Move`'s layout, and
+        // `Move` is `Copy` (no `Drop`), so reinterpreting the prefix is sound.
+        unsafe { std::slice::from_raw_parts_mut(self.moves.as_mut_ptr().cast::<Move>(), self.len) }
+    }
+}
+
 impl<'a> IntoIterator for &'a MoveList {
     type Item = &'a Move;
     type IntoIter = std::slice::Iter<'a, Move>;
@@ -137,9 +147,6 @@ impl IntoIterator for MoveList {
     }
 }
 
-// Compile-time invariants: capacity covers the legal maximum, the struct is an
-// exact 512-byte cache-line tile (no padding), and the layout we documented
-// actually holds (`len` first, 128-aligned).
 const _: () = assert!(MoveList::CAPACITY >= 218);
 const _: () = assert!(std::mem::size_of::<MoveList>() == 512);
 const _: () = assert!(std::mem::align_of::<MoveList>() == 128);

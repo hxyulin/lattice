@@ -1,8 +1,9 @@
 //! Recursive search of game state using the following techniques to speed up and rank moves:
 //!  - Negamax (minimax)
 //!  - Alpha-beta pruning
+//!  - MVV-LVA capture move ordering
 
-use lattice_board::{Board, Move};
+use lattice_board::{Board, Move, MoveFlag, PieceType};
 
 use crate::{MATE, Score, evaluate};
 
@@ -35,7 +36,9 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     let mut best = -MATE;
 
     // same as negamax loop but records the best move
-    for mv in &board.pseudo_legal_moves() {
+    let mut moves = board.pseudo_legal_moves();
+    moves.sort_by_key(|&m| -(order_score(board, m)));
+    for mv in &moves {
         let undo = board.make_move(*mv);
         if board.is_current_state_legal() {
             let score = -searcher.negamax(board, depth - 1, 1, -MATE, MATE);
@@ -88,7 +91,9 @@ impl Searcher {
         let mut best = -MATE;
         let mut legal = 0u32;
 
-        for mv in &board.pseudo_legal_moves() {
+        let mut moves = board.pseudo_legal_moves();
+        moves.sort_by_key(|&m| -(order_score(board, m)));
+        for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_current_state_legal() {
                 legal += 1;
@@ -116,6 +121,21 @@ impl Searcher {
 
         best
     }
+}
+
+const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
+fn order_score(board: &Board, mv: Move) -> i32 {
+    if !mv.flag().is_capture() {
+        return 0; // quiet moves last - killers/history will slot in here later
+    }
+    let attacker = board.piece_at(mv.src()).unwrap().piece();
+    let victim = if mv.flag() == MoveFlag::EnPassant {
+        PieceType::Pawn // captured pawn sits beside dest, not on it
+    } else {
+        board.piece_at(mv.dest()).unwrap().piece()
+    };
+    VAL[victim as usize] * 100 - VAL[attacker as usize] // MVV dominates, LVA breaks ties
 }
 
 #[cfg(test)]
