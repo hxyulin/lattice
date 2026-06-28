@@ -130,3 +130,17 @@ NPS is M3 Pro, `--release`, and noisy run-to-run - read the trend, not the digit
 
 The in-place move buffer was a **no-op on NPS** - the optimizer already elided
 the 512-byte return copy (NRVO). 
+
+# Quiescience Search baseline
+
+New baseline for Quiescience search (depth 4)
+
+| position | nodes | qnodes | nps | qnps |
+|----------|-------|--------|-----|------|
+| startpos|115960|57628|26420596|13130097|
+|kiwipete|7625308|7498048|3124242|3072101|
+|endgame|21296|12752|17023181|10193445|
+|position4|383061|366403|3757857|3594441|
+|position5|548382|450045|4836587|3969280|
+|position6|1972203|1832558|4229590|3930107|
+| **total** | **10666210** | **10217434** | **3409982** | **3266508** |
