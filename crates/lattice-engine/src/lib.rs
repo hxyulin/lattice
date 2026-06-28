@@ -4,9 +4,11 @@
 //! - [`eval`] - evaluation
 //! - [`search`] - negamax search with legality filter
 
+mod bench;
 mod eval;
 mod search;
 
+pub use bench::{BenchEntry, BenchReport, bench, nps};
 pub use eval::evaluate;
 pub use search::{SearchResult, search};
 

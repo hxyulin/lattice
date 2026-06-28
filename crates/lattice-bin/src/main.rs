@@ -4,13 +4,25 @@ use std::io::{self, BufReader};
 use std::time::Instant;
 
 use lattice_board::{Board, Move};
-use lattice_engine::{MATE, Score, search};
+use lattice_engine::{MATE, Score, bench, nps, search};
 use lattice_uci::{StartPos, UciCommand, UciInterface, UciMove};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
 const DEFAULT_DEPTH: u32 = 4;
 
+/// Depth for `lattice bench [depth]` when none is given.
+const DEFAULT_BENCH_DEPTH: u32 = 4;
+
 fn main() -> io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("bench") {
+        let depth = std::env::args()
+            .nth(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_BENCH_DEPTH);
+        print_bench(depth);
+        return Ok(());
+    }
+
     let stdin = io::stdin();
     let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::stdout().lock());
     let mut board = Board::starting_position();
@@ -77,6 +89,31 @@ fn main() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Run the fixed-suite search benchmark to `depth` and print a human-readable
+/// table plus the conventional `Nodes searched` / `Nodes/second` summary lines.
+///
+/// Node counts are deterministic (a build signature); NPS is machine-dependent.
+fn print_bench(depth: u32) {
+    let report = bench(depth);
+    println!(
+        "{:<11} {:>5} {:>12} {:>12}",
+        "position", "depth", "nodes", "nps"
+    );
+    for e in &report.entries {
+        println!(
+            "{:<11} {:>5} {:>12} {:>12}",
+            e.name,
+            depth,
+            e.nodes,
+            nps(e.nodes, e.elapsed),
+        );
+    }
+    println!();
+    println!("Nodes searched: {}", report.total_nodes());
+    println!("Nodes/second:   {}", report.nps());
+    println!("{} nodes {} nps", report.total_nodes(), report.nps());
 }
 
 /// Format a score as a UCI `score` field: `cp <centipawns>` for a normal score,
