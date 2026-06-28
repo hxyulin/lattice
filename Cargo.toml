@@ -4,7 +4,9 @@ members = [
   "crates/lattice-board",
   "crates/lattice-engine",
   "crates/lattice-uci",
+  "crates/lattice-bin",
 ]
+default-members = ["crates/lattice-bin"]
 
 [workspace.package]
 version = "0.0.0"

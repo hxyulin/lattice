@@ -262,6 +262,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-bin"
+version = "0.0.0"
+dependencies = [
+ "lattice-board",
+ "lattice-engine",
+ "lattice-uci",
+]
+
+[[package]]
 name = "lattice-board"
 version = "0.0.0"
 dependencies = [
