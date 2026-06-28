@@ -81,6 +81,18 @@ pub enum UciCommand {
     },
     /// `go ...` - start calculating.
     Go(Go),
+    /// `setoption name <name> [value <value>]` - set an engine option.
+    ///
+    /// # Notes
+    ///
+    /// `name` and `value` are raw strings (each may contain spaces); `value` is
+    /// absent for button-type options.
+    SetOption {
+        /// The option's name, as sent (e.g. `Hash`).
+        name: BString,
+        /// The option's value, if any (e.g. `64`).
+        value: Option<BString>,
+    },
     /// `stop` - stop calculating and report `bestmove`.
     Stop,
     /// `quit` - terminate.
@@ -109,8 +121,47 @@ pub fn parse_command(line: &[u8]) -> UciCommand {
         b"quit" => UciCommand::Quit,
         b"position" => parse_position(toks),
         b"go" => UciCommand::Go(parse_go(toks)),
+        b"setoption" => parse_setoption(toks),
         _ => UciCommand::Unknown(BString::from(line)),
     }
+}
+
+/// Parse `setoption name <name...> [value <value...>]`.
+///
+/// Name and value may each span several tokens (they can contain spaces); a
+/// missing/empty name yields [`UciCommand::Unknown`].
+fn parse_setoption<'a>(mut toks: impl Iterator<Item = &'a [u8]>) -> UciCommand {
+    if toks.next() != Some(b"name") {
+        return UciCommand::Unknown(BString::from(&b"setoption"[..]));
+    }
+    let mut name = BString::default();
+    let mut hit_value = false;
+    for t in toks.by_ref() {
+        if t == b"value" {
+            hit_value = true;
+            break;
+        }
+        if !name.is_empty() {
+            name.push(b' ');
+        }
+        name.extend_from_slice(t);
+    }
+    let value = if hit_value {
+        let mut v = BString::default();
+        for t in toks {
+            if !v.is_empty() {
+                v.push(b' ');
+            }
+            v.extend_from_slice(t);
+        }
+        Some(v)
+    } else {
+        None
+    };
+    if name.is_empty() {
+        return UciCommand::Unknown(BString::from(&b"setoption"[..]));
+    }
+    UciCommand::SetOption { name, value }
 }
 
 fn parse_position<'a>(mut toks: impl Iterator<Item = &'a [u8]>) -> UciCommand {
@@ -280,6 +331,30 @@ mod tests {
             panic!()
         };
         assert_eq!(moves[0].promo, Some(PieceType::Queen));
+    }
+
+    #[test]
+    fn parses_setoption() {
+        let UciCommand::SetOption { name, value } = parse_command(b"setoption name Hash value 64")
+        else {
+            panic!()
+        };
+        assert_eq!(name, "Hash");
+        assert_eq!(value.unwrap(), "64");
+
+        // A button-type option: no value.
+        let UciCommand::SetOption { name, value } = parse_command(b"setoption name Clear Hash")
+        else {
+            panic!()
+        };
+        assert_eq!(name, "Clear Hash"); // multi-word name preserved
+        assert_eq!(value, None);
+
+        // Malformed (no `name`) falls through to Unknown.
+        assert!(matches!(
+            parse_command(b"setoption Hash 64"),
+            UciCommand::Unknown(_)
+        ));
     }
 
     #[test]

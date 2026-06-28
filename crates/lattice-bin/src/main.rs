@@ -19,6 +19,10 @@ const DEFAULT_BENCH_DEPTH: u32 = 4;
 /// Used until a GUI overrides it via `setoption name Hash`; matches the
 /// advertised `Hash` default.
 const DEFAULT_HASH_MB: usize = 16;
+/// Smallest accepted `Hash` value (MB) - one bucket-array still allocates.
+const MIN_HASH_MB: usize = 1;
+/// Largest accepted `Hash` value (MB). A sanity cap, not a hardware limit.
+const MAX_HASH_MB: usize = 1024;
 
 fn main() -> io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("bench") {
@@ -45,10 +49,28 @@ fn main() -> io::Result<()> {
                 lattice_board::init_tables();
                 uci.send("id name lattice-engine").map_err(io_err)?;
                 uci.send("id author hxyulin").map_err(io_err)?;
+                uci.send(&format!(
+                    "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
+                ))
+                .map_err(io_err)?;
                 uci.send("uciok").map_err(io_err)?;
             }
             UciCommand::IsReady => uci.send("readyok").map_err(io_err)?,
-            UciCommand::NewGame => board = Board::starting_position(),
+            UciCommand::NewGame => {
+                board = Board::starting_position();
+                tt.clear(); // a new game shares nothing with the last
+            }
+            UciCommand::SetOption { name, value } => {
+                // Only `Hash` (in MB) is supported; ignore anything else, per UCI.
+                if name.eq_ignore_ascii_case(b"Hash")
+                    && let Some(mb) = value
+                        .as_ref()
+                        .and_then(|v| std::str::from_utf8(v).ok())
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    tt.resize(mb.clamp(MIN_HASH_MB, MAX_HASH_MB));
+                }
+            }
             UciCommand::Position { start, moves } => {
                 let base = match start {
                     StartPos::Startpos => Some(Board::starting_position()),

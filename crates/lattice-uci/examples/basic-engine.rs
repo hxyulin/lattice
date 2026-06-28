@@ -48,7 +48,8 @@ fn main() -> io::Result<()> {
                     uci.send("bestmove 0000").map_err(io_err)?;
                 }
             }
-            UciCommand::Stop => {} // nothing to stop while single-threaded
+            UciCommand::SetOption { .. } => {} // no options in this minimal example
+            UciCommand::Stop => {}             // nothing to stop while single-threaded
             UciCommand::Quit => break,
             UciCommand::Unknown(_) => {} // UCI: ignore unrecognized input
         }
