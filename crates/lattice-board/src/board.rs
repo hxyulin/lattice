@@ -274,6 +274,30 @@ impl Board {
         }
     }
 
+    /// Is `color`'s king attacked by the opposing side?
+    ///
+    /// # Notes
+    /// `in_check(side_to_move)` answers "am I in check"; `in_check(side_to_move.flip())`
+    /// answers "did the side that just moved leave its own king in check".
+    #[must_use]
+    pub fn in_check(&self, color: Color) -> bool {
+        let king_sq = self
+            .bitboard_for(Piece::new(color, PieceType::King))
+            .first_square()
+            .expect("king must be on the board");
+        self.is_attacked(king_sq, color.flip())
+    }
+
+    /// Is the position legal - i.e. is the side that *just moved* out of check?
+    ///
+    /// # Notes
+    /// Call right after [`Board::make_move`]: it has already flipped `side_to_move`,
+    /// so the mover is now the side not to move.
+    #[must_use]
+    pub fn is_current_state_legal(&self) -> bool {
+        !self.in_check(self.side_to_move.flip())
+    }
+
     /// Apply `mv` in place, returning the [`Undo`] needed to revert it.
     ///
     /// # Notes
@@ -391,6 +415,15 @@ impl Board {
         self.castling_rights = undo.castling_rights;
         self.en_passent = undo.en_passent;
         self.half_move_clock = undo.half_move_clock;
+    }
+
+    /// An iterator over all occupied squares and their pieces, in square-index
+    /// (LERF) order: a1, b1, ... h8.
+    pub fn piece_iter(&self) -> impl Iterator<Item = (Square, Piece)> + '_ {
+        self.pieces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &p)| p.map(|piece| (Square::from_index(i as u8), piece)))
     }
 }
 

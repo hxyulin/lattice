@@ -93,6 +93,17 @@ impl Bitboard {
     pub const fn iter(self) -> Squares {
         Squares(self.0)
     }
+
+    /// The lowest-indexed occupied square (LERF, a1-first), or `None` if empty.
+    #[inline]
+    #[must_use]
+    pub const fn first_square(self) -> Option<Square> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(Square::from_index(self.0.trailing_zeros() as u8))
+        }
+    }
 }
 
 impl BitAnd for Bitboard {
