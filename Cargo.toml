@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/lattice-board",
+  "crates/lattice-engine",
+  "crates/lattice-uci",
+]
+
+[workspace.package]
+version = "0.0.0"
+authors = ["hxyulin <hxyulin@proton.me>"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/hxyulin/lattice"
+
+[workspace.dependencies]
+lattice-board = { path = "crates/lattice-board", version = "0.0.0" }
+lattice-engine = { path = "crates/lattice-engine", version = "0.0.0" }
+lattice-uci = { path = "crates/lattice-uci", version = "0.0.0" }
+
+bstr = "1"
+
+[workspace.lints.rust]
+
+[workspace.lints.clippy]
+all = "warn"

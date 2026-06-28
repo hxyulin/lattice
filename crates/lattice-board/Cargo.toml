@@ -1,0 +1,23 @@
+[package]
+name = "lattice-board"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nonmax = "0.5"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "core_benches"
+harness = false
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
