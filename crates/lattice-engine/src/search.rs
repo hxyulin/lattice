@@ -2,6 +2,7 @@
 //!  - Negamax (minimax)
 //!  - Alpha-beta pruning
 //!  - MVV-LVA capture move ordering
+//!  - Iterative-deepening
 
 use lattice_board::{Board, Move, MoveFlag, MoveList, PieceType};
 
@@ -32,33 +33,13 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     }
 
     let mut searcher = Searcher { nodes: 0 };
-    let mut best_move = None;
-    let mut best = -MATE;
+    let mut best_move: Option<Move> = None;
+    let mut score = -MATE;
 
-    // same as negamax loop but records the best move
-    let mut moves = MoveList::new();
-    board.generate_moves(&mut moves);
-    moves.sort_by_key(|&m| -(order_score(board, m)));
-    for mv in &moves {
-        let undo = board.make_move(*mv);
-        if board.is_legal() {
-            let score = -searcher.negamax(board, depth - 1, 1, -MATE, MATE);
-            if score > best {
-                best = score;
-                best_move = Some(*mv);
-            }
-        }
-        board.unmake_move(*mv, undo);
+    // iterative-deepening
+    for d in 1..=depth {
+        (best_move, score) = searcher.search_root(board, d, best_move);
     }
-
-    // No legal move at the root: checkmate (in check) or stalemate (draw).
-    let score = if best_move.is_some() {
-        best
-    } else if board.in_check(board.side_to_move()) {
-        -MATE
-    } else {
-        0
-    };
 
     SearchResult {
         best_move,
@@ -73,6 +54,44 @@ struct Searcher {
 }
 
 impl Searcher {
+    /// Search the root to `depth` plies, returning the best move and its score.
+    ///
+    /// `hint` - the best move from the previous iterative-deepening iteration
+    fn search_root(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        hint: Option<Move>,
+    ) -> (Option<Move>, Score) {
+        let mut best_move = None;
+        let mut best = -MATE;
+
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
+        moves.sort_by_key(|&m| -order_score(board, m, hint));
+        for mv in &moves {
+            let undo = board.make_move(*mv);
+            if board.is_legal() {
+                let score = -self.negamax(board, depth - 1, 1, -MATE, MATE);
+                if score > best {
+                    best = score;
+                    best_move = Some(*mv);
+                }
+            }
+            board.unmake_move(*mv, undo);
+        }
+
+        // No legal move at the root: checkmate (in check) or stalemate (draw).
+        let score = if best_move.is_some() {
+            best
+        } else if board.in_check(board.side_to_move()) {
+            -MATE
+        } else {
+            0
+        };
+        (best_move, score)
+    }
+
     /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
     /// from the root, used only to make mate scores prefer shorter mates.
     fn negamax(
@@ -95,7 +114,9 @@ impl Searcher {
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
         if depth >= ORDER_MIN_DEPTH {
-            moves.sort_by_key(|&m| -(order_score(board, m)));
+            // No hint at interior nodes yet - per-node best moves need a
+            // transposition table, which is the next step after this.
+            moves.sort_by_key(|&m| -(order_score(board, m, None)));
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
@@ -136,7 +157,18 @@ const ORDER_MIN_DEPTH: u32 = 2;
 
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
-fn order_score(board: &Board, mv: Move) -> i32 {
+/// Ordering bonus that floats the previous iteration's best move ahead of every
+/// capture.
+///
+/// # Notes
+/// Well above the ~90k MVV-LVA ceiling and nowhere near i32 overflow, so ordering
+/// scores need no bit-packing.
+const PV_BONUS: i32 = 1_000_000;
+
+fn order_score(board: &Board, mv: Move, hint: Option<Move>) -> i32 {
+    if Some(mv) == hint {
+        return PV_BONUS; // last iteration's best move: searched first
+    }
     if !mv.flag().is_capture() {
         return 0; // quiet moves last - killers/history will slot in here later
     }
