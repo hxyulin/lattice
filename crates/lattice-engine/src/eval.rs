@@ -3,28 +3,36 @@
 //! Evaluate the position based on several factors and techniques, currently including:
 //!  - material value
 
-use lattice_board::Board;
+use lattice_board::{Board, Color, Piece, PieceType};
 
 use crate::Score;
 
 /// Centipawn values indexed by PieceType
 /// King is `0`: it cannot be captured, so it adds nothing to the material balance.
-const PIECE_VALUES: [Score; 6] = [100, 300, 300, 500, 900, 0];
+const SCORED: [(PieceType, Score); 5] = [
+    (PieceType::Pawn, 100),
+    (PieceType::Knight, 300),
+    (PieceType::Bishop, 300),
+    (PieceType::Rook, 500),
+    (PieceType::Queen, 900),
+];
 
 /// Static evaluation of `board`, from the side-to-move's perspective
 #[must_use]
 pub fn evaluate(board: &Board) -> Score {
-    let us = board.side_to_move();
-    let mut score = 0;
-
-    for (_square, piece) in board.piece_iter() {
-        let value = PIECE_VALUES[piece.piece() as usize];
-        // Branchless sign: +1 for our pieces, -1 for theirs.
-        let sign = (piece.color() == us) as Score * 2 - 1;
-        score += value * sign;
+    let mut score = 0; // from White's perspective
+    for (pt, value) in SCORED {
+        let white = board.bitboard_for(Piece::new(Color::White, pt)).count() as Score;
+        let black = board.bitboard_for(Piece::new(Color::Black, pt)).count() as Score;
+        score += value * (white - black);
     }
 
-    score
+    // Flip into the side-to-move's frame, the convention negamax negates across.
+    if board.side_to_move() == Color::Black {
+        -score
+    } else {
+        score
+    }
 }
 
 #[cfg(test)]

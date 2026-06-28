@@ -113,3 +113,15 @@ Depth 6 (~1.6s):
 | position5 | 1,785,429 |    8,753,819 |
 | position6 | 9,269,531 |   10,653,065 |
 | **total** | **16,536,418** | **10,140,108** |
+
+## NPS optimizations
+
+Pure-speed work: each of these keeps the node counts above **byte-identical**
+(the deterministic signature is the proof the change is behaviour-preserving)
+and only moves NPS. Node totals stay D5 1,597,733 / D6 16,536,418 throughout.
+NPS is M3 Pro, `--release`, and noisy run-to-run - read the trend, not the digit.
+
+| change | D5 nps | D6 nps |
+|--------|-------:|-------:|
+| baseline (mailbox eval, ray-step sliders) | 10.1M | 10.1M |
+| bitboard eval (10 popcounts, no mailbox walk) | 19.0M | 24.9M |
