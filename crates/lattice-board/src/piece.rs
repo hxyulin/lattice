@@ -163,42 +163,42 @@ impl Piece {
     #[inline]
     #[must_use]
     pub const fn is_pawn(self) -> bool {
-        matches!(self.piece(), PieceType::Pawn)
+        matches!(self.kind(), PieceType::Pawn)
     }
 
     /// Is this a knight (of either color)?
     #[inline]
     #[must_use]
     pub const fn is_knight(self) -> bool {
-        matches!(self.piece(), PieceType::Knight)
+        matches!(self.kind(), PieceType::Knight)
     }
 
     /// Is this a bishop (of either color)?
     #[inline]
     #[must_use]
     pub const fn is_bishop(self) -> bool {
-        matches!(self.piece(), PieceType::Bishop)
+        matches!(self.kind(), PieceType::Bishop)
     }
 
     /// Is this a rook (of either color)?
     #[inline]
     #[must_use]
     pub const fn is_rook(self) -> bool {
-        matches!(self.piece(), PieceType::Rook)
+        matches!(self.kind(), PieceType::Rook)
     }
 
     /// Is this a queen (of either color)?
     #[inline]
     #[must_use]
     pub const fn is_queen(self) -> bool {
-        matches!(self.piece(), PieceType::Queen)
+        matches!(self.kind(), PieceType::Queen)
     }
 
     /// Is this a king (of either color)?
     #[inline]
     #[must_use]
     pub const fn is_king(self) -> bool {
-        matches!(self.piece(), PieceType::King)
+        matches!(self.kind(), PieceType::King)
     }
 
     /// Build a piece from its packed `(piece_type << 1) | color` byte (`0..12`).
@@ -220,7 +220,7 @@ impl Piece {
     /// This piece's type, ignoring color.
     #[inline]
     #[must_use]
-    pub const fn piece(self) -> PieceType {
+    pub const fn kind(self) -> PieceType {
         PieceType::from_u8(self.as_u8() >> 1)
     }
 
@@ -236,7 +236,7 @@ impl std::fmt::Debug for Piece {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Piece")
             .field("color", &self.color())
-            .field("piece", &self.piece())
+            .field("piece", &self.kind())
             .finish()
     }
 }
@@ -248,7 +248,7 @@ const _: () = assert!(std::mem::size_of::<Option<Piece>>() == 1);
 const _: () = {
     let p = Piece::from_u8(7); // (Rook << 1) | Black
     assert!(matches!(p.color(), Color::Black));
-    assert!(matches!(p.piece(), PieceType::Rook));
+    assert!(matches!(p.kind(), PieceType::Rook));
     assert!(matches!(Color::White.flip(), Color::Black));
 };
 
@@ -276,7 +276,7 @@ mod tests {
         for (i, (color, piece)) in PIECE_INDICES.iter().enumerate() {
             let piece_from_u8 = Piece::from_u8(i as u8);
             assert_eq!(piece_from_u8.color(), *color);
-            assert_eq!(piece_from_u8.piece(), *piece);
+            assert_eq!(piece_from_u8.kind(), *piece);
         }
     }
 
@@ -285,7 +285,7 @@ mod tests {
         for (i, (color, piece)) in PIECE_INDICES.iter().enumerate() {
             let piece_from_constructor = Piece::new(*color, *piece);
             assert_eq!(piece_from_constructor.color(), *color);
-            assert_eq!(piece_from_constructor.piece(), *piece);
+            assert_eq!(piece_from_constructor.kind(), *piece);
             assert_eq!(piece_from_constructor.as_u8(), i as u8);
         }
     }

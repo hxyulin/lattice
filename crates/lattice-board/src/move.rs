@@ -149,14 +149,14 @@ impl Move {
     /// The square the moving piece starts on.
     #[inline]
     #[must_use]
-    pub const fn src(&self) -> Square {
+    pub const fn from(&self) -> Square {
         Square::from_index((self.0.get() & 63) as u8)
     }
 
     /// The square the moving piece ends on.
     #[inline]
     #[must_use]
-    pub const fn dest(&self) -> Square {
+    pub const fn to(&self) -> Square {
         Square::from_index(((self.0.get() >> 6) & 63) as u8)
     }
 
@@ -164,7 +164,7 @@ impl Move {
     #[inline]
     #[must_use]
     pub const fn is_null(self) -> bool {
-        self.src().index() == self.dest().index()
+        self.from().index() == self.to().index()
     }
 
     /// The move's kind (capture, promotion, castle, ...).
@@ -180,7 +180,7 @@ const _: () = assert!(std::mem::size_of::<Option<Move>>() == 2);
 
 impl std::fmt::Display for Move {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}", self.src(), self.dest())?;
+        write!(f, "{}{}", self.from(), self.to())?;
         if let Some(pt) = self.flag().promoted_piece() {
             f.write_char(match pt {
                 PieceType::Knight => 'n',
@@ -197,8 +197,8 @@ impl std::fmt::Display for Move {
 impl std::fmt::Debug for Move {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Move")
-            .field("src", &self.src())
-            .field("dest", &self.dest())
+            .field("src", &self.from())
+            .field("dest", &self.to())
             .field("flag", &self.flag())
             .finish()
     }
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn null_move_is_recognized() {
         assert!(Move::NULL.is_null());
-        assert_eq!(Move::NULL.src(), Move::NULL.dest());
+        assert_eq!(Move::NULL.from(), Move::NULL.to());
         let real = Move::new(
             Square::from_index(12),
             Square::from_index(28),
@@ -266,8 +266,8 @@ mod tests {
         let dst_s = Square::new(3, 4); // e4
         let quiet_move = Move::new(src_s, dst_s, MoveFlag::Quiet);
 
-        assert_eq!(quiet_move.src(), src_s);
-        assert_eq!(quiet_move.dest(), dst_s);
+        assert_eq!(quiet_move.from(), src_s);
+        assert_eq!(quiet_move.to(), dst_s);
         assert_eq!(quiet_move.flag(), MoveFlag::Quiet);
 
         let expected_u16 = (src_s.index() as u16)
@@ -281,8 +281,8 @@ mod tests {
         let src = Square::new(6, 0); // a7
         let dst = Square::new(7, 7); // h8
         let capture_move = Move::new(src, dst, MoveFlag::Capture);
-        assert_eq!(capture_move.src(), src);
-        assert_eq!(capture_move.dest(), dst);
+        assert_eq!(capture_move.from(), src);
+        assert_eq!(capture_move.to(), dst);
         assert!(capture_move.flag().is_capture());
 
         let src_promo = Square::new(6, 1); // b7
@@ -298,8 +298,8 @@ mod tests {
         let dst_a1 = Square::new(0, 0);
 
         let quiet_move = Move::new(src_h8, dst_a1, MoveFlag::Quiet);
-        assert_eq!(quiet_move.src(), src_h8);
-        assert_eq!(quiet_move.dest(), dst_a1);
+        assert_eq!(quiet_move.from(), src_h8);
+        assert_eq!(quiet_move.to(), dst_a1);
 
         let capture_move = Move::new(src_h8, dst_a1, MoveFlag::Capture);
         assert!(capture_move.flag().is_capture());

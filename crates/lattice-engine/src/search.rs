@@ -41,7 +41,7 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     moves.sort_by_key(|&m| -(order_score(board, m)));
     for mv in &moves {
         let undo = board.make_move(*mv);
-        if board.is_current_state_legal() {
+        if board.is_legal() {
             let score = -searcher.negamax(board, depth - 1, 1, -MATE, MATE);
             if score > best {
                 best = score;
@@ -99,7 +99,7 @@ impl Searcher {
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
-            if board.is_current_state_legal() {
+            if board.is_legal() {
                 legal += 1;
                 let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
                 if score >= beta {
@@ -140,11 +140,11 @@ fn order_score(board: &Board, mv: Move) -> i32 {
     if !mv.flag().is_capture() {
         return 0; // quiet moves last - killers/history will slot in here later
     }
-    let attacker = board.piece_at(mv.src()).unwrap().piece();
+    let attacker = board.piece_at(mv.from()).unwrap().kind();
     let victim = if mv.flag() == MoveFlag::EnPassant {
         PieceType::Pawn // captured pawn sits beside dest, not on it
     } else {
-        board.piece_at(mv.dest()).unwrap().piece()
+        board.piece_at(mv.to()).unwrap().kind()
     };
     VAL[victim as usize] * 100 - VAL[attacker as usize] // MVV dominates, LVA breaks ties
 }
@@ -168,8 +168,8 @@ mod tests {
         let mut b = board("4k3/8/8/8/8/3q4/4P3/4K3 w - - 0 1");
         let r = search(&mut b, 1);
         let mv = r.best_move.expect("a legal move exists");
-        assert_eq!(mv.src(), sq("e2"));
-        assert_eq!(mv.dest(), sq("d3"));
+        assert_eq!(mv.from(), sq("e2"));
+        assert_eq!(mv.to(), sq("d3"));
         assert_eq!(r.score, 100);
     }
 
@@ -181,7 +181,7 @@ mod tests {
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
         let r = search(&mut b, 2);
         assert_eq!(
-            r.best_move.map(|m| (m.src(), m.dest())),
+            r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
         );
         assert_eq!(r.score, MATE - 1); // mate delivered one ply from the root

@@ -63,7 +63,7 @@ fn resolve(board: &Board, um: UciMove) -> Option<Move> {
     board
         .pseudo_legal_moves()
         .into_iter()
-        .find(|m| m.src() == um.from && m.dest() == um.to && m.flag().promoted_piece() == um.promo)
+        .find(|m| m.from() == um.from && m.to() == um.to && m.flag().promoted_piece() == um.promo)
 }
 
 fn io_err(e: lattice_uci::UciError) -> io::Error {

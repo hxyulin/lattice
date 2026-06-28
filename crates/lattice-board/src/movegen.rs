@@ -7,9 +7,7 @@
 //! [`Board::is_attacked`], because the king may not start in, pass through, or
 //! land on an attacked square - a rule no destination-only filter can reconstruct.
 
-use crate::{
-    Bitboard, Board, CastlingRights, Color, Move, MoveFlag, MoveList, Piece, PieceType, Square,
-};
+use crate::{Bitboard, Board, CastlingRights, Color, Move, MoveFlag, MoveList, PieceType, Square};
 
 const NOT_FILE_A: u64 = !0x0101_0101_0101_0101;
 const NOT_FILE_H: u64 = !0x8080_8080_8080_8080;
@@ -136,7 +134,7 @@ impl Board {
 
         self.gen_pawns(us, enemy, occ, moves);
 
-        for from in *self.bitboard_for(Piece::new(us, PieceType::Knight)) {
+        for from in self.pieces(us, PieceType::Knight) {
             push_targets(
                 from,
                 KNIGHT_ATTACKS[from.index() as usize] & !friendly,
@@ -144,7 +142,7 @@ impl Board {
                 moves,
             );
         }
-        for from in *self.bitboard_for(Piece::new(us, PieceType::King)) {
+        for from in self.pieces(us, PieceType::King) {
             push_targets(
                 from,
                 KING_ATTACKS[from.index() as usize] & !friendly,
@@ -152,13 +150,13 @@ impl Board {
                 moves,
             );
         }
-        for from in *self.bitboard_for(Piece::new(us, PieceType::Bishop)) {
+        for from in self.pieces(us, PieceType::Bishop) {
             push_targets(from, bishop_attacks(from, occ) & !friendly, enemy, moves);
         }
-        for from in *self.bitboard_for(Piece::new(us, PieceType::Rook)) {
+        for from in self.pieces(us, PieceType::Rook) {
             push_targets(from, rook_attacks(from, occ) & !friendly, enemy, moves);
         }
-        for from in *self.bitboard_for(Piece::new(us, PieceType::Queen)) {
+        for from in self.pieces(us, PieceType::Queen) {
             let attacks = (rook_attacks(from, occ) | bishop_attacks(from, occ)) & !friendly;
             push_targets(from, attacks, enemy, moves);
         }
@@ -217,7 +215,7 @@ impl Board {
         for &mv in &moves {
             let undo = self.make_move(mv);
             let king = self
-                .bitboard_for(Piece::new(us, PieceType::King))
+                .pieces(us, PieceType::King)
                 .iter()
                 .next()
                 .expect("side to move always has a king");
@@ -252,7 +250,7 @@ impl Board {
         for &mv in &moves {
             let undo = self.make_move(mv);
             let king = self
-                .bitboard_for(Piece::new(us, PieceType::King))
+                .pieces(us, PieceType::King)
                 .iter()
                 .next()
                 .expect("side to move always has a king");
@@ -272,31 +270,31 @@ impl Board {
     #[must_use]
     pub fn is_attacked(&self, sq: Square, by: Color) -> bool {
         let i = sq.index() as usize;
-        let knights = self.bitboard_for(Piece::new(by, PieceType::Knight)).bits();
+        let knights = self.pieces(by, PieceType::Knight).bits();
         if KNIGHT_ATTACKS[i].bits() & knights != 0 {
             return true;
         }
-        let king = self.bitboard_for(Piece::new(by, PieceType::King)).bits();
+        let king = self.pieces(by, PieceType::King).bits();
         if KING_ATTACKS[i].bits() & king != 0 {
             return true;
         }
-        let pawns = self.bitboard_for(Piece::new(by, PieceType::Pawn)).bits();
+        let pawns = self.pieces(by, PieceType::Pawn).bits();
         if pawn_attacks(1u64 << i, by.flip()) & pawns != 0 {
             return true;
         }
         let occ = self.occupied();
-        let queens = self.bitboard_for(Piece::new(by, PieceType::Queen)).bits();
-        let bishops = self.bitboard_for(Piece::new(by, PieceType::Bishop)).bits();
+        let queens = self.pieces(by, PieceType::Queen).bits();
+        let bishops = self.pieces(by, PieceType::Bishop).bits();
         if bishop_attacks(sq, occ).bits() & (bishops | queens) != 0 {
             return true;
         }
-        let rooks = self.bitboard_for(Piece::new(by, PieceType::Rook)).bits();
+        let rooks = self.pieces(by, PieceType::Rook).bits();
         rook_attacks(sq, occ).bits() & (rooks | queens) != 0
     }
 
     /// Generate pawn moves.
     fn gen_pawns(&self, us: Color, enemy: Bitboard, occ: Bitboard, out: &mut MoveList) {
-        let pawns = self.bitboard_for(Piece::new(us, PieceType::Pawn)).bits();
+        let pawns = self.pieces(us, PieceType::Pawn).bits();
         let empty = !occ.bits();
         let ep_bb = self.en_passant().map_or(0, |s| 1u64 << s.index());
 
@@ -417,7 +415,7 @@ mod tests {
             .filter(|m| m.flag() == MoveFlag::EnPassant)
             .collect::<Vec<_>>();
         assert_eq!(ep.len(), 1);
-        assert_eq!(ep[0].dest(), Square::from_ascii(b"c6").unwrap());
+        assert_eq!(ep[0].to(), Square::from_ascii(b"c6").unwrap());
     }
 
     fn sq(s: &str) -> Square {

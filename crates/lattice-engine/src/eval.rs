@@ -3,7 +3,7 @@
 //! Evaluate the position based on several factors and techniques, currently including:
 //!  - material value
 
-use lattice_board::{Board, Color, Piece, PieceType};
+use lattice_board::{Board, Color, PieceType};
 
 use crate::Score;
 
@@ -22,8 +22,8 @@ const SCORED: [(PieceType, Score); 5] = [
 pub fn evaluate(board: &Board) -> Score {
     let mut score = 0; // from White's perspective
     for (pt, value) in SCORED {
-        let white = board.bitboard_for(Piece::new(Color::White, pt)).count() as Score;
-        let black = board.bitboard_for(Piece::new(Color::Black, pt)).count() as Score;
+        let white = board.pieces(Color::White, pt).count() as Score;
+        let black = board.pieces(Color::Black, pt).count() as Score;
         score += value * (white - black);
     }
 

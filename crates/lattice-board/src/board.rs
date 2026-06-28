@@ -211,6 +211,17 @@ impl Board {
         &mut self.bitboards[piece.as_u8() as usize]
     }
 
+    /// The bitboard of all `color` pieces of `kind`.
+    ///
+    /// # Notes
+    /// Returned by value (a `Bitboard` is `Copy`) so call sites can iterate or
+    /// mask it without a deref.
+    #[inline]
+    #[must_use]
+    pub fn pieces(&self, color: Color, kind: PieceType) -> Bitboard {
+        *self.bitboard_for(Piece::new(color, kind))
+    }
+
     /// Every occupied square, regardless of color.
     #[must_use]
     pub fn occupied(&self) -> Bitboard {
@@ -282,7 +293,7 @@ impl Board {
     #[must_use]
     pub fn in_check(&self, color: Color) -> bool {
         let king_sq = self
-            .bitboard_for(Piece::new(color, PieceType::King))
+            .pieces(color, PieceType::King)
             .first_square()
             .expect("king must be on the board");
         self.is_attacked(king_sq, color.flip())
@@ -294,7 +305,7 @@ impl Board {
     /// Call right after [`Board::make_move`]: it has already flipped `side_to_move`,
     /// so the mover is now the side not to move.
     #[must_use]
-    pub fn is_current_state_legal(&self) -> bool {
+    pub fn is_legal(&self) -> bool {
         !self.in_check(self.side_to_move.flip())
     }
 
@@ -308,7 +319,7 @@ impl Board {
         let flag = mv.flag();
         // For en passant the captured pawn is *not* on `dest`, so this is `None`;
         // it is reconstructed in `unmake_move` instead.
-        let captured_piece = self.piece_at(mv.dest());
+        let captured_piece = self.piece_at(mv.to());
         let undo = Undo {
             captured_piece,
             castling_rights: self.castling_rights,
@@ -317,7 +328,7 @@ impl Board {
         };
 
         let mut piece = self
-            .piece_at(mv.src())
+            .piece_at(mv.from())
             .expect("move source must be occupied");
 
         // Halfmove clock resets on a pawn move or any capture, else ticks up.
@@ -335,7 +346,7 @@ impl Board {
                 // En-passant target rank, branchless: White 2+3*0=2 (rank 3),
                 // Black 2+3*1=5 (rank 6).
                 let ep_rank = 2 + (3 * us.as_u8());
-                self.en_passant = Some(Square::new(ep_rank, mv.src().file()));
+                self.en_passant = Some(Square::new(ep_rank, mv.from().file()));
             }
             MoveFlag::KingCastle | MoveFlag::QueenCastle => {
                 let (rook_src, rook_dest) = castle_rook_squares(us, flag);
@@ -346,7 +357,7 @@ impl Board {
                 // Captured pawn sits beside `dest`, on the mover's 5th/4th rank.
                 // Branchless: White 4-0=4 (rank 5), Black 4-1=3 (rank 4).
                 let cap_rank = 4 - us.as_u8();
-                self.remove_piece(Square::new(cap_rank, mv.dest().file()));
+                self.remove_piece(Square::new(cap_rank, mv.to().file()));
             }
             f if f.is_promotion() => {
                 piece = Piece::new(us, f.promoted_piece().expect("promotion flag"));
@@ -356,12 +367,11 @@ impl Board {
 
         // Clear any castling right invalidated by leaving `from` or landing on `to`.
         self.castling_rights &=
-            CASTLE_MASK[mv.src().index() as usize] & CASTLE_MASK[mv.dest().index() as usize];
+            CASTLE_MASK[mv.from().index() as usize] & CASTLE_MASK[mv.to().index() as usize];
 
-        self.remove_piece(mv.src());
-        // clears a captured piece (no-op if empty)
-        self.remove_piece(mv.dest());
-        self.put_piece(mv.dest(), piece);
+        self.remove_piece(mv.from());
+        self.remove_piece(mv.to()); // clears a captured piece (no-op if empty)
+        self.put_piece(mv.to(), piece);
 
         if us == Color::Black {
             self.full_moves += 1;
@@ -386,7 +396,7 @@ impl Board {
         let moved = if flag.is_promotion() {
             Piece::new(us, PieceType::Pawn)
         } else {
-            self.piece_at(mv.dest())
+            self.piece_at(mv.to())
                 .expect("move destination must be occupied")
         };
 
@@ -396,17 +406,17 @@ impl Board {
             self.put_piece(rook_src, Piece::new(us, PieceType::Rook));
         }
 
-        self.remove_piece(mv.dest());
-        self.put_piece(mv.src(), moved);
+        self.remove_piece(mv.to());
+        self.put_piece(mv.from(), moved);
 
         if flag == MoveFlag::EnPassant {
             let cap_rank = if us == Color::White { 4 } else { 3 };
             self.put_piece(
-                Square::new(cap_rank, mv.dest().file()),
+                Square::new(cap_rank, mv.to().file()),
                 Piece::new(us.flip(), PieceType::Pawn),
             );
         } else if let Some(captured) = undo.captured_piece {
-            self.put_piece(mv.dest(), captured);
+            self.put_piece(mv.to(), captured);
         }
 
         self.castling_rights = undo.castling_rights;
