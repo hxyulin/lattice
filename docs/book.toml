@@ -1,0 +1,9 @@
+[book]
+title = "Lattice"
+authors = ["hxyulin"]
+description = "A UCI chess engine written in Rust, documented as it is built."
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/hxyulin/lattice"
