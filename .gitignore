@@ -2,3 +2,6 @@
 /.claude/*
 /.worktrees
 /docs/book
+
+# fastchess writes this on each run
+/config.json
