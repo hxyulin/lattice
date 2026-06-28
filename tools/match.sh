@@ -12,7 +12,11 @@ cd "$(dirname "$0")/.."
 ELO="${1:-1400}"           # Stockfish UCI_Elo anchor (min 1320)
 GAMES="${2:-100}"          # total games; each opening played twice, colours swapped
 TC="${3:-8+0.08}"          # time control both engines obey, seconds+increment
-BOOK="${4:-tools/openings.epd}"
+BOOKS_DIR="${BOOKS_DIR:-$HOME/dev/chess-data/books}"
+# Default to the Fishtest-standard UHO book; fall back to the in-repo stub.
+DEFAULT_BOOK="$BOOKS_DIR/UHO_4060_v3.epd"
+[ -f "$DEFAULT_BOOK" ] || DEFAULT_BOOK="tools/openings.epd"
+BOOK="${4:-$DEFAULT_BOOK}"
 
 command -v fastchess >/dev/null || { echo "fastchess not found in PATH" >&2; exit 1; }
 command -v stockfish >/dev/null || { echo "stockfish not found in PATH" >&2; exit 1; }
