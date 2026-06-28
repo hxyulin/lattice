@@ -7,10 +7,12 @@
 mod bench;
 mod eval;
 mod search;
+mod tt;
 
 pub use bench::{BenchEntry, BenchReport, bench, nps};
 pub use eval::evaluate;
 pub use search::{Limits, MAX_PLY, SearchResult, budget, search};
+pub use tt::{Bound, Entry, TranspositionTable};
 
 /// A position score in centipawns,
 pub type Score = i32;

@@ -30,6 +30,18 @@ impl ZobristHash {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// Wrap a raw 64-bit value as a hash; the inverse of [`Self::get`].
+    ///
+    /// # Notes
+    ///
+    /// For reconstructing a hash from a serialized form or for tests. Normal
+    /// code gets a hash from [`Board::zobrist`](crate::Board::zobrist).
+    #[inline]
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 impl fmt::Debug for ZobristHash {
