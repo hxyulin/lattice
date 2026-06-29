@@ -169,6 +169,7 @@ fn limits_from_go(go: &Go, stm: Color) -> Limits {
         depth: go.depth,
         nodes: go.nodes,
         move_time,
+        stop: None, // set by the caller when a worker thread runs the search
     };
 
     if !go.infinite
