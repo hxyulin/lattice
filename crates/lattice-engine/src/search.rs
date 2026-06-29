@@ -225,7 +225,7 @@ impl Searcher<'_> {
             }
             let undo = board.make_move(*mv);
             if board.is_legal() {
-                let score = -self.negamax(board, depth - 1, 1, -MATE, MATE);
+                let score = -self.negamax(board, depth - 1, 1, -MATE, MATE, true);
                 if score > best {
                     best = score;
                     best_move = Some(*mv);
@@ -254,6 +254,7 @@ impl Searcher<'_> {
         ply: u32,
         mut alpha: Score,
         beta: Score,
+        can_null: bool,
     ) -> Score {
         self.nodes += 1;
         if self.should_stop() {
@@ -285,6 +286,32 @@ impl Searcher<'_> {
             }
         }
 
+        // Null-move pruning. Pass to the opponent; if a reduced zero-window search
+        // still beats beta, the real move would too, so prune. Skipped without
+        // non-pawn material: pawn-only endgames are where zugzwang makes a "pass"
+        // misleadingly good.
+        if can_null
+            && depth >= NMP_MIN_DEPTH
+            && !board.in_check(board.side_to_move())
+            && has_non_pawn_material(board, board.side_to_move())
+        {
+            let undo = board.make_null_move();
+            let score = -self.negamax(board, depth - 1 - NMP_R, ply + 1, -beta, -beta + 1, false);
+            board.unmake_null_move(undo);
+            if self.stopped {
+                return 0; // the reduced search was aborted; discard this node
+            }
+            if score >= beta {
+                // Don't propagate a mate score proved only by a reduced null
+                // search - cap it to a plain fail-high so a false mate can't leak.
+                return if score >= MATE - MAX_PLY as Score {
+                    beta
+                } else {
+                    score
+                };
+            }
+        }
+
         let mut best = -MATE;
         let mut best_move = None;
         let mut legal = 0u32;
@@ -302,7 +329,7 @@ impl Searcher<'_> {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
-                let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
+                let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
                 if score > best {
                     best = score;
                     best_move = Some(*mv);
@@ -464,6 +491,32 @@ impl Searcher<'_> {
 const ORDER_MIN_DEPTH: u32 = 2;
 
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
+/// Minimum remaining depth to attempt null-move pruning.
+///
+/// # Notes
+/// Below this the reduced search (`depth - 1 - NMP_R`) is too shallow to trust.
+/// With `NMP_R = 2` the null move bottoms out at depth >= 0 (quiescence).
+const NMP_MIN_DEPTH: u32 = 3;
+
+/// Null-move depth reduction.
+///
+/// # Notes
+/// The free move is searched `1 + NMP_R` plies shallower - deep enough to expose
+/// a refutation, cheap enough to be worth it. `R = 2` is the conservative classic.
+const NMP_R: u32 = 2;
+
+/// Whether `side` has any piece beyond pawns and the king. Null-move pruning is
+/// gated on this because zugzwang - a free "pass" being misleadingly good -
+/// essentially only occurs in pawn-and-king endgames.
+fn has_non_pawn_material(board: &Board, side: lattice_board::Color) -> bool {
+    use PieceType::{Bishop, Knight, Queen, Rook};
+    !(board.pieces(side, Knight)
+        | board.pieces(side, Bishop)
+        | board.pieces(side, Rook)
+        | board.pieces(side, Queen))
+    .is_empty()
+}
 
 // Delta-pruning helpers, disabled with the pruning itself (see `quiescence`).
 //
@@ -636,6 +689,21 @@ mod tests {
             Some((sq("a1"), sq("a8")))
         );
         assert_eq!(r.score, MATE - 1); // mate delivered one ply from the root
+    }
+
+    #[test]
+    fn nmp_preserves_a_mate_at_active_depth() {
+        // The same back-rank mate, but searched to depth 5 - deep enough that
+        // null-move pruning is active in the tree (NMP_MIN_DEPTH = 3). NMP must
+        // not prune the mating move, and the mate-score cap on a null cutoff must
+        // not corrupt the reported mate (still MATE - 1, one ply from the root).
+        let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
+        let r = go(&mut b, &Limits::to_depth(5));
+        assert_eq!(
+            r.best_move.map(|m| (m.from(), m.to())),
+            Some((sq("a1"), sq("a8")))
+        );
+        assert_eq!(r.score, MATE - 1);
     }
 
     #[test]

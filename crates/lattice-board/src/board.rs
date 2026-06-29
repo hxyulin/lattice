@@ -141,6 +141,14 @@ pub struct Undo {
     half_move_clock: u8,
 }
 
+/// The state needed to revert a [`make_null_move`](Board::make_null_move).
+///
+/// # Notes
+/// A null move flips the side and clears en passant; only that square needs
+/// saving to undo it.
+pub struct NullUndo {
+    en_passant: Option<Square>,
+}
 impl Board {
     /// Creates a new board with the starting position.
     ///
@@ -488,6 +496,36 @@ impl Board {
         self.half_move_clock = undo.half_move_clock;
 
         // Toggle the restored (pre-move) state keys back IN (see toggle-OUT above).
+        self.hash.0 ^= self.state_hash();
+    }
+
+    /// Apply a null move: pass the turn to the opponent without moving a piece,
+    /// returning the [`NullUndo`] to revert it.
+    ///
+    /// # Notes
+    /// Flips the side and clears en passant, keeping the hash in sync. Used by
+    /// null-move pruning. The caller must ensure the side to move is not in
+    /// check; passing out of check is illegal.
+    #[must_use]
+    pub fn make_null_move(&mut self) -> NullUndo {
+        let undo = NullUndo {
+            en_passant: self.en_passant,
+        };
+        // Toggle old side/en-passant keys OUT, mutate, toggle new ones IN.
+        self.hash.0 ^= self.state_hash();
+        self.side_to_move = self.side_to_move.flip();
+        self.en_passant = None;
+        self.hash.0 ^= self.state_hash();
+        // half_move_clock is intentionally left untouched: the 50-move rule isn't
+        // consulted in search yet, and it isn't part of the hash.
+        undo
+    }
+
+    /// Revert a [`make_null_move`](Self::make_null_move), given its [`NullUndo`].
+    pub fn unmake_null_move(&mut self, undo: NullUndo) {
+        self.hash.0 ^= self.state_hash();
+        self.side_to_move = self.side_to_move.flip();
+        self.en_passant = undo.en_passant;
         self.hash.0 ^= self.state_hash();
     }
 
@@ -859,6 +897,35 @@ mod tests {
                 "hash not restored after unmake {m}"
             );
         }
+    }
+
+    #[test]
+    fn null_move_round_trips() {
+        // A position with an en-passant square, so we exercise the EP clear/restore.
+        let fen = b"rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3";
+        let mut board = Board::from_fen(fen).unwrap();
+        let before = board.clone();
+
+        let undo = board.make_null_move();
+        // Side flipped, en passant cleared, hash still self-consistent.
+        assert_eq!(board.side_to_move(), Color::Black);
+        assert_eq!(board.en_passant(), None);
+        assert_eq!(
+            board.zobrist(),
+            board.compute_hash(),
+            "hash wrong after null move"
+        );
+        // No piece moved.
+        assert_eq!(board.occupied(), before.occupied());
+
+        board.unmake_null_move(undo);
+        // Exact restoration - side, en passant, hash, everything.
+        assert!(board == before, "null move not fully reverted");
+        assert_eq!(
+            board.zobrist(),
+            board.compute_hash(),
+            "hash wrong after unmake null"
+        );
     }
 
     #[test]
