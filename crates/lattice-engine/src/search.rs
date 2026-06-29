@@ -238,7 +238,7 @@ impl Searcher<'_> {
         if depth == 0 {
             // Resolve pending captures before evaluating, so the static eval
             // only ever sees a quiet position (no piece hanging mid-exchange).
-            return self.quiescence(board, ply, 0, alpha, beta);
+            return self.quiescence(board, 0, alpha, beta);
         }
 
         // Transposition probe. A stored entry whose search was at least as deep
@@ -339,48 +339,25 @@ impl Searcher<'_> {
     /// Bounded by the stand-pat cutoff (`evaluate` is a lower bound, since the
     /// side can decline to capture), captures/promotions only (every ply removes
     /// material), and the [`MAX_QPLY`] cap; `should_stop` bounds it by time/nodes.
-    fn quiescence(
-        &mut self,
-        board: &mut Board,
-        ply: u32,
-        qply: u32,
-        mut alpha: Score,
-        beta: Score,
-    ) -> Score {
+    fn quiescence(&mut self, board: &mut Board, qply: u32, mut alpha: Score, beta: Score) -> Score {
         self.nodes += 1;
         self.qnodes += 1;
         if self.should_stop() {
             return 0; // abort: the whole partial iteration is discarded
         }
 
-        // Transposition probe. A qnode's remaining depth is 0, so any stored
-        // entry (depth >= 0) is deep enough to cut it - no depth gate, unlike
-        // `negamax`. Probing before `evaluate` lets a hit skip the stand-pat.
-        let hash = board.zobrist();
-        let mut tt_move = None;
-        if let Some(e) = self.tt.probe(hash) {
-            tt_move = e.best();
-            let s = e.score(ply);
-            match e.bound() {
-                Bound::Exact => return s,
-                Bound::Lower if s >= beta => return s,
-                Bound::Upper if s <= alpha => return s,
-                _ => {}
-            }
-        }
+        // Quiescence is not probed. A probe+store (git b51739e) measured
+        // strength-neutral at this engine's ~3M nps: the per-qnode probe cost
+        // (~-18% NPS) cancels the ~-30% node savings while the eval stays cheap.
+        // Restore with `git cherry-pick b51739e`.
 
         // Stand-pat: the score if the side to move makes no capture at all. It's
         // a lower bound on this node (a quiet move is always available in a real
         // game), so it seeds `best` and gates the alpha-beta window.
-        let orig_alpha = alpha;
         let stand_pat = evaluate(board);
         let mut best = stand_pat;
-        let mut best_move = None;
         if best >= beta {
-            // Already too good; the opponent won't enter this line. Fail-high:
-            // a lower bound on the true score, with no specific best move.
-            self.store(hash, None, best, 0, Bound::Lower, ply);
-            return best;
+            return best; // already too good; the opponent won't enter this line
         }
         if qply >= MAX_QPLY {
             return best; // hard depth backstop
@@ -391,7 +368,7 @@ impl Searcher<'_> {
         // captures/promotions below.
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
-        moves.sort_by_key(|&m| -order_score(board, m, tt_move));
+        moves.sort_by_key(|&m| -order_score(board, m, None));
         for mv in &moves {
             if !(mv.flag().is_capture() || mv.flag().is_promotion()) {
                 continue; // quiet move: not searched in quiescence
@@ -408,30 +385,17 @@ impl Searcher<'_> {
 
             let undo = board.make_move(*mv);
             if board.is_legal() {
-                let score = -self.quiescence(board, ply + 1, qply + 1, -beta, -alpha);
+                let score = -self.quiescence(board, qply + 1, -beta, -alpha);
                 if score >= beta {
                     board.unmake_move(*mv, undo);
-                    // Fail-high: a lower bound; this capture is the best move.
-                    self.store(hash, Some(*mv), score, 0, Bound::Lower, ply);
                     return score; // fail-soft beta cutoff
                 }
-                if score > best {
-                    best = score;
-                    best_move = Some(*mv);
-                }
+                best = best.max(score);
                 alpha = alpha.max(best);
             }
             board.unmake_move(*mv, undo);
         }
 
-        // A capture beat `orig_alpha` -> searched inside the window, exact;
-        // otherwise nothing beat it and `best` is only an upper bound.
-        let bound = if best > orig_alpha {
-            Bound::Exact
-        } else {
-            Bound::Upper
-        };
-        self.store(hash, best_move, best, 0, bound, ply);
         best
     }
 }
@@ -557,34 +521,6 @@ mod tests {
         assert_ne!(mv.to(), sq("d5"), "must not grab the defended pawn");
         assert!(r.score < 800, "no phantom won pawn: {}", r.score);
         assert!(r.qnodes > 0, "leaves should reach quiescence");
-    }
-
-    #[test]
-    fn quiescence_tt_keeps_a_winning_capture() {
-        // White rook d3 takes the undefended Black queen d5 (Black king on e8
-        // is nowhere near). Rxd5 wins the queen for nothing - the engine must
-        // still find it with the quiescence TT live.
-        let mut b = board("4k3/8/8/3q4/8/3R4/8/4K3 w - - 0 1");
-        let r = go(&mut b, &Limits::to_depth(1));
-        let mv = r.best_move.expect("a legal move exists");
-        assert_eq!(mv.from(), sq("d3"));
-        assert_eq!(mv.to(), sq("d5"));
-        assert!(r.score > 400, "should be a rook up: {}", r.score);
-        assert!(r.qnodes > 0, "leaves should reach quiescence");
-    }
-
-    #[test]
-    fn quiescence_stores_depth_zero_entries() {
-        // A capture-rich middlegame: the search descends into quiescence at its
-        // leaves, which must now record depth-0 entries. The main search never
-        // writes depth 0, so any depth-0 entry proves quiescence stored it.
-        let mut b = board("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
-        let mut tt = TranspositionTable::new(8);
-        let _ = search(&mut b, &Limits::to_depth(3), &mut tt);
-        assert!(
-            tt.count_at_depth(0) > 0,
-            "quiescence should write depth-0 entries"
-        );
     }
 
     #[test]
