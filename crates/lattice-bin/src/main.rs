@@ -64,7 +64,7 @@ fn main() -> io::Result<()> {
                 // Spec: do engine init on `uci`. Builds the magic slider tables
                 // now (a few ms) so the first search isn't charged for it.
                 lattice_board::init_tables();
-                emit("id name lattice-engine");
+                emit("id name Lattice");
                 emit("id author hxyulin");
                 emit(&format!(
                     "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
