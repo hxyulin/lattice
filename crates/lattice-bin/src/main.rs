@@ -1,6 +1,6 @@
 //! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
 
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::time::{Duration, Instant};
 
 use lattice_board::{Board, Color, Move};
@@ -45,7 +45,7 @@ fn main() -> io::Result<()> {
     }
 
     let stdin = io::stdin();
-    let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::stdout().lock());
+    let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::sink());
     let mut board = Board::starting_position();
     // Persistent across the session and across moves: each `go` reuses what the
     // previous search learned. `setoption Hash` resizes it; `ucinewgame` clears.
@@ -57,15 +57,14 @@ fn main() -> io::Result<()> {
                 // Spec: do engine init on `uci`. Builds the magic slider tables
                 // now (a few ms) so the first search isn't charged for it.
                 lattice_board::init_tables();
-                uci.send("id name lattice-engine").map_err(io_err)?;
-                uci.send("id author hxyulin").map_err(io_err)?;
-                uci.send(&format!(
+                emit("id name lattice-engine");
+                emit("id author hxyulin");
+                emit(&format!(
                     "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
-                ))
-                .map_err(io_err)?;
-                uci.send("uciok").map_err(io_err)?;
+                ));
+                emit("uciok");
             }
-            UciCommand::IsReady => uci.send("readyok").map_err(io_err)?,
+            UciCommand::IsReady => emit("readyok"),
             UciCommand::NewGame => {
                 board = Board::starting_position();
                 tt.clear(); // a new game shares nothing with the last
@@ -100,11 +99,10 @@ fn main() -> io::Result<()> {
                 if let Some(depth) = go.perft {
                     let mut total = 0;
                     for (mv, n) in board.perft_divide(depth) {
-                        uci.send(&format!("{mv}: {n}")).map_err(io_err)?;
+                        emit(&format!("{mv}: {n}"));
                         total += n;
                     }
-                    uci.send(&format!("\nNodes searched: {total}"))
-                        .map_err(io_err)?;
+                    emit(&format!("\nNodes searched: {total}"));
                 } else {
                     let limits = limits_from_go(&go, board.side_to_move());
                     let start = Instant::now();
@@ -120,13 +118,12 @@ fn main() -> io::Result<()> {
                         .map_or_else(|| "0000".to_string(), |m| m.to_string());
 
                     let nodes = result.nodes;
-                    uci.send(&format!(
+                    emit(&format!(
                         "info depth {} score {} nodes {nodes} nps {nps} pv {pv}",
                         result.depth,
                         format_score(result.score),
-                    ))
-                    .map_err(io_err)?;
-                    uci.send(&format!("bestmove {pv}")).map_err(io_err)?;
+                    ));
+                    emit(&format!("bestmove {pv}"));
                 }
             }
             UciCommand::Stop => {} // nothing to stop while single-threaded
@@ -135,6 +132,20 @@ fn main() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Write one UCI line to stdout, newline-terminated and flushed, under a brief
+/// per-message lock.
+///
+/// # Notes
+/// Locking per call rather than holding a session-long `StdoutLock` lets the
+/// worker emit `info`/`bestmove` while the main thread emits `readyok` without
+/// interleaving mid-line or deadlocking. Write errors are ignored: if the GUI
+/// pipe is gone the read side hits EOF and the loop exits cleanly.
+fn emit(line: &str) {
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 /// Reserve [`MOVE_OVERHEAD`] from an allotted think time, flooring at 1ms.
