@@ -224,6 +224,20 @@ impl TranspositionTable {
     }
 }
 
+#[cfg(test)]
+impl TranspositionTable {
+    /// Test-only: count live entries stored at exactly `depth`. Confirms
+    /// quiescence writes its depth-0 entries - the main search never stores
+    /// depth 0, since `negamax` returns to quiescence before its store path.
+    pub(crate) fn count_at_depth(&self, depth: u8) -> usize {
+        self.buckets
+            .iter()
+            .flat_map(|b| b.entries.iter())
+            .filter(|e| e.age != 0 && e.depth == depth)
+            .count()
+    }
+}
+
 /// Threshold above which a score is a mate score (and needs ply correction):
 /// a real mate is `MATE - dist` with `dist <= MAX_PLY`, so anything this large
 /// is a mate, and no material eval reaches it.
