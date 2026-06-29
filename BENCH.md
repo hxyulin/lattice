@@ -6,6 +6,9 @@ canonical perft positions.
 To compare a new version, re-run the same `bench <depth>` and diff the node
 counts: pruning (alpha-beta, etc.) should cut nodes hard for the same positions.
 
+Per-commit totals live in `bench.csv` (generated from the `Bench:` commit
+trailers by `tools/gen-benchcsv.sh`); the prose below walks the milestones.
+
 ## Baseline - material eval + fixed-depth negamax, no pruning
 
 - Commit: `undetermined` (pre-alpha-beta)
@@ -131,16 +134,59 @@ NPS is M3 Pro, `--release`, and noisy run-to-run - read the trend, not the digit
 The in-place move buffer was a **no-op on NPS** - the optimizer already elided
 the 512-byte return copy (NRVO). 
 
-# Quiescience Search baseline
+## Quiescence search (depth 4)
 
-New baseline for Quiescience search (depth 4)
+Quiescence extends the search past the fixed horizon, resolving captures so the
+static eval is only taken in quiet positions. It *raises* the node count - the
+leaves now spawn a capture search - from 441,085 (iterative deepening) to
+13,800,981 at depth 4. The payoff is tactical (no more horizon-effect blunders),
+so it shows up as Elo, not as fewer nodes.
 
-| position | nodes | qnodes | nps | qnps |
-|----------|-------|--------|-----|------|
-| startpos|115960|57628|26420596|13130097|
-|kiwipete|7625308|7498048|3124242|3072101|
-|endgame|21296|12752|17023181|10193445|
-|position4|383061|366403|3757857|3594441|
-|position5|548382|450045|4836587|3969280|
-|position6|1972203|1832558|4229590|3930107|
-| **total** | **10666210** | **10217434** | **3409982** | **3266508** |
+### Delta pruning (tried, then parked)
+
+Delta pruning skips captures that cannot raise alpha even with a generous
+margin. At depth 4 it cut the suite to 10,666,210 nodes:
+
+| position  | nodes      | qnodes     | nps        | qnps       |
+|-----------|-----------:|-----------:|-----------:|-----------:|
+| startpos  |    115,960 |     57,628 | 26,420,596 | 13,130,097 |
+| kiwipete  |  7,625,308 |  7,498,048 |  3,124,242 |  3,072,101 |
+| endgame   |     21,296 |     12,752 | 17,023,181 | 10,193,445 |
+| position4 |    383,061 |    366,403 |  3,757,857 |  3,594,441 |
+| position5 |    548,382 |    450,045 |  4,836,587 |  3,969,280 |
+| position6 |  1,972,203 |  1,832,558 |  4,229,590 |  3,930,107 |
+| **total** | **10,666,210** | **10,217,434** | **3,409,982** | **3,266,508** |
+
+It was then disabled (back to 13,800,981 nodes): at 3M+ nps the per-node delta
+check cost more wall-clock than the nodes it saved. It is parked, not deleted -
+re-enable it once a richer (slower) eval lowers NPS enough to flip the trade.
+The parked quiescence TT carries the same per-node-overhead-vs-NPS lesson.
+
+## Per-commit node signatures
+
+Node counts are deterministic - a build's fingerprint. Every engine commit
+stamps its depth-4 suite total as a `Bench: <nodes>` trailer (the same number
+OpenBench reads), and `bench.csv` is the committed snapshot of all of them:
+
+    tools/gen-benchcsv.sh > bench.csv
+
+A node-count change across a commit is a behaviour change; an unchanged count
+across a perf/refactor commit is the proof it was behaviour-preserving (the
+magic-bitboard and in-place-buffer commits both hold 318,497 at depth 4).
+
+## Measuring per-feature Elo (OpenBench SPRT)
+
+Bench nodes show *what* a feature did to the tree; they are not Elo. For that,
+SPRT each feature on OpenBench:
+
+- Base = the feature commit's parent, Dev = the feature commit. The linear
+  history makes each commit exactly one feature, so the diff is clean.
+- Node-reducing features (alpha-beta, MVV-LVA, ordering): a fixed-depth or
+  equal-nodes test already shows the gain.
+- Efficiency features (NPS perf, TT, null-move, LMR): test at equal *time*
+  (e.g. `tc=8+0.08`), not equal depth/nodes - the win is searching deeper in
+  the same clock, which an equal-depth test hides.
+
+`make EXE=...` builds `target/release/lattice`; the `bench` final line
+(`<nodes> nodes <nps> nps`) is the OpenBench entrypoint. Push to a GitHub remote
+and tag each feature commit so the base/dev dropdowns read by name.

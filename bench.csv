@@ -1,0 +1,40 @@
+commit,date,subject,bench_nodes
+db3c77e,2026-06-28,"feat: initial chess engine and workspace setup",
+5327eb6,2026-06-28,"feat(engine): material evaluation and fixed-depth negamax search",
+868f60c,2026-06-28,"feat(uci): UCI frontend wiring search to the protocol",
+3067282,2026-06-28,"feat(tools): cross-version SPRT harness",
+59c3fe9,2026-06-28,"feat(bench): search benchmark and OpenBench build entrypoint",11024485
+f7ada76,2026-06-29,"feat(search): alpha-beta pruning",1355172
+f6ebcef,2026-06-28,"feat(search): MVV-LVA capture ordering",283997
+d8ebd62,2026-06-28,"perf(search): skip move ordering at the depth-1 frontier",318497
+f2dca60,2026-06-28,"perf(eval): count material set-wise off the piece bitboards",318497
+7b1e5ff,2026-06-28,"perf(movegen): in-place generate_moves, reuse the buffer in hot paths",318497
+54256b6,2026-06-28,"perf(movegen): magic bitboards for sliding-piece attacks",318497
+083ad82,2026-06-28,"refactor(error): derive Display/Error via thiserror",318497
+fc3a811,2026-06-28,"refactor(core): fix en_passant spelling",318497
+e0d3d4f,2026-06-28,"refactor: API ergonomics",318497
+33b01d4,2026-06-29,"feat(eval): piece-square tables",385468
+dd6aebf,2026-06-29,"feat(search): iterative deepening with root PV-move ordering",441085
+f7ac90b,2026-06-29,"feat(search): time/node/depth Limits for abortable search",441085
+4f947dd,2026-06-29,"chore(tools): create Stockfish calibration gauntlet",441085
+054c03a,2026-06-29,"feat(search): quiescence search at the leaves",13800981
+9e0c4ca,2026-06-29,"perf(search): delta pruning in quiescence",10666210
+444c1bb,2026-06-29,"chore(tools): default to UHO book, bench both builds, adjudicate",10666210
+f1e5627,2026-06-29,"perf(search): disable delta pruning",13800981
+67bcc86,2026-06-29,"feat(core): incremental Zobrist hashing",13800981
+2fa2154,2026-06-29,"feat(engine): transposition table module",13800981
+d5cb81c,2026-06-29,"feat(engine): probe/store the transposition table in negamax",10877065
+331b7a4,2026-06-29,"feat(uci): Hash option to size the transposition table",10877065
+88ab2ea,2026-06-29,"feat(search): probe and store the transposition table in quiescence",7551813
+27ab81e,2026-06-29,"fix(uci): reserve a move-overhead margin to avoid time forfeits",7551813
+003d531,2026-06-29,"refactor(search): park the quiescence TT",10877065
+40b342c,2026-06-29,"feat(search): external stop flag in Limits for threaded UCI",10877065
+e743146,2026-06-29,"refactor(uci): route output through a per-message emit() helper",10877065
+ee6712f,2026-06-29,"feat(uci): run search on a worker thread with an atomic stop flag",10877065
+c544e6d,2026-06-29,"feat(search): killer-move ordering",10875825
+50840fc,2026-06-29,"feat(search): butterfly history heuristic for quiet ordering",10883379
+b01d438,2026-06-29,"feat(search): null-move pruning",10883729
+71ceea0,2026-06-29,"feat(search): late move reductions",10034609
+30b5ad5,2026-06-29,"chore(uci): name the engine ""Lattice""",10034609
+1692ff4,2026-06-29,"docs: refresh CLAUDE.md for the lattice workspace",10034609
+cd6a578,2026-06-29,"chore(dev): stamp Bench trailers via a pre-commit hook",
