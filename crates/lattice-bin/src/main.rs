@@ -24,6 +24,16 @@ const MIN_HASH_MB: usize = 1;
 /// Largest accepted `Hash` value (MB). A sanity cap, not a hardware limit.
 const MAX_HASH_MB: usize = 1024;
 
+/// Wall-clock reserved per move before the think-time deadline.
+///
+/// # Notes
+/// The search polls the clock only every few thousand nodes and must still
+/// unwind and emit `bestmove`, so without a margin it overshoots and forfeits
+/// on time. A fixed 10ms margin is uniform across builds, so it does not skew
+/// equal-time comparisons the way a raw overrun (which scales with each build's
+/// NPS) would.
+const MOVE_OVERHEAD: Duration = Duration::from_millis(10);
+
 fn main() -> io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("bench") {
         let depth = std::env::args()
@@ -127,20 +137,34 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// Reserve [`MOVE_OVERHEAD`] from an allotted think time, flooring at 1ms.
+///
+/// # Notes
+/// A tiny budget still yields a move (depth 1 always completes via the search's
+/// `armed` guard) rather than getting a zero-length deadline.
+fn reserve_overhead(t: Duration) -> Duration {
+    t.saturating_sub(MOVE_OVERHEAD)
+        .max(Duration::from_millis(1))
+}
+
 /// Translate a parsed UCI `go` into engine [`Limits`].
 fn limits_from_go(go: &Go, stm: Color) -> Limits {
-    let move_time = go.movetime.map(Duration::from_millis).or_else(|| {
-        let (remaining, inc) = match stm {
-            Color::White => (go.wtime, go.winc),
-            Color::Black => (go.btime, go.binc),
-        };
-        remaining.map(|r| {
-            budget(
-                Duration::from_millis(r),
-                Duration::from_millis(inc.unwrap_or(0)),
-            )
+    let move_time = go
+        .movetime
+        .map(Duration::from_millis)
+        .or_else(|| {
+            let (remaining, inc) = match stm {
+                Color::White => (go.wtime, go.winc),
+                Color::Black => (go.btime, go.binc),
+            };
+            remaining.map(|r| {
+                budget(
+                    Duration::from_millis(r),
+                    Duration::from_millis(inc.unwrap_or(0)),
+                )
+            })
         })
-    });
+        .map(reserve_overhead);
     let mut limits = Limits {
         depth: go.depth,
         nodes: go.nodes,
@@ -212,5 +236,25 @@ fn resolve(board: &Board, um: UciMove) -> Option<Move> {
 fn io_err(e: lattice_uci::UciError) -> io::Error {
     match e {
         lattice_uci::UciError::Io(e) => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserve_overhead_subtracts_and_floors() {
+        // A normal budget loses exactly the overhead.
+        assert_eq!(
+            reserve_overhead(Duration::from_millis(100)),
+            Duration::from_millis(90)
+        );
+        // A budget at or below the overhead floors at 1ms - never zero - so the
+        // engine still produces a move instead of getting a dead deadline.
+        assert_eq!(
+            reserve_overhead(Duration::from_millis(5)),
+            Duration::from_millis(1)
+        );
     }
 }
