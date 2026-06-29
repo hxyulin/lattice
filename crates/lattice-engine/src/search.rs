@@ -112,6 +112,7 @@ pub fn search(board: &mut Board, limits: &Limits, tt: &mut TranspositionTable) -
         armed: false,
         stop: limits.stop.clone(),
         killers: [[None; 2]; MAX_PLY as usize],
+        history: [[[0; 64]; 64]; 2],
         tt,
     };
     let mut best_move: Option<Move> = None;
@@ -159,6 +160,9 @@ struct Searcher<'a> {
     /// quiets at sibling nodes (see [`order_score`]). Persists across the search;
     /// slot 0 is the most recent.
     killers: [[Option<Move>; 2]; MAX_PLY as usize],
+    /// Butterfly history (`[side][from][to]`): cumulative quiet-cutoff score that
+    /// orders non-killer quiets. Reset per search; saturates at [`HISTORY_MAX`].
+    history: HistoryTable,
     /// Transposition table, owned by the caller and reused across moves. Probed
     /// for cutoffs and a move-ordering hint, and written after each node.
     tt: &'a mut TranspositionTable,
@@ -214,7 +218,7 @@ impl Searcher<'_> {
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
         let killers = self.killers[0];
-        moves.sort_by_key(|&m| -order_score(board, m, hint, killers));
+        moves.sort_by_key(|&m| -order_score(board, m, hint, killers, &self.history));
         for mv in &moves {
             if self.should_stop() {
                 break; // budget hit mid-iteration; `search` discards this depth
@@ -292,7 +296,7 @@ impl Searcher<'_> {
             // shallower, search) is ordered first - the strongest hint there is;
             // then captures, then this ply's killers, then the rest.
             let killers = self.killers[ply as usize];
-            moves.sort_by_key(|&m| -order_score(board, m, tt_move, killers));
+            moves.sort_by_key(|&m| -order_score(board, m, tt_move, killers, &self.history));
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
@@ -305,11 +309,12 @@ impl Searcher<'_> {
                 }
                 if score >= beta {
                     board.unmake_move(*mv, undo);
-                    // A quiet move that fails high is a killer for this ply -
-                    // record it so siblings try it ahead of their other quiets.
-                    // Captures are excluded; MVV-LVA already orders them.
+                    // A quiet move that fails high becomes a killer and earns
+                    // history credit; captures are excluded (MVV-LVA orders them).
+                    // After the unmake, `side_to_move` is the mover again.
                     if !mv.flag().is_capture() && !mv.flag().is_promotion() {
                         self.store_killer(ply, *mv);
+                        self.update_history(board.side_to_move(), *mv, depth);
                     }
                     // Fail-high: `best` is a lower bound on the true score.
                     self.store(hash, best_move, best, depth, Bound::Lower, ply);
@@ -371,6 +376,16 @@ impl Searcher<'_> {
         }
     }
 
+    /// Credit a quiet cutoff move in the butterfly history. The bonus is `depth^2`
+    /// (a cutoff found deeper in the tree was more expensive to discover, so it
+    /// weighs more), saturating at [`HISTORY_MAX`]. `side` is the move's mover.
+    fn update_history(&mut self, side: lattice_board::Color, mv: Move, depth: u32) {
+        let bonus = (depth * depth) as i32;
+        let cell = &mut self.history[side.as_u8() as usize][mv.from().index() as usize]
+            [mv.to().index() as usize];
+        *cell = (*cell + bonus).min(HISTORY_MAX);
+    }
+
     /// Quiescence search: resolve captures and promotions from a leaf until the
     /// position is quiet, then evaluate. Fixes the horizon problem.
     ///
@@ -408,8 +423,8 @@ impl Searcher<'_> {
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
         // Quiescence searches only captures/promotions, so killers (quiet by
-        // definition) never apply here - pass empty slots.
-        moves.sort_by_key(|&m| -order_score(board, m, None, [None, None]));
+        // definition) and history never apply here - pass empty slots.
+        moves.sort_by_key(|&m| -order_score(board, m, None, [None, None], &self.history));
         for mv in &moves {
             if !(mv.flag().is_capture() || mv.flag().is_promotion()) {
                 continue; // quiet move: not searched in quiescence
@@ -488,20 +503,39 @@ const PV_BONUS: i32 = 1_000_000;
 const KILLER_1_BONUS: i32 = 9_000;
 const KILLER_2_BONUS: i32 = 8_000;
 
-fn order_score(board: &Board, mv: Move, hint: Option<Move>, killers: [Option<Move>; 2]) -> i32 {
+/// Butterfly history table: a running `depth^2` count per `[side][from][to]` of
+/// quiet beta-cutoff moves, used to order non-killer quiets (see [`order_score`]).
+type HistoryTable = [[[i32; 64]; 64]; 2];
+
+/// Saturation cap on a history entry.
+///
+/// # Notes
+/// Held one band below [`KILLER_2_BONUS`] so a history-ranked quiet never
+/// outranks a killer, keeping the ordering tiers fixed.
+const HISTORY_MAX: i32 = 7_000;
+
+fn order_score(
+    board: &Board,
+    mv: Move,
+    hint: Option<Move>,
+    killers: [Option<Move>; 2],
+    history: &HistoryTable,
+) -> i32 {
     if Some(mv) == hint {
         return PV_BONUS; // last iteration's best move: searched first
     }
     if !mv.flag().is_capture() {
         // Quiet move: a killer for this ply jumps ahead of the other quiets;
-        // everything else sorts last at 0. (History will refine the 0s next.)
+        // the rest are ranked by history (0 if never a cutoff). History is
+        // capped below the killer band, so the tiers never cross.
         if Some(mv) == killers[0] {
             return KILLER_1_BONUS;
         }
         if Some(mv) == killers[1] {
             return KILLER_2_BONUS;
         }
-        return 0;
+        let side = board.side_to_move().as_u8() as usize;
+        return history[side][mv.from().index() as usize][mv.to().index() as usize];
     }
     let attacker = board.piece_at(mv.from()).unwrap().kind();
     let victim = if mv.flag() == MoveFlag::EnPassant {
@@ -668,13 +702,60 @@ mod tests {
         let killer = quiets[0];
         let other = quiets[1];
         let killers = [Some(killer), None];
+        let empty = [[[0; 64]; 64]; 2];
 
-        let cap_score = order_score(&b, capture, None, killers);
-        let killer_score = order_score(&b, killer, None, killers);
-        let other_score = order_score(&b, other, None, killers);
+        let cap_score = order_score(&b, capture, None, killers, &empty);
+        let killer_score = order_score(&b, killer, None, killers, &empty);
+        let other_score = order_score(&b, other, None, killers, &empty);
 
         assert!(cap_score > killer_score, "captures outrank killers");
         assert!(killer_score > other_score, "killer outranks plain quiets");
         assert_eq!(other_score, 0, "a non-killer quiet scores 0");
+    }
+
+    #[test]
+    fn history_ranks_quiets_below_killers_and_above_cold_quiets() {
+        // Same position. A quiet with history credit sorts above a never-tried
+        // quiet (0) but still below a killer and a capture - the tier order is
+        // PV > capture > killer > history-quiet > cold-quiet.
+        let b = board("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1");
+        let mut moves = MoveList::new();
+        b.generate_moves(&mut moves);
+
+        let mut capture = None;
+        let mut quiets = Vec::new();
+        for &m in &moves {
+            if m.flag().is_capture() {
+                capture = Some(m);
+            } else if !m.flag().is_promotion() {
+                quiets.push(m);
+            }
+        }
+        let capture = capture.expect("e4xd5 is a capture");
+        assert!(
+            quiets.len() >= 3,
+            "need a killer, a hot quiet, and a cold one"
+        );
+
+        let killer = quiets[0];
+        let hot = quiets[1]; // earns history credit
+        let cold = quiets[2]; // never a cutoff
+        let killers = [Some(killer), None];
+
+        // Credit `hot` in the history table for White (side to move).
+        let mut history = [[[0; 64]; 64]; 2];
+        let white = b.side_to_move().as_u8() as usize;
+        history[white][hot.from().index() as usize][hot.to().index() as usize] = 500;
+
+        let cap_s = order_score(&b, capture, None, killers, &history);
+        let killer_s = order_score(&b, killer, None, killers, &history);
+        let hot_s = order_score(&b, hot, None, killers, &history);
+        let cold_s = order_score(&b, cold, None, killers, &history);
+
+        assert_eq!(hot_s, 500, "history quiet carries its score");
+        assert!(cap_s > killer_s, "capture > killer");
+        assert!(killer_s > hot_s, "killer > history quiet");
+        assert!(hot_s > cold_s, "history quiet > cold quiet");
+        assert_eq!(cold_s, 0, "a cold quiet scores 0");
     }
 }
