@@ -1,5 +1,6 @@
 //! Recursive search of game state using the following techniques to speed up and rank moves:
 //!  - Negamax (minimax)
+//!  - Alpha-beta pruning
 
 use lattice_board::{Board, Move};
 
@@ -37,7 +38,7 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     for mv in &board.pseudo_legal_moves() {
         let undo = board.make_move(*mv);
         if board.is_current_state_legal() {
-            let score = -searcher.negamax(board, depth - 1, 1);
+            let score = -searcher.negamax(board, depth - 1, 1, -MATE, MATE);
             if score > best {
                 best = score;
                 best_move = Some(*mv);
@@ -70,7 +71,14 @@ struct Searcher {
 impl Searcher {
     /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
     /// from the root, used only to make mate scores prefer shorter mates.
-    fn negamax(&mut self, board: &mut Board, depth: u32, ply: u32) -> Score {
+    fn negamax(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        ply: u32,
+        mut alpha: Score,
+        beta: Score,
+    ) -> Score {
         self.nodes += 1;
 
         if depth == 0 {
@@ -84,7 +92,13 @@ impl Searcher {
             let undo = board.make_move(*mv);
             if board.is_current_state_legal() {
                 legal += 1;
-                best = best.max(-self.negamax(board, depth - 1, ply + 1));
+                let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
+                if score >= beta {
+                    board.unmake_move(*mv, undo);
+                    return score; // beta cutoff
+                }
+                alpha = alpha.max(score);
+                best = best.max(score);
             }
             board.unmake_move(*mv, undo);
         }
