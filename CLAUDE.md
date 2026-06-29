@@ -1,6 +1,7 @@
 # Lattice
 
-Lattice is a UCI chess engine written in Rust.
+A UCI chess engine written in Rust. The public engine name is **Lattice**;
+the workspace crates are named `lattice-*`.
 
 ## Collaboration
 
@@ -14,17 +15,24 @@ Lattice is a UCI chess engine written in Rust.
 
 ## Workspace
 
-A Cargo workspace of three crates:
+A Cargo workspace under `crates/`, split so protocol/IO stays out of the engine
+core and the libraries stay testable without going through stdin:
 
-- `lattice-board` - the core: board representation, pieces, squares, moves, and
-  pseudo-legal move generation. Reusable and testable, with no IO.
-- `lattice-engine` - search and evaluation (the "brain"), built on
-  `lattice-board`.
-- `lattice-uci` - the UCI protocol front end: parse commands, format responses.
+- `lattice-board` (`lattice_board`) - board representation, bitboards, magic
+  sliders, move generation, Zobrist hashing, and the rules. The pure,
+  perft-tested core.
+- `lattice-engine` (`lattice_engine`) - search, evaluation, transposition table,
+  and the `bench` suite. Built on `lattice-board`.
+- `lattice-uci` (`lattice_uci`) - UCI protocol parsing and types (library).
+- `lattice-bin` - the runnable binary (package `lattice-bin`, output name
+  `lattice`): the composition root, wiring the three libraries to stdin/stdout.
 
-Keep protocol and IO in `lattice-uci` and pure engine logic in the library
-crates, so the engine stays testable without going through stdin. Documentation
-lives in `docs/` (mdbook) and is written alongside the code.
+Keep protocol/IO in `lattice-bin` and pure engine logic in the libraries.
+Documentation lives in `docs/` (mdbook) and is written alongside the code.
+
+The engine is OpenBench-compatible: a root `Makefile` (`make EXE=...` =>
+`target/release/lattice`) and a `bench` subcommand whose final line is
+`<nodes> nodes <nps> nps`, for distributed SPRT testing.
 
 ## Code Style
 
