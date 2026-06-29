@@ -1,6 +1,9 @@
 //! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
 
 use std::io::{self, BufReader, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use lattice_board::{Board, Color, Move};
@@ -46,10 +49,14 @@ fn main() -> io::Result<()> {
 
     let stdin = io::stdin();
     let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::sink());
-    let mut board = Board::starting_position();
-    // Persistent across the session and across moves: each `go` reuses what the
-    // previous search learned. `setoption Hash` resizes it; `ucinewgame` clears.
-    let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
+    // Exactly one of these is populated at a time. `idle` holds the board +
+    // persistent TT while nothing is running; on `go` they move into the worker
+    // and `running` holds its handle until `reap` brings them back.
+    let mut idle: Option<(Board, TranspositionTable)> = Some((
+        Board::starting_position(),
+        TranspositionTable::new(DEFAULT_HASH_MB),
+    ));
+    let mut running: Option<RunningSearch> = None;
 
     while let Some(cmd) = uci.poll().map_err(io_err)? {
         match cmd {
@@ -66,10 +73,13 @@ fn main() -> io::Result<()> {
             }
             UciCommand::IsReady => emit("readyok"),
             UciCommand::NewGame => {
-                board = Board::starting_position();
+                reap(&mut idle, &mut running);
+                let (board, tt) = idle.as_mut().expect("idle after reap");
+                *board = Board::starting_position();
                 tt.clear(); // a new game shares nothing with the last
             }
             UciCommand::SetOption { name, value } => {
+                reap(&mut idle, &mut running);
                 // Only `Hash` (in MB) is supported; ignore anything else, per UCI.
                 if name.eq_ignore_ascii_case(b"Hash")
                     && let Some(mb) = value
@@ -77,10 +87,12 @@ fn main() -> io::Result<()> {
                         .and_then(|v| std::str::from_utf8(v).ok())
                         .and_then(|s| s.trim().parse::<usize>().ok())
                 {
+                    let (_, tt) = idle.as_mut().expect("idle after reap");
                     tt.resize(mb.clamp(MIN_HASH_MB, MAX_HASH_MB));
                 }
             }
             UciCommand::Position { start, moves } => {
+                reap(&mut idle, &mut running);
                 let base = match start {
                     StartPos::Startpos => Some(Board::starting_position()),
                     StartPos::Fen(fen) => Board::from_fen(&fen).ok(),
@@ -92,11 +104,14 @@ fn main() -> io::Result<()> {
                             let _ = b.make_move(mv); // discard Undo: GUI moves aren't unmade
                         }
                     }
-                    board = b;
+                    let (board, _) = idle.as_mut().expect("idle after reap");
+                    *board = b;
                 }
             }
             UciCommand::Go(go) => {
+                reap(&mut idle, &mut running);
                 if let Some(depth) = go.perft {
+                    let (board, _) = idle.as_mut().expect("idle after reap");
                     let mut total = 0;
                     for (mv, n) in board.perft_divide(depth) {
                         emit(&format!("{mv}: {n}"));
@@ -104,34 +119,76 @@ fn main() -> io::Result<()> {
                     }
                     emit(&format!("\nNodes searched: {total}"));
                 } else {
-                    let limits = limits_from_go(&go, board.side_to_move());
-                    let start = Instant::now();
-                    let result = search(&mut board, &limits, &mut tt);
-                    let elapsed = start.elapsed();
-
-                    // Integer nps; clamp elapsed up to 1us so a sub-microsecond
-                    // search doesn't divide by zero.
-                    let micros = elapsed.as_micros().max(1);
-                    let nps = (u128::from(result.nodes) * 1_000_000 / micros) as u64;
-                    let pv = result
-                        .best_move
-                        .map_or_else(|| "0000".to_string(), |m| m.to_string());
-
-                    let nodes = result.nodes;
-                    emit(&format!(
-                        "info depth {} score {} nodes {nodes} nps {nps} pv {pv}",
-                        result.depth,
-                        format_score(result.score),
-                    ));
-                    emit(&format!("bestmove {pv}"));
+                    // Hand board + tt to a worker thread so the read loop stays
+                    // free for `stop`/`isready`/`quit`. The worker prints its own
+                    // `info`/`bestmove` (a channel back would not print until the
+                    // main thread returned from its blocking stdin read) and
+                    // returns board + tt through the handle.
+                    let (mut board, mut tt) = idle.take().expect("idle after reap");
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let mut limits = limits_from_go(&go, board.side_to_move());
+                    limits.stop = Some(stop.clone());
+                    let handle = thread::spawn(move || {
+                        let start = Instant::now();
+                        let result = search(&mut board, &limits, &mut tt);
+                        let elapsed = start.elapsed();
+                        // Integer nps; clamp elapsed up to 1us so a sub-microsecond
+                        // search doesn't divide by zero.
+                        let micros = elapsed.as_micros().max(1);
+                        let nps = (u128::from(result.nodes) * 1_000_000 / micros) as u64;
+                        let pv = result
+                            .best_move
+                            .map_or_else(|| "0000".to_string(), |m| m.to_string());
+                        let nodes = result.nodes;
+                        emit(&format!(
+                            "info depth {} score {} nodes {nodes} nps {nps} pv {pv}",
+                            result.depth,
+                            format_score(result.score),
+                        ));
+                        emit(&format!("bestmove {pv}"));
+                        (board, tt)
+                    });
+                    running = Some(RunningSearch { stop, handle });
                 }
             }
-            UciCommand::Stop => {} // nothing to stop while single-threaded
-            UciCommand::Quit => break,
+            UciCommand::Stop => {
+                // Signal the worker; it unwinds and prints `bestmove`. State is
+                // reclaimed by the next command's `reap`. No-op if nothing runs.
+                if let Some(r) = &running {
+                    r.stop.store(true, Ordering::Relaxed);
+                }
+            }
+            UciCommand::Quit => {
+                reap(&mut idle, &mut running); // stop + join the worker cleanly
+                break;
+            }
             UciCommand::Unknown(_) => {} // UCI: ignore unrecognized input
         }
     }
     Ok(())
+}
+
+/// A search running on a worker thread.
+///
+/// # Notes
+/// The worker owns `Board` + `TranspositionTable` for the search and returns
+/// them through `handle`; `stop` is the flag the main thread raises to abort it.
+struct RunningSearch {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<(Board, TranspositionTable)>,
+}
+
+/// Bring the engine back to idle, joining any running worker and reclaiming its
+/// `Board` + `TranspositionTable`. No-op if already idle.
+///
+/// # Notes
+/// Invariant: on return, `idle.is_some()` and `running.is_none()`.
+fn reap(idle: &mut Option<(Board, TranspositionTable)>, running: &mut Option<RunningSearch>) {
+    if let Some(r) = running.take() {
+        r.stop.store(true, Ordering::Relaxed);
+        let reclaimed = r.handle.join().expect("search thread panicked");
+        *idle = Some(reclaimed);
+    }
 }
 
 /// Write one UCI line to stdout, newline-terminated and flushed, under a brief
