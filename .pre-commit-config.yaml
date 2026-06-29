@@ -1,6 +1,7 @@
 # Pre-commit hooks (https://pre-commit.com).
 # Enable once per clone:  pre-commit install
 # Run on everything:      pre-commit run --all-files
+default_install_hook_types: [pre-commit, prepare-commit-msg]
 repos:
   - repo: https://github.com/crate-ci/typos
     rev: v1.47.2
@@ -15,3 +16,11 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+
+      # Stamp a `Bench: <nodes>` trailer on commits that touch engine source.
+      - id: bench-trailer
+        name: stamp Bench trailer
+        entry: tools/stamp-bench.sh
+        language: script
+        stages: [prepare-commit-msg]
+        always_run: true
