@@ -1,5 +1,6 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
+use crate::pesto::PST_DELTA;
 use crate::zobrist::{ZOBRIST, ZobristHash};
 use crate::{Bitboard, Color, Move, MoveFlag, Piece, PieceType, Square};
 
@@ -131,6 +132,13 @@ pub struct Board {
     /// fields (excluding the move counters), kept in sync by `put_piece`/
     /// `remove_piece` and the state bracket in `make_move`/`unmake_move`.
     hash: ZobristHash,
+    /// Incrementally-maintained tapered-eval accumulators, White-relative, kept
+    /// in sync by `put_piece`/`remove_piece`. `eval_mg`/`eval_eg` are the
+    /// middlegame/endgame sums (centipawns); `eval_phase` is the raw,
+    /// uncapped game-phase sum. The eval layer clamps the phase and blends.
+    eval_mg: i32,
+    eval_eg: i32,
+    eval_phase: i32,
 }
 
 /// The state needed to revert a [`make_move`](Board::make_move).
@@ -194,8 +202,12 @@ impl Board {
             full_moves: 1,
             pieces,
             hash: ZobristHash(0),
+            eval_mg: 0,
+            eval_eg: 0,
+            eval_phase: 0,
         };
         board.hash = board.compute_hash();
+        board.seed_eval_acc();
         board
     }
 
@@ -212,6 +224,9 @@ impl Board {
             full_moves: 1,
             pieces: [None; 64],
             hash: ZobristHash(0),
+            eval_mg: 0,
+            eval_eg: 0,
+            eval_phase: 0,
         };
         board.hash = board.compute_hash();
         board
@@ -326,11 +341,57 @@ impl Board {
         h
     }
 
+    /// Running middlegame evaluation accumulator (White-relative, centipawns).
+    #[inline]
+    #[must_use]
+    pub fn eval_mg(&self) -> i32 {
+        self.eval_mg
+    }
+
+    /// Running endgame evaluation accumulator (White-relative, centipawns).
+    #[inline]
+    #[must_use]
+    pub fn eval_eg(&self) -> i32 {
+        self.eval_eg
+    }
+
+    /// Running game-phase accumulator (raw and uncapped; the eval layer clamps it).
+    #[inline]
+    #[must_use]
+    pub fn eval_phase(&self) -> i32 {
+        self.eval_phase
+    }
+
+    /// Recompute the eval accumulators from scratch over the mailbox and store
+    /// them. Seeds constructors that populate the board directly (bypassing the
+    /// `put_piece`/`remove_piece` hooks); `make_move`/`unmake_move` then keep
+    /// them in sync incrementally.
+    const fn seed_eval_acc(&mut self) {
+        let (mut mg, mut eg, mut phase) = (0, 0, 0);
+        let mut sq = 0;
+        while sq < 64 {
+            if let Some(piece) = self.pieces[sq] {
+                let d = PST_DELTA[piece.as_u8() as usize][sq];
+                mg += d.mg;
+                eg += d.eg;
+                phase += d.ph;
+            }
+            sq += 1;
+        }
+        self.eval_mg = mg;
+        self.eval_eg = eg;
+        self.eval_phase = phase;
+    }
+
     /// Place a piece on `sq`, overwriting any existing piece.
     pub fn put_piece(&mut self, sq: Square, piece: Piece) {
         self.bitboard_for_mut(piece).set(sq);
         self.pieces[sq.index() as usize] = Some(piece);
         self.hash.0 ^= ZOBRIST.piece(piece.as_u8(), sq.index());
+        let d = PST_DELTA[piece.as_u8() as usize][sq.index() as usize];
+        self.eval_mg += d.mg;
+        self.eval_eg += d.eg;
+        self.eval_phase += d.ph;
     }
 
     /// Remove whatever piece is on `sq` (if any).
@@ -339,6 +400,10 @@ impl Board {
             self.hash.0 ^= ZOBRIST.piece(piece.as_u8(), sq.index());
             self.bitboard_for_mut(piece).clear(sq);
             self.pieces[sq.index() as usize] = None;
+            let d = PST_DELTA[piece.as_u8() as usize][sq.index() as usize];
+            self.eval_mg -= d.mg;
+            self.eval_eg -= d.eg;
+            self.eval_phase -= d.ph;
         }
     }
 
@@ -607,6 +672,7 @@ impl Board {
         // authoritative hash once, after parsing, from the finished position.
         Self::parse_fen_into(fen, &mut board)?;
         board.hash = board.compute_hash();
+        board.seed_eval_acc();
         Ok(board)
     }
 
@@ -938,6 +1004,57 @@ mod tests {
         )
         .unwrap();
         assert_zobrist_consistent(&mut kiwi, 3);
+    }
+
+    /// A from-scratch scan of the eval accumulators, via the trusted seed path.
+    fn recompute_eval_acc(board: &Board) -> (i32, i32, i32) {
+        let mut scratch = board.clone();
+        scratch.seed_eval_acc();
+        (scratch.eval_mg, scratch.eval_eg, scratch.eval_phase)
+    }
+
+    /// The eval-accumulator analogue of `assert_zobrist_consistent`: at every
+    /// node the incrementally maintained sums must match a full recompute -
+    /// before, after make (even when illegal), and after unmake.
+    fn assert_eval_acc_consistent(board: &mut Board, depth: u32) {
+        let live = (board.eval_mg, board.eval_eg, board.eval_phase);
+        assert_eq!(
+            live,
+            recompute_eval_acc(board),
+            "incremental eval acc diverged"
+        );
+        if depth == 0 {
+            return;
+        }
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
+        for &m in moves.iter() {
+            let undo = board.make_move(m);
+            let made = (board.eval_mg, board.eval_eg, board.eval_phase);
+            assert_eq!(
+                made,
+                recompute_eval_acc(board),
+                "eval acc wrong after make {m}"
+            );
+            if board.is_legal() {
+                assert_eval_acc_consistent(board, depth - 1);
+            }
+            board.unmake_move(m, undo);
+            let reverted = (board.eval_mg, board.eval_eg, board.eval_phase);
+            assert_eq!(reverted, live, "eval acc not restored after unmake {m}");
+        }
+    }
+
+    #[test]
+    fn eval_acc_incremental_matches_recompute() {
+        // startpos and kiwipete to depth 3: exercises captures, castling, en
+        // passant, and promotions feeding the accumulator through put/remove.
+        assert_eval_acc_consistent(&mut Board::starting_position(), 3);
+        let mut kiwi = Board::from_fen(
+            b"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        assert_eval_acc_consistent(&mut kiwi, 3);
     }
 
     #[test]
