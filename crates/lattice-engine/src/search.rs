@@ -304,6 +304,23 @@ impl Searcher<'_> {
         // shared by null-move pruning and the LMR guard in the move loop.
         let in_check = board.in_check(board.side_to_move());
 
+        // Reverse futility pruning (static null-move pruning). Near the leaves,
+        // if the static eval already clears beta by a depth-scaled margin, the
+        // side to move is far enough ahead that searching is almost certainly
+        // wasted, so fail high on the static score directly. Confined to non-PV
+        // nodes (where no exact PV is owed) and away from mate scores (which the
+        // static eval cannot see); meaningless in check, so skipped there too.
+        if !in_check
+            && depth <= RFP_MAX_DEPTH
+            && beta - alpha == 1
+            && beta.abs() < MATE - MAX_PLY as Score
+        {
+            let eval = evaluate(board);
+            if eval - RFP_MARGIN * depth as Score >= beta {
+                return eval;
+            }
+        }
+
         // Null-move pruning. Pass to the opponent; if a reduced zero-window search
         // still beats beta, the real move would too, so prune. Skipped without
         // non-pawn material: pawn-only endgames are where zugzwang makes a "pass"
@@ -549,6 +566,23 @@ impl Searcher<'_> {
 const ORDER_MIN_DEPTH: u32 = 2;
 
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
+/// Maximum remaining depth at which reverse futility pruning is attempted.
+///
+/// # Notes
+/// RFP trusts the static eval in place of a search, so it is confined to the
+/// shallow frontier where the eval is closest to the truth. Deeper than this
+/// the opponent has too much room to recover for a static cutoff to be safe.
+const RFP_MAX_DEPTH: u32 = 6;
+
+/// Per-ply safety margin (centipawns) for reverse futility pruning.
+///
+/// # Notes
+/// The static eval must clear `beta` by `RFP_MARGIN * depth` before the node is
+/// pruned: the deeper the remaining search, the larger the cushion demanded, so
+/// only positions that are winning by a wide and depth-proportional margin are
+/// cut on the static score alone.
+const RFP_MARGIN: Score = 80;
 
 /// Minimum remaining depth to attempt null-move pruning.
 ///
