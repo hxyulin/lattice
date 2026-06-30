@@ -488,7 +488,7 @@ impl Searcher<'_> {
     fn negamax(
         &mut self,
         board: &mut Board,
-        depth: u32,
+        mut depth: u32,
         ply: u32,
         mut alpha: Score,
         beta: Score,
@@ -497,6 +497,13 @@ impl Searcher<'_> {
         self.nodes += 1;
         if self.should_stop() {
             return 0; // abort: `search` discards the whole partial iteration
+        }
+
+        // Hard ply cap. Check extensions (below) add depth without consuming the
+        // depth countdown, so a long checking line could otherwise drive `ply`
+        // past the `killers`/`MAX_PLY` bound and panic; bail to quiescence first.
+        if ply >= MAX_PLY {
+            return self.quiescence(board, 0, alpha, beta);
         }
 
         if depth == 0 {
@@ -527,6 +534,14 @@ impl Searcher<'_> {
         // Whether this node is in check - loop-invariant, so computed once and
         // shared by null-move pruning and the LMR guard in the move loop.
         let in_check = board.in_check(board.side_to_move());
+
+        // Check extension: a node in check is highly forcing (few legal replies,
+        // often a tactic or mate), so search it one ply deeper. Free here since
+        // `in_check` is already computed. RFP/NMP/LMP/LMR are all gated on
+        // `!in_check`, so the extra depth only deepens the children.
+        if in_check {
+            depth += 1;
+        }
 
         // Reverse futility pruning (static null-move pruning). Near the leaves,
         // if the static eval already clears beta by a depth-scaled margin, the
