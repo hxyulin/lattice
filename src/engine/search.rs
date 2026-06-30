@@ -93,6 +93,18 @@ pub const TUNABLES: &[TunableSpec] = &[
         min: 1000,
         max: 20000,
     },
+    TunableSpec {
+        name: "AspDelta",
+        default: 25,
+        min: 5,
+        max: 100,
+    },
+    TunableSpec {
+        name: "AspMinDepth",
+        default: 4,
+        min: 1,
+        max: 10,
+    },
 ];
 
 /// Live values of the [`TUNABLES`] search parameters, threaded through the search.
@@ -121,6 +133,11 @@ pub struct Tunables {
     pub killer1_bonus: i32,
     /// Move-ordering bonus for the older killer.
     pub killer2_bonus: i32,
+    /// Aspiration window initial half-width, centipawns.
+    pub asp_delta: i32,
+    /// First iterative-deepening depth searched with an aspiration window;
+    /// shallower iterations use a full window.
+    pub asp_min_depth: i32,
     /// Precomputed LMR reductions, rebuilt when the base or divisor changes.
     lmr_table: [[u8; LMR_DIM]; LMR_DIM],
 }
@@ -137,6 +154,8 @@ impl Default for Tunables {
             history_malus_x100: 0,
             killer1_bonus: 0,
             killer2_bonus: 0,
+            asp_delta: 0,
+            asp_min_depth: 0,
             lmr_table: [[0; LMR_DIM]; LMR_DIM],
         };
         // Apply each option's default; the final LMR rebuild (once the divisor is
@@ -167,6 +186,8 @@ impl Tunables {
             "HistoryMalus" => self.history_malus_x100 = v,
             "Killer1Bonus" => self.killer1_bonus = v,
             "Killer2Bonus" => self.killer2_bonus = v,
+            "AspDelta" => self.asp_delta = v,
+            "AspMinDepth" => self.asp_min_depth = v,
             _ => return false,
         }
         if matches!(spec.name, "LmrBase" | "LmrDivisor") {
@@ -340,7 +361,7 @@ pub fn search_with_info(
 
     // iterative-deepening require at least depth 1
     for d in 1..=limits.max_depth() {
-        let (bm, sc) = searcher.search_root(board, d, best_move);
+        let (bm, sc) = searcher.aspiration_search(board, d, best_move, score);
         if searcher.stopped {
             break; // partial iteration: discard it, keep the last complete depth
         }
@@ -447,11 +468,60 @@ impl Searcher<'_> {
     /// Search the root to `depth` plies, returning the best move and its score.
     ///
     /// `hint` - the best move from the previous iterative-deepening iteration
+    /// Search the root to `depth` with an aspiration window centered on the
+    /// previous iteration's `prev_score`, re-searching with a widening window on
+    /// a fail-low or fail-high. Falls back to a full window for shallow depths
+    /// and mate-range scores, where the estimate is unreliable.
+    ///
+    /// `hint` - the best move from the previous iterative-deepening iteration.
+    fn aspiration_search(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        hint: Option<Move>,
+        prev_score: Score,
+    ) -> (Option<Move>, Score) {
+        let mut delta = self.tun.asp_delta;
+        let (mut alpha, mut beta) = if depth < self.tun.asp_min_depth as u32
+            || prev_score.abs() >= MATE - MAX_PLY as Score
+        {
+            (-MATE, MATE)
+        } else {
+            (prev_score - delta, prev_score + delta)
+        };
+        loop {
+            let (bm, sc) = self.search_root(board, depth, hint, alpha, beta);
+            if self.stopped {
+                return (bm, sc); // partial: discarded by the caller
+            }
+            if sc <= alpha && alpha > -MATE {
+                // Fail-low: recenter beta, widen alpha down, keep the prior best
+                // move (this result is unreliable - no move beat alpha).
+                beta = (alpha + beta) / 2;
+                alpha = (sc - delta).max(-MATE);
+                delta *= 2;
+            } else if sc >= beta && beta < MATE {
+                // Fail-high: widen beta up.
+                beta = (sc + delta).min(MATE);
+                delta *= 2;
+            } else {
+                return (bm, sc);
+            }
+        }
+    }
+
+    /// Search the root to `depth` plies inside the window `[alpha, beta]`,
+    /// returning the best move and its score. A score `<= alpha` is a fail-low
+    /// and `>= beta` a fail-high (the caller widens and re-searches).
+    ///
+    /// `hint` - the best move from the previous iterative-deepening iteration.
     fn search_root(
         &mut self,
         board: &mut Board,
         depth: u32,
         hint: Option<Move>,
+        mut alpha: Score,
+        beta: Score,
     ) -> (Option<Move>, Score) {
         let mut best_move = None;
         let mut best = -MATE;
@@ -463,7 +533,6 @@ impl Searcher<'_> {
         // PVS at the root: `alpha` tracks the best score found so far. The first
         // legal move is searched with the full window for an exact baseline; later
         // moves are scouted with a null window and only re-searched if they beat it.
-        let mut alpha = -MATE;
         for mv in &moves {
             if self.should_stop() {
                 break; // budget hit mid-iteration; `search` discards this depth
@@ -471,11 +540,11 @@ impl Searcher<'_> {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 let score = if best_move.is_none() {
-                    -self.negamax(board, depth - 1, 1, -MATE, MATE, true)
+                    -self.negamax(board, depth - 1, 1, -beta, -alpha, true)
                 } else {
                     let s = -self.negamax(board, depth - 1, 1, -alpha - 1, -alpha, true);
-                    if s > alpha {
-                        -self.negamax(board, depth - 1, 1, -MATE, -alpha, true)
+                    if s > alpha && s < beta {
+                        -self.negamax(board, depth - 1, 1, -beta, -alpha, true)
                     } else {
                         s
                     }
@@ -485,6 +554,10 @@ impl Searcher<'_> {
                     best_move = Some(*mv);
                 }
                 alpha = alpha.max(best);
+                if alpha >= beta {
+                    board.unmake_move(*mv, undo);
+                    break; // root fail-high: score is a lower bound, stop early
+                }
             }
             board.unmake_move(*mv, undo);
         }
