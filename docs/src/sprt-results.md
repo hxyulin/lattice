@@ -35,8 +35,10 @@ authoritative result.
 
 | Feature | TC | Games | Elo | Verdict |
 |---------|----|------:|----:|---------|
+| Principal variation search | STC | 368 | +286 | pass |
 | Piece-square tables | STC | 4096 | +240 | pass |
 | Quiescence search | STC | 648 | +256 | pass |
+| Tapered PST (PeSTO) | STC | 540 | +126 | pass |
 | Null-move pruning | STC / LTC | 680 / 594 | +84 / +100 | pass (scales) |
 | Transposition table | STC / LTC | 1252 / 920 | +42 / +62 | pass (scales) |
 | Late move reductions | STC / LTC | 1462 / 1240 | +37 / +42 | pass (scales) |
@@ -62,11 +64,18 @@ This is the whole reason these are tested at equal time rather than equal depth:
 their benefit is searching deeper per second, so it grows when there is more
 depth to reach. An equal-depth test would have scored them near zero.
 
-### Piece-square tables and quiescence are the big wins
+### The biggest wins change either the move or the depth reached
 
-A positional evaluation term (+240) and resolving captures at the leaves (+256)
-dominate. Both change which move the engine picks, so they show up immediately
-and large.
+A positional evaluation term (PST +240, tapered PeSTO +126), resolving captures
+at the leaves (quiescence +256), and reaching far more depth per second
+(principal variation search +286) dominate. The first three change which move
+the engine picks, so they show up immediately and large. PVS is different: it is
+behaviour-preserving (identical move at a fixed depth, verified score-exact), so
+its number is pure speed converted to depth - which is why it is tested at time
+control, not fixed depth. Its outsized +286 is partly a repair: the pre-PVS
+search was ~99% quiescence nodes from an unordered frontier, and the null-window
+scouts collapsed that (a 13.7x node drop at depth 4 - see `BENCH.md`), so it
+bought ~2-3 extra plies at once rather than the textbook fraction of a ply.
 
 ### Behaviour-preserving features prove neutral
 
@@ -114,7 +123,10 @@ in the history update rather than a weak heuristic.
 ## Summary
 
 The confirmed, SPRT-verified gains - piece-square tables, quiescence, null-move
-pruning, the transposition table, and late move reductions - add up to roughly
-**+500 Elo** of real playing strength, with the three search-efficiency features
-each confirmed to scale at long time control. Everything behaviour-preserving
-measured neutral, and Zobrist's expected dip is repaid by the table that uses it.
+pruning, the transposition table, late move reductions, the tapered PeSTO eval,
+and principal variation search - add up to roughly **+900 Elo** of real playing
+strength (a loose sum: each is measured against the build before it, and Elo is
+not strictly additive). The search-efficiency features each scale at long time
+control, and PVS is the single biggest line so far. Everything behaviour-
+preserving measured neutral, and Zobrist's expected dip is repaid by the table
+that uses it.
