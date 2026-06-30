@@ -892,27 +892,6 @@ fn has_non_pawn_material(board: &Board, side: crate::Color) -> bool {
     .is_empty()
 }
 
-// Delta-pruning helpers, disabled with the pruning itself (see `quiescence`).
-//
-// /// Safety margin for quiescence delta pruning (~two pawns). A capture is only
-// /// pruned when the static eval plus the victim's value plus this margin still
-// /// falls short of alpha, so the margin is the slack that keeps a capture which
-// /// sets up a *further* gain (a discovered threat, a follow-up win) from being
-// /// pruned on its immediate material alone.
-// const DELTA_MARGIN: i32 = 200;
-//
-// /// Centipawn value of the piece a capture removes - the gain estimate delta
-// /// pruning tests against alpha. En passant takes a pawn (the destination is
-// /// empty); every other capture takes whatever sits on the destination square.
-// fn captured_value(board: &Board, mv: Move) -> i32 {
-//     let victim = if mv.flag() == MoveFlag::EnPassant {
-//         PieceType::Pawn
-//     } else {
-//         board.piece_at(mv.to()).unwrap().kind()
-//     };
-//     VAL[victim as usize]
-// }
-
 /// Ordering bonus that floats the previous iteration's best move ahead of every
 /// capture.
 ///
