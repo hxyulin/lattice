@@ -6,7 +6,6 @@
 //!  - Quiescence search
 
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,6 +19,183 @@ pub const MAX_PLY: u32 = 64;
 
 /// Hard cap on quiescence recursion depth
 const MAX_QPLY: u32 = 32;
+
+/// One search parameter exposed as an integer UCI spin option for SPSA tuning.
+pub struct TunableSpec {
+    /// UCI option name (e.g. `RfpMargin`).
+    pub name: &'static str,
+    /// Default value - reproduces the engine's built-in behavior.
+    pub default: i32,
+    /// Inclusive minimum the option accepts.
+    pub min: i32,
+    /// Inclusive maximum the option accepts.
+    pub max: i32,
+}
+
+/// The SPSA-tunable search parameters, in UCI-option form.
+///
+/// Continuous knobs only (margins, reductions, ordering weights); discrete depth
+/// gates stay constants, where SPSA has little to work with. Fractional knobs are
+/// integer-only UCI options stored times 100 (the `x100` fields on [`Tunables`])
+/// and divided at use.
+pub const TUNABLES: &[TunableSpec] = &[
+    TunableSpec {
+        name: "RfpMargin",
+        default: 80,
+        min: 20,
+        max: 200,
+    },
+    TunableSpec {
+        name: "LmrBase",
+        default: 75,
+        min: 0,
+        max: 200,
+    },
+    TunableSpec {
+        name: "LmrDivisor",
+        default: 225,
+        min: 100,
+        max: 400,
+    },
+    TunableSpec {
+        name: "LmpBase",
+        default: 3,
+        min: 1,
+        max: 10,
+    },
+    TunableSpec {
+        name: "HistoryMax",
+        default: 7000,
+        min: 1000,
+        max: 32000,
+    },
+    TunableSpec {
+        name: "HistoryBonus",
+        default: 100,
+        min: 10,
+        max: 400,
+    },
+    TunableSpec {
+        name: "Killer1Bonus",
+        default: 9000,
+        min: 1000,
+        max: 20000,
+    },
+    TunableSpec {
+        name: "Killer2Bonus",
+        default: 8000,
+        min: 1000,
+        max: 20000,
+    },
+];
+
+/// Live values of the [`TUNABLES`] search parameters, threaded through the search.
+///
+/// [`Default`] reproduces the engine's built-in behavior exactly, so a default
+/// search is byte-for-byte the untuned search (the bench signature is unchanged).
+/// Set options by UCI name with [`Tunables::set`].
+#[derive(Clone)]
+pub struct Tunables {
+    /// Reverse futility pruning margin, centipawns per ply.
+    pub rfp_margin: i32,
+    /// LMR base offset, times 100.
+    pub lmr_base_x100: i32,
+    /// LMR divisor, times 100.
+    pub lmr_divisor_x100: i32,
+    /// Late move pruning base count (the constant in `base + depth * depth`).
+    pub lmp_base: i32,
+    /// History entry saturation cap.
+    pub history_max: i32,
+    /// History cutoff-bonus scale, times 100 (`bonus = scale * depth * depth / 100`).
+    pub history_bonus_x100: i32,
+    /// Move-ordering bonus for the most-recent killer.
+    pub killer1_bonus: i32,
+    /// Move-ordering bonus for the older killer.
+    pub killer2_bonus: i32,
+    /// Precomputed LMR reductions, rebuilt when the base or divisor changes.
+    lmr_table: [[u8; LMR_DIM]; LMR_DIM],
+}
+
+impl Default for Tunables {
+    fn default() -> Self {
+        let mut t = Tunables {
+            rfp_margin: 0,
+            lmr_base_x100: 0,
+            lmr_divisor_x100: 0,
+            lmp_base: 0,
+            history_max: 0,
+            history_bonus_x100: 0,
+            killer1_bonus: 0,
+            killer2_bonus: 0,
+            lmr_table: [[0; LMR_DIM]; LMR_DIM],
+        };
+        // Apply each option's default; the final LMR rebuild (once the divisor is
+        // set) yields the correct table, so any transient rebuild is harmless.
+        for spec in TUNABLES {
+            t.set(spec.name, spec.default);
+        }
+        t
+    }
+}
+
+impl Tunables {
+    /// Set one tunable by its UCI option name (case-insensitive), clamping to the
+    /// option's range. Returns `false` for an unknown name. The LMR table is
+    /// rebuilt when a value that feeds it changes.
+    pub fn set(&mut self, name: &str, value: i32) -> bool {
+        let Some(spec) = TUNABLES.iter().find(|s| s.name.eq_ignore_ascii_case(name)) else {
+            return false;
+        };
+        let v = value.clamp(spec.min, spec.max);
+        match spec.name {
+            "RfpMargin" => self.rfp_margin = v,
+            "LmrBase" => self.lmr_base_x100 = v,
+            "LmrDivisor" => self.lmr_divisor_x100 = v,
+            "LmpBase" => self.lmp_base = v,
+            "HistoryMax" => self.history_max = v,
+            "HistoryBonus" => self.history_bonus_x100 = v,
+            "Killer1Bonus" => self.killer1_bonus = v,
+            "Killer2Bonus" => self.killer2_bonus = v,
+            _ => return false,
+        }
+        if matches!(spec.name, "LmrBase" | "LmrDivisor") {
+            self.rebuild_lmr_table();
+        }
+        true
+    }
+
+    /// Recompute the LMR table from the current base and divisor.
+    fn rebuild_lmr_table(&mut self) {
+        let base = self.lmr_base_x100 as f64 / 100.0;
+        let divisor = self.lmr_divisor_x100 as f64 / 100.0;
+        for depth in 1..LMR_DIM {
+            for moves in 1..LMR_DIM {
+                let r = base + (depth as f64).ln() * (moves as f64).ln() / divisor;
+                self.lmr_table[depth][moves] = r as u8;
+            }
+        }
+    }
+
+    /// Late-move reduction (plies) for a quiet move at `depth` with `move_number`
+    /// legal moves already searched. Both indices are clamped to the table bounds.
+    fn lmr_reduction(&self, depth: u32, move_number: u32) -> u32 {
+        let d = (depth as usize).min(LMR_DIM - 1);
+        let m = (move_number as usize).min(LMR_DIM - 1);
+        u32::from(self.lmr_table[d][m])
+    }
+
+    /// Number of legal moves searched at `depth` before late move pruning skips
+    /// the remaining quiets. Quadratic in depth.
+    fn lmp_threshold(&self, depth: u32) -> u32 {
+        self.lmp_base as u32 + depth * depth
+    }
+
+    /// History cutoff bonus credited to a quiet move that caused a cutoff at
+    /// `depth`.
+    fn history_bonus(&self, depth: u32) -> i32 {
+        self.history_bonus_x100 * (depth * depth) as i32 / 100
+    }
+}
 
 /// Stopping conditions for a [`search`].
 ///
@@ -96,13 +272,19 @@ pub struct SearchResult {
     pub depth: u32,
 }
 
-/// Search `board` under `limits` and return the best move with its score.
+/// Search `board` under `limits` with the search parameters `tun`, returning the
+/// best move with its score.
 ///
 /// Iterative deepening drives the search; it stops at whichever of the depth,
 /// node, and time limits fires first. A bare [`Limits::default`] runs to
-/// [`MAX_PLY`].
+/// [`MAX_PLY`]; [`Tunables::default`] runs the untuned search.
 #[must_use]
-pub fn search(board: &mut Board, limits: &Limits, tt: &mut TranspositionTable) -> SearchResult {
+pub fn search(
+    board: &mut Board,
+    limits: &Limits,
+    tt: &mut TranspositionTable,
+    tun: &Tunables,
+) -> SearchResult {
     tt.new_search(); // age the previous move's entries before this search reuses them
     let mut searcher = Searcher {
         nodes: 0,
@@ -115,6 +297,7 @@ pub fn search(board: &mut Board, limits: &Limits, tt: &mut TranspositionTable) -
         killers: [[None; 2]; MAX_PLY as usize],
         history: [[[0; 64]; 64]; 2],
         tt,
+        tun: tun.clone(),
     };
     let mut best_move: Option<Move> = None;
     let mut score = -MATE;
@@ -167,6 +350,9 @@ struct Searcher<'a> {
     /// Transposition table, owned by the caller and reused across moves. Probed
     /// for cutoffs and a move-ordering hint, and written after each node.
     tt: &'a mut TranspositionTable,
+    /// SPSA-tunable search parameters; [`Tunables::default`] reproduces the
+    /// untuned search.
+    tun: Tunables,
 }
 
 impl Searcher<'_> {
@@ -219,7 +405,7 @@ impl Searcher<'_> {
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
         let killers = self.killers[0];
-        moves.sort_by_key(|&m| -order_score(board, m, hint, killers, &self.history));
+        moves.sort_by_key(|&m| -order_score(board, m, hint, killers, &self.history, &self.tun));
         // PVS at the root: `alpha` tracks the best score found so far. The first
         // legal move is searched with the full window for an exact baseline; later
         // moves are scouted with a null window and only re-searched if they beat it.
@@ -317,7 +503,7 @@ impl Searcher<'_> {
             && beta.abs() < MATE - MAX_PLY as Score
         {
             let eval = evaluate(board);
-            if eval - RFP_MARGIN * depth as Score >= beta {
+            if eval - self.tun.rfp_margin * depth as Score >= beta {
                 return eval;
             }
         }
@@ -359,7 +545,9 @@ impl Searcher<'_> {
             // The TT move (this position's best from a previous, possibly
             // shallower, search) is ordered first - the strongest hint there is;
             // then captures, then this ply's killers, then the rest.
-            moves.sort_by_key(|&m| -order_score(board, m, tt_move, killers, &self.history));
+            moves.sort_by_key(|&m| {
+                -order_score(board, m, tt_move, killers, &self.history, &self.tun)
+            });
         }
         for mv in &moves {
             // Late move pruning. At shallow non-PV nodes, once enough legal moves
@@ -371,7 +559,7 @@ impl Searcher<'_> {
             if !in_check
                 && depth <= LMP_MAX_DEPTH
                 && beta - alpha == 1
-                && legal >= lmp_threshold(depth)
+                && legal >= self.tun.lmp_threshold(depth)
                 && best > -MATE + MAX_PLY as Score
                 && !mv.flag().is_capture()
                 && !mv.flag().is_promotion()
@@ -403,7 +591,7 @@ impl Searcher<'_> {
                         // real search, so the scout never collapses straight to
                         // quiescence.
                         full_depth
-                            .saturating_sub(lmr_reduction(depth, legal))
+                            .saturating_sub(self.tun.lmr_reduction(depth, legal))
                             .max(1)
                     } else {
                         full_depth
@@ -498,14 +686,16 @@ impl Searcher<'_> {
         }
     }
 
-    /// Credit a quiet cutoff move in the butterfly history. The bonus is `depth^2`
-    /// (a cutoff found deeper in the tree was more expensive to discover, so it
-    /// weighs more), saturating at [`HISTORY_MAX`]. `side` is the move's mover.
+    /// Credit a quiet cutoff move in the butterfly history. The bonus scales with
+    /// `depth^2` (a cutoff found deeper in the tree was more expensive to
+    /// discover, so it weighs more), saturating at [`Tunables::history_max`].
+    /// `side` is the move's mover.
     fn update_history(&mut self, side: lattice_board::Color, mv: Move, depth: u32) {
-        let bonus = (depth * depth) as i32;
+        let bonus = self.tun.history_bonus(depth);
+        let cap = self.tun.history_max;
         let cell = &mut self.history[side.as_u8() as usize][mv.from().index() as usize]
             [mv.to().index() as usize];
-        *cell = (*cell + bonus).min(HISTORY_MAX);
+        *cell = (*cell + bonus).min(cap);
     }
 
     /// Quiescence search: resolve captures and promotions from a leaf until the
@@ -546,7 +736,8 @@ impl Searcher<'_> {
         board.generate_moves(&mut moves);
         // Quiescence searches only captures/promotions, so killers (quiet by
         // definition) and history never apply here - pass empty slots.
-        moves.sort_by_key(|&m| -order_score(board, m, None, [None, None], &self.history));
+        moves
+            .sort_by_key(|&m| -order_score(board, m, None, [None, None], &self.history, &self.tun));
         // When in check, every capture is a candidate escape, so SEE pruning is
         // suppressed (we may *have* to make a losing capture). Probed once per
         // node rather than per move.
@@ -597,31 +788,12 @@ const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 /// the opponent has too much room to recover for a static cutoff to be safe.
 const RFP_MAX_DEPTH: u32 = 6;
 
-/// Per-ply safety margin (centipawns) for reverse futility pruning.
-///
-/// # Notes
-/// The static eval must clear `beta` by `RFP_MARGIN * depth` before the node is
-/// pruned: the deeper the remaining search, the larger the cushion demanded, so
-/// only positions that are winning by a wide and depth-proportional margin are
-/// cut on the static score alone.
-const RFP_MARGIN: Score = 80;
-
 /// Maximum remaining depth at which late move pruning is attempted.
 ///
 /// # Notes
 /// Confined to the shallow frontier: deeper than this, skipping quiets unsearched
 /// risks missing a move whose merit only shows below the horizon.
 const LMP_MAX_DEPTH: u32 = 4;
-
-/// Number of legal moves searched at `depth` before the remaining quiets are
-/// pruned by late move pruning.
-///
-/// # Notes
-/// Quadratic in depth (`3 + depth * depth`): the deeper the node, the more moves
-/// are searched before trusting the move ordering to have surfaced the best one.
-fn lmp_threshold(depth: u32) -> u32 {
-    3 + depth * depth
-}
 
 /// Minimum remaining depth to attempt null-move pruning.
 ///
@@ -652,48 +824,9 @@ const LMR_MIN_DEPTH: u32 = 3;
 /// onward is eligible for reduction.
 const LMR_MIN_MOVES: u32 = 3;
 
-/// Constant offset of the late-move reduction formula (in plies).
-///
-/// # Notes
-/// `R = LMR_BASE + ln(depth) * ln(move_number) / LMR_DIVISOR`. The base shifts
-/// every entry; the divisor sets how fast the reduction grows. Both are the
-/// classic Ethereal-family starting values and are the primary LMR tuning
-/// knobs - too large over-reduces (tactically blind), too small saves nothing.
-const LMR_BASE: f64 = 0.75;
-
-/// Divisor controlling how quickly the late-move reduction grows with depth and
-/// move number. See [`LMR_BASE`].
-const LMR_DIVISOR: f64 = 2.25;
-
-/// Side length of the [`LMR_TABLE`] - depth and move number are each clamped to
-/// this before indexing.
+/// Side length of the LMR table ([`Tunables::lmr_reduction`]) - depth and move
+/// number are each clamped to this before indexing.
 const LMR_DIM: usize = MAX_PLY as usize;
-
-/// Precomputed late-move reductions indexed by `[depth][move_number]`.
-///
-/// The `ln(depth) * ln(move_number)` shape grows the reduction sub-linearly:
-/// later moves at deeper nodes are reduced harder, but with diminishing
-/// aggressiveness as the cost of an over-reduction rises. Row and column 0 are
-/// unused (depth and move number both start at 1).
-static LMR_TABLE: LazyLock<[[u8; LMR_DIM]; LMR_DIM]> = LazyLock::new(|| {
-    let mut t = [[0u8; LMR_DIM]; LMR_DIM];
-    for depth in 1..LMR_DIM {
-        for moves in 1..LMR_DIM {
-            let r = LMR_BASE + (depth as f64).ln() * (moves as f64).ln() / LMR_DIVISOR;
-            t[depth][moves] = r as u8;
-        }
-    }
-    t
-});
-
-/// Late-move reduction (in plies) for a quiet move searched at `depth` with
-/// `move_number` legal moves already tried. Both arguments are clamped to the
-/// table bounds.
-fn lmr_reduction(depth: u32, move_number: u32) -> u32 {
-    let d = (depth as usize).min(LMR_DIM - 1);
-    let m = (move_number as usize).min(LMR_DIM - 1);
-    u32::from(LMR_TABLE[d][m])
-}
 
 /// Whether `side` has any piece beyond pawns and the king. Null-move pruning is
 /// gated on this because zugzwang - a free "pass" being misleadingly good -
@@ -736,25 +869,14 @@ fn has_non_pawn_material(board: &Board, side: lattice_board::Color) -> bool {
 /// scores need no bit-packing.
 const PV_BONUS: i32 = 1_000_000;
 
-/// Ordering bonuses for killer moves.
-///
-/// # Notes
-/// Below every capture (the smallest MVV-LVA score is 9100) and above ordinary
-/// quiets (0), so a proven refutation is searched right after captures. Slot 0
-/// (more recent) outranks slot 1.
-const KILLER_1_BONUS: i32 = 9_000;
-const KILLER_2_BONUS: i32 = 8_000;
-
 /// Butterfly history table: a running `depth^2` count per `[side][from][to]` of
 /// quiet beta-cutoff moves, used to order non-killer quiets (see [`order_score`]).
-type HistoryTable = [[[i32; 64]; 64]; 2];
-
-/// Saturation cap on a history entry.
 ///
 /// # Notes
-/// Held one band below [`KILLER_2_BONUS`] so a history-ranked quiet never
-/// outranks a killer, keeping the ordering tiers fixed.
-const HISTORY_MAX: i32 = 7_000;
+/// Default tunables hold the saturation cap ([`Tunables::history_max`]) one band
+/// below the killer bonuses, so a history-ranked quiet never outranks a killer;
+/// SPSA may move that boundary.
+type HistoryTable = [[[i32; 64]; 64]; 2];
 
 fn order_score(
     board: &Board,
@@ -762,19 +884,21 @@ fn order_score(
     hint: Option<Move>,
     killers: [Option<Move>; 2],
     history: &HistoryTable,
+    tun: &Tunables,
 ) -> i32 {
     if Some(mv) == hint {
         return PV_BONUS; // last iteration's best move: searched first
     }
     if !mv.flag().is_capture() {
         // Quiet move: a killer for this ply jumps ahead of the other quiets;
-        // the rest are ranked by history (0 if never a cutoff). History is
-        // capped below the killer band, so the tiers never cross.
+        // the rest are ranked by history (0 if never a cutoff). With default
+        // tunables history is capped below the killer band, so the tiers never
+        // cross.
         if Some(mv) == killers[0] {
-            return KILLER_1_BONUS;
+            return tun.killer1_bonus;
         }
         if Some(mv) == killers[1] {
-            return KILLER_2_BONUS;
+            return tun.killer2_bonus;
         }
         let side = board.side_to_move().as_u8() as usize;
         return history[side][mv.from().index() as usize][mv.to().index() as usize];
@@ -804,7 +928,12 @@ mod tests {
     /// Run a search with a throwaway 1 MB table - these tests probe behaviour,
     /// not cross-move reuse.
     fn go(b: &mut Board, limits: &Limits) -> SearchResult {
-        search(b, limits, &mut TranspositionTable::new(1))
+        search(
+            b,
+            limits,
+            &mut TranspositionTable::new(1),
+            &Tunables::default(),
+        )
     }
 
     const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -845,7 +974,12 @@ mod tests {
                 stop: Some(worker_flag),
                 ..Limits::default()
             };
-            search(&mut b, &limits, &mut TranspositionTable::new(1))
+            search(
+                &mut b,
+                &limits,
+                &mut TranspositionTable::new(1),
+                &Tunables::default(),
+            )
         });
         // The `armed` gate guarantees depth 1 finishes regardless of timing, so
         // raising the flag immediately is safe and non-flaky.
@@ -996,10 +1130,11 @@ mod tests {
         let other = quiets[1];
         let killers = [Some(killer), None];
         let empty = [[[0; 64]; 64]; 2];
+        let tun = Tunables::default();
 
-        let cap_score = order_score(&b, capture, None, killers, &empty);
-        let killer_score = order_score(&b, killer, None, killers, &empty);
-        let other_score = order_score(&b, other, None, killers, &empty);
+        let cap_score = order_score(&b, capture, None, killers, &empty, &tun);
+        let killer_score = order_score(&b, killer, None, killers, &empty, &tun);
+        let other_score = order_score(&b, other, None, killers, &empty, &tun);
 
         assert!(cap_score > killer_score, "captures outrank killers");
         assert!(killer_score > other_score, "killer outranks plain quiets");
@@ -1039,11 +1174,12 @@ mod tests {
         let mut history = [[[0; 64]; 64]; 2];
         let white = b.side_to_move().as_u8() as usize;
         history[white][hot.from().index() as usize][hot.to().index() as usize] = 500;
+        let tun = Tunables::default();
 
-        let cap_s = order_score(&b, capture, None, killers, &history);
-        let killer_s = order_score(&b, killer, None, killers, &history);
-        let hot_s = order_score(&b, hot, None, killers, &history);
-        let cold_s = order_score(&b, cold, None, killers, &history);
+        let cap_s = order_score(&b, capture, None, killers, &history, &tun);
+        let killer_s = order_score(&b, killer, None, killers, &history, &tun);
+        let hot_s = order_score(&b, hot, None, killers, &history, &tun);
+        let cold_s = order_score(&b, cold, None, killers, &history, &tun);
 
         assert_eq!(hot_s, 500, "history quiet carries its score");
         assert!(cap_s > killer_s, "capture > killer");

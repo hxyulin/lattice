@@ -7,7 +7,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use lattice_board::{Board, Color, Move};
-use lattice_engine::{Limits, MATE, Score, TranspositionTable, bench, budget, nps, search};
+use lattice_engine::{
+    Limits, MATE, Score, TUNABLES, TranspositionTable, Tunables, bench, budget, nps, search,
+};
 use lattice_uci::{Go, StartPos, UciCommand, UciInterface, UciMove};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
@@ -63,6 +65,9 @@ fn main() -> io::Result<()> {
         TranspositionTable::new(DEFAULT_HASH_MB),
     ));
     let mut running: Option<RunningSearch> = None;
+    // SPSA-tunable search parameters, set via `setoption` and handed to each
+    // search. Persists across moves; defaults reproduce the untuned engine.
+    let mut tunables = Tunables::default();
 
     while let Some(cmd) = uci.poll().map_err(io_err)? {
         match cmd {
@@ -75,6 +80,12 @@ fn main() -> io::Result<()> {
                 emit(&format!(
                     "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
                 ));
+                for t in TUNABLES {
+                    emit(&format!(
+                        "option name {} type spin default {} min {} max {}",
+                        t.name, t.default, t.min, t.max
+                    ));
+                }
                 emit("uciok");
             }
             UciCommand::IsReady => emit("readyok"),
@@ -86,15 +97,18 @@ fn main() -> io::Result<()> {
             }
             UciCommand::SetOption { name, value } => {
                 reap(&mut idle, &mut running);
-                // Only `Hash` (in MB) is supported; ignore anything else, per UCI.
-                if name.eq_ignore_ascii_case(b"Hash")
-                    && let Some(mb) = value
-                        .as_ref()
-                        .and_then(|v| std::str::from_utf8(v).ok())
-                        .and_then(|s| s.trim().parse::<usize>().ok())
-                {
-                    let (_, tt) = idle.as_mut().expect("idle after reap");
-                    tt.resize(mb.clamp(MIN_HASH_MB, MAX_HASH_MB));
+                let parsed = value
+                    .as_ref()
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|s| s.trim().parse::<i32>().ok());
+                if name.eq_ignore_ascii_case(b"Hash") {
+                    if let Some(mb) = parsed {
+                        let (_, tt) = idle.as_mut().expect("idle after reap");
+                        tt.resize((mb.max(0) as usize).clamp(MIN_HASH_MB, MAX_HASH_MB));
+                    }
+                } else if let (Ok(name), Some(v)) = (std::str::from_utf8(&name), parsed) {
+                    // SPSA tunables; an unknown name is ignored, per UCI.
+                    tunables.set(name, v);
                 }
             }
             UciCommand::Position { start, moves } => {
@@ -134,9 +148,10 @@ fn main() -> io::Result<()> {
                     let stop = Arc::new(AtomicBool::new(false));
                     let mut limits = limits_from_go(&go, board.side_to_move());
                     limits.stop = Some(stop.clone());
+                    let tun = tunables.clone();
                     let handle = thread::spawn(move || {
                         let start = Instant::now();
-                        let result = search(&mut board, &limits, &mut tt);
+                        let result = search(&mut board, &limits, &mut tt, &tun);
                         let elapsed = start.elapsed();
                         // Integer nps; clamp elapsed up to 1us so a sub-microsecond
                         // search doesn't divide by zero.

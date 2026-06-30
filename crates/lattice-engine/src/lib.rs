@@ -11,7 +11,7 @@ mod tt;
 
 pub use bench::{BenchEntry, BenchReport, bench, nps};
 pub use eval::evaluate;
-pub use search::{Limits, MAX_PLY, SearchResult, budget, search};
+pub use search::{Limits, MAX_PLY, SearchResult, TUNABLES, TunableSpec, Tunables, budget, search};
 pub use tt::{Bound, Entry, TranspositionTable};
 
 /// A position score in centipawns,
