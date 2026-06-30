@@ -5,7 +5,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use lattice_board::{Bitboard, Board, Move, MoveFlag, Square};
+use lattice::{Bitboard, Board, Move, MoveFlag, Square};
 
 /// A single benchmark case.
 struct Case {

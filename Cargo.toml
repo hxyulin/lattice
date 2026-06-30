@@ -1,29 +1,29 @@
-[workspace]
-resolver = "3"
-members = [
-  "crates/lattice-board",
-  "crates/lattice-engine",
-  "crates/lattice-uci",
-  "crates/lattice-bin",
-]
-default-members = ["crates/lattice-bin"]
-
-[workspace.package]
+[package]
+name = "lattice"
 version = "0.0.0"
 authors = ["hxyulin <hxyulin@proton.me>"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/hxyulin/lattice"
 
-[workspace.dependencies]
-lattice-board = { path = "crates/lattice-board", version = "0.0.0" }
-lattice-engine = { path = "crates/lattice-engine", version = "0.0.0" }
-lattice-uci = { path = "crates/lattice-uci", version = "0.0.0" }
+[dependencies]
+nonmax = "0.5"
 thiserror = "2"
-
 bstr = "1"
 
-[workspace.lints.rust]
+[dev-dependencies]
+criterion = "0.5"
 
-[workspace.lints.clippy]
+[[bin]]
+name = "lattice"
+path = "src/main.rs"
+
+[[bench]]
+name = "core_benches"
+harness = false
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
 all = "warn"

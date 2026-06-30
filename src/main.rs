@@ -1,4 +1,4 @@
-//! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
+//! A runnable UCI engine wrapping the engine and board layers
 
 use std::io::{self, BufReader, Write};
 use std::sync::Arc;
@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use lattice_board::{Board, Color, Move};
-use lattice_engine::{
+use lattice::{Board, Color, Move};
+use lattice::{Go, StartPos, UciCommand, UciInterface, UciMove};
+use lattice::{
     Limits, MATE, Score, TUNABLES, TranspositionTable, Tunables, bench, budget, nps, search,
 };
-use lattice_uci::{Go, StartPos, UciCommand, UciInterface, UciMove};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
 const DEFAULT_DEPTH: u32 = 4;
@@ -74,7 +74,7 @@ fn main() -> io::Result<()> {
             UciCommand::Uci => {
                 // Spec: do engine init on `uci`. Builds the magic slider tables
                 // now (a few ms) so the first search isn't charged for it.
-                lattice_board::init_tables();
+                lattice::init_tables();
                 emit("id name Lattice");
                 emit("id author hxyulin");
                 emit(&format!(
@@ -323,9 +323,9 @@ fn resolve(board: &Board, um: UciMove) -> Option<Move> {
         .find(|m| m.from() == um.from && m.to() == um.to && m.flag().promoted_piece() == um.promo)
 }
 
-fn io_err(e: lattice_uci::UciError) -> io::Error {
+fn io_err(e: lattice::UciError) -> io::Error {
     match e {
-        lattice_uci::UciError::Io(e) => e,
+        lattice::UciError::Io(e) => e,
     }
 }
 

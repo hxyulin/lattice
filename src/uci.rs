@@ -6,8 +6,8 @@
 
 use std::io::{BufRead, Write};
 
+use crate::{PieceType, Square};
 use bstr::{BString, ByteSlice};
-use lattice_board::{PieceType, Square};
 
 /// An error from the UCI IO layer.
 #[derive(Debug, thiserror::Error)]

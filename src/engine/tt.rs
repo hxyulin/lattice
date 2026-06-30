@@ -15,9 +15,9 @@
 //! entries with no lockless XOR-key trick; quiescence is not probed; a cutoff
 //! ignores the 50-move/repetition path (no repetition detection exists yet).
 
-use lattice_board::{Move, ZobristHash};
+use crate::{Move, ZobristHash};
 
-use crate::search::MAX_PLY;
+use super::search::MAX_PLY;
 use crate::{MATE, Score};
 
 /// What an entry's stored [`score`](Entry::score) means.
@@ -259,7 +259,7 @@ fn score_from_tt(score: i16, ply: u32) -> Score {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_board::{MoveFlag, Square};
+    use crate::{MoveFlag, Square};
 
     /// A move that is cheap to construct for use as a stored "best move".
     fn mv(from: &str, to: &str) -> Move {
@@ -274,7 +274,7 @@ mod tests {
     /// bits) so collision behaviour can be exercised. Built from a real board's
     /// hash, then offset in the high bits only.
     fn keys() -> (ZobristHash, ZobristHash) {
-        use lattice_board::Board;
+        use crate::Board;
         let a = Board::starting_position().zobrist();
         // Flip a high bit: same bucket (low bits unchanged), different key.
         let b = ZobristHash::from_raw(a.get() ^ (1 << 63));

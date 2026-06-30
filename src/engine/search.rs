@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use lattice_board::{Board, Move, MoveFlag, MoveList, PieceType};
+use crate::{Board, Move, MoveFlag, MoveList, PieceType};
 
 use crate::{Bound, MATE, Score, TranspositionTable, evaluate};
 
@@ -664,7 +664,7 @@ impl Searcher<'_> {
     /// so storing its garbage scores would poison the table.
     fn store(
         &mut self,
-        hash: lattice_board::ZobristHash,
+        hash: crate::ZobristHash,
         best: Option<Move>,
         score: Score,
         depth: u32,
@@ -690,7 +690,7 @@ impl Searcher<'_> {
     /// `depth^2` (a cutoff found deeper in the tree was more expensive to
     /// discover, so it weighs more), saturating at [`Tunables::history_max`].
     /// `side` is the move's mover.
-    fn update_history(&mut self, side: lattice_board::Color, mv: Move, depth: u32) {
+    fn update_history(&mut self, side: crate::Color, mv: Move, depth: u32) {
         let bonus = self.tun.history_bonus(depth);
         let cap = self.tun.history_max;
         let cell = &mut self.history[side.as_u8() as usize][mv.from().index() as usize]
@@ -831,7 +831,7 @@ const LMR_DIM: usize = MAX_PLY as usize;
 /// Whether `side` has any piece beyond pawns and the king. Null-move pruning is
 /// gated on this because zugzwang - a free "pass" being misleadingly good -
 /// essentially only occurs in pawn-and-king endgames.
-fn has_non_pawn_material(board: &Board, side: lattice_board::Color) -> bool {
+fn has_non_pawn_material(board: &Board, side: crate::Color) -> bool {
     use PieceType::{Bishop, Knight, Queen, Rook};
     !(board.pieces(side, Knight)
         | board.pieces(side, Bishop)
@@ -915,7 +915,7 @@ fn order_score(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_board::Square;
+    use crate::Square;
 
     fn board(fen: &str) -> Board {
         Board::from_fen(fen.as_bytes()).unwrap()

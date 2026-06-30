@@ -1,7 +1,7 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
-use crate::pesto::PST_DELTA;
-use crate::zobrist::{ZOBRIST, ZobristHash};
+use super::pesto::PST_DELTA;
+use super::zobrist::{ZOBRIST, ZobristHash};
 use crate::{Bitboard, Color, Move, MoveFlag, Piece, PieceType, Square};
 
 /// The four castling rights as a bitset (one bit each: white/black x

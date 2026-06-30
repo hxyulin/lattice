@@ -262,36 +262,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-bin"
-version = "0.0.0"
-dependencies = [
- "lattice-board",
- "lattice-engine",
- "lattice-uci",
-]
-
-[[package]]
-name = "lattice-board"
-version = "0.0.0"
-dependencies = [
- "criterion",
- "nonmax",
- "thiserror",
-]
-
-[[package]]
-name = "lattice-engine"
-version = "0.0.0"
-dependencies = [
- "lattice-board",
-]
-
-[[package]]
-name = "lattice-uci"
+name = "lattice"
 version = "0.0.0"
 dependencies = [
  "bstr",
- "lattice-board",
+ "criterion",
+ "nonmax",
  "thiserror",
 ]
 

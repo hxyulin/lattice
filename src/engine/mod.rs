@@ -1,4 +1,4 @@
-//! The chess engine "brain": search and evaluation over [`lattice_board`].
+//! The chess engine "brain": search and evaluation over the `board` module.
 //!
 //! Modules:
 //! - [`eval`] - evaluation

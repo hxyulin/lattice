@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use lattice_board::Board;
+use crate::Board;
 
 use crate::{Limits, TranspositionTable, Tunables, search};
 
@@ -105,7 +105,7 @@ pub fn nps(nodes: u64, elapsed: Duration) -> u64 {
 #[must_use]
 pub fn bench(depth: u32) -> BenchReport {
     // Build the magic slider tables before timing
-    lattice_board::init_tables();
+    crate::init_tables();
     let entries = SUITE
         .iter()
         .map(|&(name, fen)| {

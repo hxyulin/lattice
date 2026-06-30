@@ -60,7 +60,7 @@ const KING_ATTACKS: [Bitboard; 64] = {
 };
 
 // Sliding attacks via the magic-bitboard tables: one multiply-shift-load per query.
-use crate::magic::{bishop_attacks, rook_attacks};
+use super::magic::{bishop_attacks, rook_attacks};
 
 /// Squares attacked by a set of `color` pawns, as raw bits.
 ///

@@ -7,10 +7,10 @@
 //! endgame). Values are Ronald Friederich's PeSTO tables.
 //!
 //! The per-(piece, square) terms are maintained incrementally by the board (see
-//! `lattice_board`'s accumulators, updated on every piece placement beside the
+//! the board's accumulators, updated on every piece placement beside the
 //! Zobrist hash). This module only clamps the phase and blends the two sums.
 
-use lattice_board::{Board, Color};
+use crate::{Board, Color};
 
 use crate::Score;
 

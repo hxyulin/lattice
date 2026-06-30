@@ -13,21 +13,22 @@ the workspace crates are named `lattice-*`.
 3. Plan before you build. Discuss the design, edge cases, and integration points
    first; begin implementing only once the plan is agreed upon.
 
-## Workspace
+## Crate
 
-A Cargo workspace under `crates/`, split so protocol/IO stays out of the engine
-core and the libraries stay testable without going through stdin:
+A single crate (package `lattice`, output name `lattice`), organized into module
+groups so protocol/IO stays out of the engine core. The grouping is a
+navigational convention, not a compile-enforced wall:
 
-- `lattice-board` (`lattice_board`) - board representation, bitboards, magic
-  sliders, move generation, Zobrist hashing, and the rules. The pure,
-  perft-tested core.
-- `lattice-engine` (`lattice_engine`) - search, evaluation, transposition table,
-  and the `bench` suite. Built on `lattice-board`.
-- `lattice-uci` (`lattice_uci`) - UCI protocol parsing and types (library).
-- `lattice-bin` - the runnable binary (package `lattice-bin`, output name
-  `lattice`): the composition root, wiring the three libraries to stdin/stdout.
+- `src/board/` - board representation, bitboards, magic sliders, move generation,
+  Zobrist hashing, the incremental tapered-eval accumulator, and the rules. The
+  pure, perft-tested core.
+- `src/engine/` - search, evaluation, transposition table, and the `bench`
+  suite. Built on `board`.
+- `src/uci.rs` - UCI protocol parsing and types.
+- `src/main.rs` - the runnable binary: the composition root, wiring the modules
+  to stdin/stdout. `src/lib.rs` re-exports the three groups flat.
 
-Keep protocol/IO in `lattice-bin` and pure engine logic in the libraries.
+Keep protocol/IO in `src/main.rs` and pure engine logic in the modules.
 Documentation lives in `docs/` (mdbook) and is written alongside the code.
 
 The engine is OpenBench-compatible: a root `Makefile` (`make EXE=...` =>
