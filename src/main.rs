@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use lattice::{Board, Color, Move};
 use lattice::{Go, StartPos, UciCommand, UciInterface, UciMove};
 use lattice::{
-    Limits, MATE, Score, TUNABLES, TranspositionTable, Tunables, bench, budget, nps, search,
+    Limits, MATE, Score, SearchInfo, TUNABLES, TranspositionTable, Tunables, bench, budget, nps,
+    search_with_info,
 };
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
@@ -151,21 +152,25 @@ fn main() -> io::Result<()> {
                     let tun = tunables.clone();
                     let handle = thread::spawn(move || {
                         let start = Instant::now();
-                        let result = search(&mut board, &limits, &mut tt, &tun);
-                        let elapsed = start.elapsed();
-                        // Integer nps; clamp elapsed up to 1us so a sub-microsecond
-                        // search doesn't divide by zero.
-                        let micros = elapsed.as_micros().max(1);
-                        let nps = (u128::from(result.nodes) * 1_000_000 / micros) as u64;
+                        // Emit an `info` line as each iterative-deepening depth
+                        // completes, so a GUI/Lichess sees the search progress live.
+                        let mut on_iter = |info: SearchInfo| {
+                            let pv = info
+                                .best_move
+                                .map_or_else(|| "0000".to_string(), |m| m.to_string());
+                            emit(&format!(
+                                "info depth {} score {} nodes {} nps {} pv {pv}",
+                                info.depth,
+                                format_score(info.score),
+                                info.nodes,
+                                nps(info.nodes, start.elapsed()),
+                            ));
+                        };
+                        let result =
+                            search_with_info(&mut board, &limits, &mut tt, &tun, &mut on_iter);
                         let pv = result
                             .best_move
                             .map_or_else(|| "0000".to_string(), |m| m.to_string());
-                        let nodes = result.nodes;
-                        emit(&format!(
-                            "info depth {} score {} nodes {nodes} nps {nps} pv {pv}",
-                            result.depth,
-                            format_score(result.score),
-                        ));
                         emit(&format!("bestmove {pv}"));
                         (board, tt)
                     });

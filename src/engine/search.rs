@@ -272,18 +272,36 @@ pub struct SearchResult {
     pub depth: u32,
 }
 
+/// A snapshot of one completed iterative-deepening iteration, passed to
+/// [`search_with_info`]'s callback so a UCI front end can emit an `info` line
+/// per depth as the search deepens.
+#[derive(Clone, Copy)]
+pub struct SearchInfo {
+    /// Depth, in plies, of the iteration that just completed.
+    pub depth: u32,
+    /// Best move from the root at this depth (`None` only with no legal move).
+    pub best_move: Option<Move>,
+    /// Score of `best_move`, from the side-to-move's perspective.
+    pub score: Score,
+    /// Cumulative nodes searched so far, including quiescence.
+    pub nodes: u64,
+}
+
 /// Search `board` under `limits` with the search parameters `tun`, returning the
-/// best move with its score.
+/// best move with its score and reporting each completed depth to `on_iter`.
 ///
 /// Iterative deepening drives the search; it stops at whichever of the depth,
 /// node, and time limits fires first. A bare [`Limits::default`] runs to
-/// [`MAX_PLY`]; [`Tunables::default`] runs the untuned search.
+/// [`MAX_PLY`]; [`Tunables::default`] runs the untuned search. `on_iter` fires
+/// once per completed iteration, in increasing-depth order; a partial iteration
+/// aborted by a limit is discarded and never reported.
 #[must_use]
-pub fn search(
+pub fn search_with_info(
     board: &mut Board,
     limits: &Limits,
     tt: &mut TranspositionTable,
     tun: &Tunables,
+    on_iter: &mut dyn FnMut(SearchInfo),
 ) -> SearchResult {
     tt.new_search(); // age the previous move's entries before this search reuses them
     let mut searcher = Searcher {
@@ -311,6 +329,12 @@ pub fn search(
         }
         (best_move, score, completed) = (bm, sc, d);
         searcher.armed = true;
+        on_iter(SearchInfo {
+            depth: d,
+            best_move,
+            score,
+            nodes: searcher.nodes,
+        });
     }
 
     SearchResult {
@@ -320,6 +344,19 @@ pub fn search(
         qnodes: searcher.qnodes,
         depth: completed,
     }
+}
+
+/// Search `board` under `limits`, returning the best move and score without
+/// per-iteration reporting. The plain entry point for callers (bench, tests)
+/// that only want the final result; see [`search_with_info`] for the callback.
+#[must_use]
+pub fn search(
+    board: &mut Board,
+    limits: &Limits,
+    tt: &mut TranspositionTable,
+    tun: &Tunables,
+) -> SearchResult {
+    search_with_info(board, limits, tt, tun, &mut |_| {})
 }
 
 /// Mutable search state threaded through the recursion
