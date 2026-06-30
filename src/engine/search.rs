@@ -76,6 +76,12 @@ pub const TUNABLES: &[TunableSpec] = &[
         max: 400,
     },
     TunableSpec {
+        name: "HistoryMalus",
+        default: 100,
+        min: 10,
+        max: 400,
+    },
+    TunableSpec {
         name: "Killer1Bonus",
         default: 9000,
         min: 1000,
@@ -108,6 +114,9 @@ pub struct Tunables {
     pub history_max: i32,
     /// History cutoff-bonus scale, times 100 (`bonus = scale * depth * depth / 100`).
     pub history_bonus_x100: i32,
+    /// History malus scale, times 100 (`malus = scale * depth * depth / 100`),
+    /// applied to quiets that were searched at a cutoff node but did not cut.
+    pub history_malus_x100: i32,
     /// Move-ordering bonus for the most-recent killer.
     pub killer1_bonus: i32,
     /// Move-ordering bonus for the older killer.
@@ -125,6 +134,7 @@ impl Default for Tunables {
             lmp_base: 0,
             history_max: 0,
             history_bonus_x100: 0,
+            history_malus_x100: 0,
             killer1_bonus: 0,
             killer2_bonus: 0,
             lmr_table: [[0; LMR_DIM]; LMR_DIM],
@@ -154,6 +164,7 @@ impl Tunables {
             "LmpBase" => self.lmp_base = v,
             "HistoryMax" => self.history_max = v,
             "HistoryBonus" => self.history_bonus_x100 = v,
+            "HistoryMalus" => self.history_malus_x100 = v,
             "Killer1Bonus" => self.killer1_bonus = v,
             "Killer2Bonus" => self.killer2_bonus = v,
             _ => return false,
@@ -194,6 +205,12 @@ impl Tunables {
     /// `depth`.
     fn history_bonus(&self, depth: u32) -> i32 {
         self.history_bonus_x100 * (depth * depth) as i32 / 100
+    }
+
+    /// History malus charged to a quiet move that was searched at a cutoff node
+    /// but did not cause the cutoff. Same `depth^2` shape as the bonus.
+    fn history_malus(&self, depth: u32) -> i32 {
+        self.history_malus_x100 * (depth * depth) as i32 / 100
     }
 }
 
@@ -589,6 +606,9 @@ impl Searcher<'_> {
         let mut best = -MATE;
         let mut best_move = None;
         let mut legal = 0u32;
+        // Quiets searched at this node that did not cut; charged a history malus
+        // if a later quiet causes a cutoff.
+        let mut tried_quiets = MoveList::new();
 
         let mut moves = MoveList::new();
         board.generate_moves(&mut moves);
@@ -671,18 +691,27 @@ impl Searcher<'_> {
                 }
                 if score >= beta {
                     board.unmake_move(*mv, undo);
-                    // A quiet move that fails high becomes a killer and earns
-                    // history credit; captures are excluded (MVV-LVA orders them).
-                    // After the unmake, `side_to_move` is the mover again.
+                    // A quiet move that fails high becomes a killer and earns a
+                    // history bonus; the quiets searched before it earn a malus.
+                    // Captures are excluded (MVV-LVA orders them). After the
+                    // unmake, `side_to_move` is the mover again.
                     if !mv.flag().is_capture() && !mv.flag().is_promotion() {
+                        let side = board.side_to_move();
                         self.store_killer(ply, *mv);
-                        self.update_history(board.side_to_move(), *mv, depth);
+                        self.update_history(side, *mv, self.tun.history_bonus(depth));
+                        let malus = self.tun.history_malus(depth);
+                        for q in tried_quiets.as_slice() {
+                            self.update_history(side, *q, -malus);
+                        }
                     }
                     // Fail-high: `best` is a lower bound on the true score.
                     self.store(hash, best_move, best, depth, Bound::Lower, ply);
                     return best;
                 }
                 alpha = alpha.max(score);
+                if !mv.flag().is_capture() && !mv.flag().is_promotion() {
+                    tried_quiets.push(*mv);
+                }
             }
             board.unmake_move(*mv, undo);
         }
@@ -738,16 +767,19 @@ impl Searcher<'_> {
         }
     }
 
-    /// Credit a quiet cutoff move in the butterfly history. The bonus scales with
-    /// `depth^2` (a cutoff found deeper in the tree was more expensive to
-    /// discover, so it weighs more), saturating at [`Tunables::history_max`].
+    /// Nudge a quiet move's butterfly-history entry by a signed `delta` (positive
+    /// for the cutoff move, negative for quiets that were searched but did not
+    /// cut). Uses the history-gravity update: the entry is pulled toward the new
+    /// evidence in proportion to how saturated it already is, so it behaves as an
+    /// exponential moving average bounded by [`Tunables::history_max`] (recent
+    /// evidence outweighs stale evidence) rather than a saturating sum.
     /// `side` is the move's mover.
-    fn update_history(&mut self, side: crate::Color, mv: Move, depth: u32) {
-        let bonus = self.tun.history_bonus(depth);
+    fn update_history(&mut self, side: crate::Color, mv: Move, delta: i32) {
         let cap = self.tun.history_max;
         let cell = &mut self.history[side.as_u8() as usize][mv.from().index() as usize]
             [mv.to().index() as usize];
-        *cell = (*cell + bonus).min(cap);
+        let d = delta.clamp(-cap, cap);
+        *cell += d - *cell * d.abs() / cap;
     }
 
     /// Quiescence search: resolve captures and promotions from a leaf until the
