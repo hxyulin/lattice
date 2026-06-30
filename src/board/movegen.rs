@@ -296,6 +296,27 @@ impl Board {
         rook_attacks(sq, occ).bits() & (rooks | queens) != 0
     }
 
+    /// Pseudo-attack set of a `kind` piece standing on `sq` under the current
+    /// occupancy (sliders blocked by intervening pieces). Used by evaluation for
+    /// mobility; only the knight/bishop/rook/queen arms are meaningful (pawn and
+    /// king return empty, they are not mobility-scored).
+    pub(crate) fn attacks_from(&self, sq: Square, kind: PieceType) -> Bitboard {
+        let occ = self.occupied();
+        match kind {
+            PieceType::Knight => KNIGHT_ATTACKS[sq.index() as usize],
+            PieceType::Bishop => bishop_attacks(sq, occ),
+            PieceType::Rook => rook_attacks(sq, occ),
+            PieceType::Queen => bishop_attacks(sq, occ) | rook_attacks(sq, occ),
+            PieceType::Pawn | PieceType::King => Bitboard::EMPTY,
+        }
+    }
+
+    /// Every square attacked by one or more of `color`'s pawns.
+    pub(crate) fn pawn_attack_span(&self, color: Color) -> Bitboard {
+        let pawns = self.pieces(color, PieceType::Pawn).bits();
+        Bitboard::from_bits(pawn_attacks(pawns, color))
+    }
+
     /// All pieces of either color attacking `sq` under occupancy `occ`.
     ///
     /// # Notes
