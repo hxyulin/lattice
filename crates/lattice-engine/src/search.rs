@@ -362,6 +362,22 @@ impl Searcher<'_> {
             moves.sort_by_key(|&m| -order_score(board, m, tt_move, killers, &self.history));
         }
         for mv in &moves {
+            // Late move pruning. At shallow non-PV nodes, once enough legal moves
+            // have been searched the remaining quiets (ordered worst) are so
+            // unlikely to matter that they are skipped without being made at all.
+            // Captures and promotions are exempt (handled per move), check
+            // evasions are never pruned (not in check), and the mate guard keeps
+            // us searching for an escape when the best score so far is a loss.
+            if !in_check
+                && depth <= LMP_MAX_DEPTH
+                && beta - alpha == 1
+                && legal >= lmp_threshold(depth)
+                && best > -MATE + MAX_PLY as Score
+                && !mv.flag().is_capture()
+                && !mv.flag().is_promotion()
+            {
+                continue;
+            }
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
@@ -589,6 +605,23 @@ const RFP_MAX_DEPTH: u32 = 6;
 /// only positions that are winning by a wide and depth-proportional margin are
 /// cut on the static score alone.
 const RFP_MARGIN: Score = 80;
+
+/// Maximum remaining depth at which late move pruning is attempted.
+///
+/// # Notes
+/// Confined to the shallow frontier: deeper than this, skipping quiets unsearched
+/// risks missing a move whose merit only shows below the horizon.
+const LMP_MAX_DEPTH: u32 = 4;
+
+/// Number of legal moves searched at `depth` before the remaining quiets are
+/// pruned by late move pruning.
+///
+/// # Notes
+/// Quadratic in depth (`3 + depth * depth`): the deeper the node, the more moves
+/// are searched before trusting the move ordering to have surfaced the best one.
+fn lmp_threshold(depth: u32) -> u32 {
+    3 + depth * depth
+}
 
 /// Minimum remaining depth to attempt null-move pruning.
 ///
