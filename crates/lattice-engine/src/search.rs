@@ -219,17 +219,31 @@ impl Searcher<'_> {
         board.generate_moves(&mut moves);
         let killers = self.killers[0];
         moves.sort_by_key(|&m| -order_score(board, m, hint, killers, &self.history));
+        // PVS at the root: `alpha` tracks the best score found so far. The first
+        // legal move is searched with the full window for an exact baseline; later
+        // moves are scouted with a null window and only re-searched if they beat it.
+        let mut alpha = -MATE;
         for mv in &moves {
             if self.should_stop() {
                 break; // budget hit mid-iteration; `search` discards this depth
             }
             let undo = board.make_move(*mv);
             if board.is_legal() {
-                let score = -self.negamax(board, depth - 1, 1, -MATE, MATE, true);
+                let score = if best_move.is_none() {
+                    -self.negamax(board, depth - 1, 1, -MATE, MATE, true)
+                } else {
+                    let s = -self.negamax(board, depth - 1, 1, -alpha - 1, -alpha, true);
+                    if s > alpha {
+                        -self.negamax(board, depth - 1, 1, -MATE, -alpha, true)
+                    } else {
+                        s
+                    }
+                };
                 if score > best {
                     best = score;
                     best_move = Some(*mv);
                 }
+                alpha = alpha.max(best);
             }
             board.unmake_move(*mv, undo);
         }
@@ -334,27 +348,43 @@ impl Searcher<'_> {
             if board.is_legal() {
                 legal += 1;
                 let full_depth = depth - 1;
-                // Late move reductions. Past the first few well-ordered moves a
-                // quiet non-killer rarely is best, so search it shallower; if that
-                // raises alpha the reduction isn't trusted and we re-search at full
-                // depth.
-                let reduce = depth >= LMR_MIN_DEPTH
-                    && legal > LMR_MIN_MOVES
-                    && !mv.flag().is_capture()
-                    && !mv.flag().is_promotion()
-                    && Some(*mv) != killers[0]
-                    && Some(*mv) != killers[1]
-                    && !in_check;
-                let score = if reduce {
-                    let reduced = full_depth.saturating_sub(LMR_R);
-                    let s = -self.negamax(board, reduced, ply + 1, -beta, -alpha, true);
-                    if s > alpha {
-                        -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
-                    } else {
-                        s
-                    }
-                } else {
+                // Principal variation search. The first (best-ordered) move is
+                // searched with the full window for an exact PV score; every later
+                // move is scouted with a null window that only has to prove it fails
+                // low (cheaper, since a 1-wide window cuts off far more often).
+                let score = if legal == 1 {
                     -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
+                } else {
+                    // Late move reductions. Past the first few well-ordered moves a
+                    // quiet non-killer rarely is best, so scout it shallower.
+                    let reduce = depth >= LMR_MIN_DEPTH
+                        && legal > LMR_MIN_MOVES
+                        && !mv.flag().is_capture()
+                        && !mv.flag().is_promotion()
+                        && Some(*mv) != killers[0]
+                        && Some(*mv) != killers[1]
+                        && !in_check;
+                    let scout_depth = if reduce {
+                        full_depth.saturating_sub(LMR_R)
+                    } else {
+                        full_depth
+                    };
+                    let mut s =
+                        -self.negamax(board, scout_depth, ply + 1, -alpha - 1, -alpha, true);
+                    // A reduced scout that beat alpha may have under-searched: verify
+                    // it at full depth (still the null window) before trusting it.
+                    if reduce && s > alpha {
+                        s = -self.negamax(board, full_depth, ply + 1, -alpha - 1, -alpha, true);
+                    }
+                    // The null-window scout can only fail high or low. If it landed
+                    // above alpha and inside the real window the move may be a new PV,
+                    // so re-search wide for its exact value. At null-window nodes
+                    // beta == alpha + 1, so this never fires - PVS only ever
+                    // re-searches along the principal variation.
+                    if s > alpha && s < beta {
+                        s = -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true);
+                    }
+                    s
                 };
                 if score > best {
                     best = score;
@@ -765,6 +795,22 @@ mod tests {
         // still surface Ra8 with the correct mate distance, not drop it.
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
         let r = go(&mut b, &Limits::to_depth(6));
+        assert_eq!(
+            r.best_move.map(|m| (m.from(), m.to())),
+            Some((sq("a1"), sq("a8")))
+        );
+        assert_eq!(r.score, MATE - 1);
+    }
+
+    #[test]
+    fn pvs_resurfaces_a_late_winning_move() {
+        // Ra8 is a quiet rook move that mates, but MVV-LVA orders captures and
+        // other quiets ahead of it, so PVS scouts it with a null window first. The
+        // scout fails high (it is a mate), which must trigger the full-window
+        // re-search that recovers the exact mate distance. A wrong scout bound
+        // would either drop the move or report an inexact score.
+        let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
+        let r = go(&mut b, &Limits::to_depth(4));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
