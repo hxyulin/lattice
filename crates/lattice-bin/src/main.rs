@@ -14,7 +14,13 @@ use lattice_uci::{Go, StartPos, UciCommand, UciInterface, UciMove};
 const DEFAULT_DEPTH: u32 = 4;
 
 /// Depth for `lattice bench [depth]` when none is given.
-const DEFAULT_BENCH_DEPTH: u32 = 4;
+///
+/// # Notes
+/// Bumped from 4 to 6 once SEE pruning shrank the depth-4 suite to ~90ms: depth
+/// 6 is a steadier NPS signal and a larger build fingerprint, and it trends down
+/// (not up) as further pruning lands. The `Bench:` trailer / `bench.csv` switch
+/// from depth-4 to depth-6 signatures at that commit.
+const DEFAULT_BENCH_DEPTH: u32 = 6;
 
 /// Default transposition-table size in MB.
 ///

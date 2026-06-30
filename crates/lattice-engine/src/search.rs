@@ -508,19 +508,21 @@ impl Searcher<'_> {
         // Quiescence searches only captures/promotions, so killers (quiet by
         // definition) and history never apply here - pass empty slots.
         moves.sort_by_key(|&m| -order_score(board, m, None, [None, None], &self.history));
+        // When in check, every capture is a candidate escape, so SEE pruning is
+        // suppressed (we may *have* to make a losing capture). Probed once per
+        // node rather than per move.
+        let in_check = board.in_check(board.side_to_move());
         for mv in &moves {
             if !(mv.flag().is_capture() || mv.flag().is_promotion()) {
                 continue; // quiet move: not searched in quiescence
             }
-            // Delta pruning is disabled: it cut ~23% of qnodes but its per-node
-            // `board.in_check()` probe dropped NPS 4.49M -> 3.50M (equal-time
-            // SPRT -77 +/- 28 Elo). Re-enable with a SEE primitive for in_check.
-            //
-            // let in_check = board.in_check(board.side_to_move());
-            // if !in_check
-            //     && !mv.flag().is_promotion()
-            //     && stand_pat + captured_value(board, *mv) + DELTA_MARGIN < alpha
-            // { continue; }
+            // SEE pruning: a capture that loses material by static exchange is
+            // almost never the best move, so skip it and its recapture subtree.
+            // Promotions are exempt - SEE scores only the captured piece, missing
+            // the queening gain - and so are all captures while in check.
+            if !in_check && !mv.flag().is_promotion() && board.see(*mv) < 0 {
+                continue;
+            }
 
             let undo = board.make_move(*mv);
             if board.is_legal() {

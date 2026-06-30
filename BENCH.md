@@ -1,7 +1,9 @@
 # Search benchmark
 
-Run with `lattice bench [depth]` (default depth 4). The suite is the six
-canonical perft positions.
+Run with `lattice bench [depth]` (default depth 6). The suite is the six
+canonical perft positions. The default was depth 4 through the PVS commit; SEE
+pruning then shrank the depth-4 suite to ~90ms, so the `Bench:` trailer / node
+signature moved to depth 6 (see "SEE pruning in quiescence" below).
 
 To compare a new version, re-run the same `bench <depth>` and diff the node
 counts: pruning (alpha-beta, etc.) should cut nodes hard for the same positions.
@@ -205,7 +207,52 @@ the engine was leaving on the table; at equal time it now searches ~2-3 plies
 deeper, worth +299 Elo STC. NPS is roughly flat (3.28M -> 3.57M) - the
 scout/re-search bookkeeping is negligible per node.
 
+## SEE pruning in quiescence
+
+Quiescence was searching *every* capture, including ones that lose material on
+the spot (a queen taking a defended pawn and its whole recapture subtree). After
+PVS the suite was still ~96% quiescence nodes. Static Exchange Evaluation
+(`Board::see`) scores a capture's full swap-off statically; the quiescence loop
+now skips any capture with `SEE < 0` (suppressed while in check, where a losing
+capture may be the only escape; promotions exempt - SEE misses the queening
+gain).
+
+- Machine: Apple M3 Pro, `--release`
+- Depth: 4
+- Base = the PVS commit; Dev = SEE pruning.
+
+| position  | nodes (PVS) | nodes (SEE) | reduction |
+|-----------|------------:|------------:|----------:|
+| startpos  |       4,654 |       4,399 |      1.1x |
+| kiwipete  |     627,243 |     176,515 |      3.6x |
+| endgame   |       1,721 |       1,563 |      1.1x |
+| position4 |      54,694 |      26,349 |      2.1x |
+| position5 |      71,743 |      52,729 |      1.4x |
+| position6 |     104,265 |      15,803 |      6.6x |
+| **total** | **864,320** | **277,358** |      3.1x |
+
+3.1x fewer nodes, and the quiescence share falls from ~96% to ~89%. The spread is
+the SEE signature: tactical positions full of bad captures collapse (position6
+6.6x, kiwipete 3.6x) while quiet positions with nothing to prune barely move
+(startpos/endgame ~1.1x). NPS dips ~3.57M -> ~3.3M (the per-capture swap-off is
+not free), but the node cut dominates - wall-clock is ~2.7x faster at depth 4.
+
+Depth-6 suite total (the new default signature): **2,103,837** nodes at ~3.3M nps
+(~640ms).
+
 ## Per-commit node signatures
+
+Node counts are deterministic - a build's fingerprint. Every engine commit
+stamps its suite total as a `Bench: <nodes>` trailer (the same number OpenBench
+reads), and `bench.csv` is the committed snapshot of all of them:
+
+    tools/gen-benchcsv.sh > bench.csv
+
+A node-count change across a commit is a behaviour change; an unchanged count
+across a perf/refactor commit is the proof it was behaviour-preserving (the
+magic-bitboard and in-place-buffer commits both hold 318,497 at depth 4). The
+signature depth is 4 through the PVS commit and 6 from SEE pruning onward (see
+above), so compare counts only within the same depth era.
 
 Node counts are deterministic - a build's fingerprint. Every engine commit
 stamps its depth-4 suite total as a `Bench: <nodes>` trailer (the same number
