@@ -162,6 +162,49 @@ check cost more wall-clock than the nodes it saved. It is parked, not deleted -
 re-enable it once a richer (slower) eval lowers NPS enough to flip the trade.
 The parked quiescence TT carries the same per-node-overhead-vs-NPS lesson.
 
+## Tapered PeSTO eval (depth 4)
+
+Replacing the single untapered piece-square table with PeSTO's middlegame/
+endgame tables (blended by a phase scalar) *raises* the depth-4 suite from
+**10,034,609** (the LMR baseline) to **11,869,924** nodes - about +18%. That is
+expected: a knowledge feature changes the scores, which reshuffles move ordering
+and shifts the tree; it does not prune. The payoff is strength, not nodes
+(+126 Elo STC - see `sprt-results.md`), and it is what makes the deeper search
+PVS then buys actually worth having.
+
+## Principal variation search (depth 4)
+
+PVS searches only the first (best-ordered) move with the full window and scouts
+the rest with a null window, re-searching wide only when a scout beats alpha.
+Unlike the eval, this is **behaviour-preserving**: at every fixed depth the score
+and PV are byte-identical to the pre-PVS engine (verified across the suite), so
+the node drop is pure efficiency, not a different search.
+
+- Machine: Apple M3 Pro, `--release`
+- Depth: 4
+- Base = the PeSTO-eval commit; Dev = PVS.
+
+| position  | nodes (PeSTO) | nodes (PVS) | reduction |
+|-----------|--------------:|------------:|----------:|
+| startpos  |        14,430 |       4,654 |      3.1x |
+| kiwipete  |     9,377,692 |     627,243 |     15.0x |
+| endgame   |         9,410 |       1,721 |      5.5x |
+| position4 |       380,661 |      54,694 |      7.0x |
+| position5 |       504,532 |      71,743 |      7.0x |
+| position6 |     1,583,199 |     104,265 |     15.2x |
+| **total** | **11,869,924** | **864,320** | **13.7x** |
+
+13.7x fewer nodes at the same depth - far above the textbook ~1.3-2x for PVS over
+alpha-beta. The per-position spread tells why: the tactical positions (kiwipete,
+position6) collapse ~15x while quiet startpos only 3x. The pre-PVS suite was ~99%
+quiescence nodes, a frontier explosion - moves at the depth-1 frontier are
+unordered (`ORDER_MIN_DEPTH = 2`), so full-window alpha-beta there fanned out
+into a huge capture search, and the null-window scouts cut those subtrees off
+cheaply. So PVS here is half the textbook feature and half a repair of pruning
+the engine was leaving on the table; at equal time it now searches ~2-3 plies
+deeper, worth +299 Elo STC. NPS is roughly flat (3.28M -> 3.57M) - the
+scout/re-search bookkeeping is negligible per node.
+
 ## Per-commit node signatures
 
 Node counts are deterministic - a build's fingerprint. Every engine commit

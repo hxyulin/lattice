@@ -38,3 +38,8 @@ b01d438,2026-06-29,"feat(search): null-move pruning",10883729
 30b5ad5,2026-06-29,"chore(uci): name the engine ""Lattice""",10034609
 1692ff4,2026-06-29,"docs: refresh CLAUDE.md for the lattice workspace",10034609
 cd6a578,2026-06-29,"chore(dev): stamp Bench trailers via a pre-commit hook",
+c9acecf,2026-06-30,"docs(bench): reformat BENCH.md and add generated bench.csv",
+f1241a1,2026-06-30,"docs(sprt): record per-feature SPRT results",
+e66d738,2026-06-30,"feat(eval): tapered material and PST via PeSTO tables",11869924
+f91ae85,2026-06-30,"test(search): update tests for PeSTO",11869924
+184cfe9,2026-06-30,"feat(search): principal variation search",864320
