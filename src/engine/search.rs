@@ -41,19 +41,19 @@ pub struct TunableSpec {
 pub const TUNABLES: &[TunableSpec] = &[
     TunableSpec {
         name: "RfpMargin",
-        default: 80,
+        default: 35,
         min: 20,
         max: 200,
     },
     TunableSpec {
         name: "LmrBase",
-        default: 75,
+        default: 57,
         min: 0,
         max: 200,
     },
     TunableSpec {
         name: "LmrDivisor",
-        default: 225,
+        default: 255,
         min: 100,
         max: 400,
     },
@@ -65,19 +65,19 @@ pub const TUNABLES: &[TunableSpec] = &[
     },
     TunableSpec {
         name: "HistoryMax",
-        default: 7000,
+        default: 7155,
         min: 1000,
         max: 32000,
     },
     TunableSpec {
         name: "HistoryBonus",
-        default: 100,
+        default: 95,
         min: 10,
         max: 400,
     },
     TunableSpec {
         name: "HistoryMalus",
-        default: 100,
+        default: 98,
         min: 10,
         max: 400,
     },
