@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::{Board, Color, Move, MoveFlag, PieceType};
+use crate::{Board, Color, Move, MoveFlag, MoveList, PieceType};
 
 use crate::{MATE, Score, evaluate};
 
@@ -303,6 +303,9 @@ impl Searcher {
 
         let mut best = -MATE;
         let mut legal = 0u32;
+        // Quiets searched at this node that did not cut; charged a history malus
+        // if a later quiet causes the cutoff.
+        let mut tried_quiets = MoveList::new();
 
         let mut moves = board.pseudo_legal_moves();
         if depth >= ORDER_MIN_DEPTH {
@@ -316,18 +319,26 @@ impl Searcher {
                 let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
                 if score >= beta {
                     board.unmake_move(*mv, undo);
-                    // A quiet move that fails high becomes a killer and earns
-                    // history credit; captures and promotions are excluded
-                    // (MVV-LVA orders them). After the unmake, `side_to_move` is
-                    // the mover again.
+                    // A quiet move that fails high becomes a killer and earns a
+                    // history bonus; the quiets searched before it earn a malus.
+                    // Captures and promotions are excluded (MVV-LVA orders them).
+                    // After the unmake, `side_to_move` is the mover again.
                     if !mv.flag().is_capture() && !mv.flag().is_promotion() {
+                        let side = board.side_to_move();
+                        let bonus = (depth * depth) as i32;
                         self.store_killer(ply, *mv);
-                        self.update_history(board.side_to_move(), *mv, depth);
+                        self.update_history(side, *mv, bonus);
+                        for q in tried_quiets.as_slice() {
+                            self.update_history(side, *q, -bonus);
+                        }
                     }
                     return score; // beta cutoff
                 }
                 alpha = alpha.max(score);
                 best = best.max(score);
+                if !mv.flag().is_capture() && !mv.flag().is_promotion() {
+                    tried_quiets.push(*mv);
+                }
             }
             board.unmake_move(*mv, undo);
         }
@@ -356,14 +367,19 @@ impl Searcher {
         }
     }
 
-    /// Credit a quiet cutoff move in the butterfly history. The bonus is `depth^2`
-    /// (a cutoff found deeper in the tree was more expensive to discover, so it
-    /// weighs more), saturating at [`HISTORY_MAX`]. `side` is the move's mover.
-    fn update_history(&mut self, side: Color, mv: Move, depth: u32) {
-        let bonus = (depth * depth) as i32;
+    /// Nudge a quiet move's butterfly-history entry by a signed `delta` (positive
+    /// for the cutoff move, negative for quiets that were searched but did not
+    /// cut). Uses the history-gravity update: the entry is pulled toward the new
+    /// evidence in proportion to how saturated it already is, so it behaves as an
+    /// exponential moving average bounded by [`HISTORY_MAX`] (recent evidence
+    /// outweighs stale evidence, and the entry can go negative to mark a quiet as
+    /// bad) rather than a saturating sum. `side` is the move's mover.
+    fn update_history(&mut self, side: Color, mv: Move, delta: i32) {
+        let cap = HISTORY_MAX;
         let cell = &mut self.history[side.as_u8() as usize][mv.from().index() as usize]
             [mv.to().index() as usize];
-        *cell = (*cell + bonus).min(HISTORY_MAX);
+        let d = delta.clamp(-cap, cap);
+        *cell += d - *cell * d.abs() / cap;
     }
 }
 
