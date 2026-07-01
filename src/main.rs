@@ -1,6 +1,9 @@
 //! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
 
 use std::io::{self, BufReader, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use lattice::{Board, Color, Move};
@@ -37,7 +40,11 @@ fn main() -> io::Result<()> {
     // Output goes through emit() (a brief per-message stdout lock), not the
     // interface's writer, so give it a sink; it is only used to read commands.
     let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::sink());
-    let mut board = Board::starting_position();
+    // The board lives in exactly one place at a time: `idle` while nothing runs;
+    // on `go` it moves into the worker thread and `running` holds the handle
+    // until `reap` joins the worker and brings the board back.
+    let mut idle: Option<Board> = Some(Board::starting_position());
+    let mut running: Option<RunningSearch> = None;
 
     while let Some(cmd) = uci.poll().map_err(io_err)? {
         match cmd {
@@ -47,8 +54,12 @@ fn main() -> io::Result<()> {
                 emit("uciok");
             }
             UciCommand::IsReady => emit("readyok"),
-            UciCommand::NewGame => board = Board::starting_position(),
+            UciCommand::NewGame => {
+                reap(&mut idle, &mut running);
+                idle = Some(Board::starting_position());
+            }
             UciCommand::Position { start, moves } => {
+                reap(&mut idle, &mut running);
                 let base = match start {
                     StartPos::Startpos => Some(Board::starting_position()),
                     StartPos::Fen(fen) => Board::from_fen(&fen).ok(),
@@ -60,11 +71,13 @@ fn main() -> io::Result<()> {
                             let _ = b.make_move(mv); // discard Undo: GUI moves aren't unmade
                         }
                     }
-                    board = b;
+                    idle = Some(b);
                 }
             }
             UciCommand::Go(go) => {
+                reap(&mut idle, &mut running);
                 if let Some(depth) = go.perft {
+                    let board = idle.as_mut().expect("idle after reap");
                     let mut total = 0;
                     for (mv, n) in board.perft_divide(depth) {
                         emit(&format!("{mv}: {n}"));
@@ -72,36 +85,78 @@ fn main() -> io::Result<()> {
                     }
                     emit(&format!("\nNodes searched: {total}"));
                 } else {
-                    let limits = limits_from_go(&go, board.side_to_move());
-                    let start = Instant::now();
-                    // Emit an `info` line as each iterative-deepening depth
-                    // completes, so a GUI/Lichess sees the search progress live.
-                    let mut on_iter = |info: SearchInfo| {
-                        let pv = info
+                    // Hand the board to a worker so the read loop stays free for
+                    // `stop`/`isready`/`quit`. The worker prints its own
+                    // `info`/`bestmove` (a channel back would not print until the
+                    // main thread returned from its blocking stdin read) and
+                    // returns the board through the handle.
+                    let mut board = idle.take().expect("idle after reap");
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let mut limits = limits_from_go(&go, board.side_to_move());
+                    limits.stop = Some(stop.clone());
+                    let handle = thread::spawn(move || {
+                        let start = Instant::now();
+                        // One `info` line per completed iterative-deepening depth.
+                        let mut on_iter = |info: SearchInfo| {
+                            let pv = info
+                                .best_move
+                                .map_or_else(|| "0000".to_string(), |m| m.to_string());
+                            emit(&format!(
+                                "info depth {} score {} nodes {} nps {} pv {pv}",
+                                info.depth,
+                                format_score(info.score),
+                                info.nodes,
+                                nps(info.nodes, start.elapsed()),
+                            ));
+                        };
+                        let result = search_with_info(&mut board, &limits, &mut on_iter);
+                        let pv = result
                             .best_move
                             .map_or_else(|| "0000".to_string(), |m| m.to_string());
-                        emit(&format!(
-                            "info depth {} score {} nodes {} nps {} pv {pv}",
-                            info.depth,
-                            format_score(info.score),
-                            info.nodes,
-                            nps(info.nodes, start.elapsed()),
-                        ));
-                    };
-                    let result = search_with_info(&mut board, &limits, &mut on_iter);
-
-                    let pv = result
-                        .best_move
-                        .map_or_else(|| "0000".to_string(), |m| m.to_string());
-                    emit(&format!("bestmove {pv}"));
+                        emit(&format!("bestmove {pv}"));
+                        board
+                    });
+                    running = Some(RunningSearch { stop, handle });
                 }
             }
-            UciCommand::Stop => {} // nothing to stop while single-threaded
-            UciCommand::Quit => break,
+            UciCommand::Stop => {
+                // Signal the worker; it unwinds and prints `bestmove`. The board
+                // is reclaimed by the next command's `reap`. No-op if idle.
+                if let Some(r) = &running {
+                    r.stop.store(true, Ordering::Relaxed);
+                }
+            }
+            UciCommand::Quit => {
+                reap(&mut idle, &mut running); // stop + join the worker cleanly
+                break;
+            }
             UciCommand::Unknown(_) => {} // UCI: ignore unrecognized input
         }
     }
     Ok(())
+}
+
+/// A search running on a worker thread.
+///
+/// # Notes
+/// The worker owns the `Board` for the search and returns it through `handle`;
+/// `stop` is the flag the main thread raises to abort it.
+struct RunningSearch {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<Board>,
+}
+
+/// Bring the engine back to idle, joining any running worker and reclaiming its
+/// `Board`. No-op if already idle.
+///
+/// # Notes
+/// Invariant: on return, `idle.is_some()` and `running.is_none()`.
+fn reap(idle: &mut Option<Board>, running: &mut Option<RunningSearch>) {
+    if let Some(r) = running.take() {
+        r.stop.store(true, Ordering::Relaxed);
+        let reclaimed = r.handle.join().expect("search thread panicked");
+        *idle = Some(reclaimed);
+    }
 }
 
 /// Write one UCI line to stdout, newline-terminated and flushed, under a brief
