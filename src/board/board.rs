@@ -1,5 +1,7 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
+#[cfg(feature = "nnue")]
+use super::nnue;
 use super::pesto::PST_DELTA;
 use super::zobrist::{ZOBRIST, ZobristHash};
 use crate::{Bitboard, Color, Move, MoveFlag, Piece, PieceType, Square};
@@ -135,6 +137,14 @@ pub struct Board {
     eval_mg: i32,
     eval_eg: i32,
     eval_phase: i32,
+    /// Incrementally-maintained NNUE accumulators, one per perspective, keyed on
+    /// absolute color so they are invariant to the side to move. Seeded from the
+    /// mailbox on setup and kept in sync by `put_piece`/`remove_piece`; the
+    /// forward pass (see `board::nnue`) picks the side to move's as `us`.
+    #[cfg(feature = "nnue")]
+    nnue_white: [i16; nnue::HIDDEN],
+    #[cfg(feature = "nnue")]
+    nnue_black: [i16; nnue::HIDDEN],
     /// Incrementally-maintained Zobrist hash. A pure function of the other
     /// fields (excluding the move counters), kept in sync by `put_piece`/
     /// `remove_piece` and the state bracket in `make_move`/`unmake_move`.
@@ -159,12 +169,10 @@ pub struct NullUndo {
 }
 
 impl Board {
-    /// Creates a new board with the starting position.
-    ///
-    /// # Notes
-    /// Built directly from precomputed bitboards, so it is `const`.
-    #[must_use]
-    pub const fn starting_position() -> Self {
+    /// Shared const core for [`Self::starting_position`]: the fully-seeded
+    /// starting board, with the NNUE accumulator (when compiled in) left zeroed
+    /// for the public wrapper to seed at runtime.
+    const fn startpos_core() -> Self {
         let bitboards = [
             Bitboard::from_bits(0x0000_0000_0000_FF00), //  0 white pawns   (rank 2)
             Bitboard::from_bits(0x00FF_0000_0000_0000), //  1 black pawns   (rank 7)
@@ -205,6 +213,10 @@ impl Board {
             eval_mg: 0,
             eval_eg: 0,
             eval_phase: 0,
+            #[cfg(feature = "nnue")]
+            nnue_white: [0; nnue::HIDDEN],
+            #[cfg(feature = "nnue")]
+            nnue_black: [0; nnue::HIDDEN],
             hash: ZobristHash(0),
         };
         board.seed_eval_acc();
@@ -212,10 +224,25 @@ impl Board {
         board
     }
 
-    /// A board with no pieces, white to move, full castling rights, and the
-    /// move counters at their initial values.
+    /// Creates a new board with the starting position.
     #[must_use]
-    pub const fn empty() -> Self {
+    #[cfg(not(feature = "nnue"))]
+    pub const fn starting_position() -> Self {
+        Self::startpos_core()
+    }
+
+    /// Creates a new board with the starting position.
+    #[must_use]
+    #[cfg(feature = "nnue")]
+    pub fn starting_position() -> Self {
+        let mut board = Self::startpos_core();
+        board.seed_nnue_acc();
+        board
+    }
+
+    /// Shared const core for [`Self::empty`]: an empty board with the NNUE
+    /// accumulator (when compiled in) left zeroed for the public wrapper to seed.
+    const fn empty_core() -> Self {
         let mut board = Self {
             bitboards: [Bitboard::EMPTY; 12],
             en_passant: None,
@@ -227,9 +254,31 @@ impl Board {
             eval_mg: 0,
             eval_eg: 0,
             eval_phase: 0,
+            #[cfg(feature = "nnue")]
+            nnue_white: [0; nnue::HIDDEN],
+            #[cfg(feature = "nnue")]
+            nnue_black: [0; nnue::HIDDEN],
             hash: ZobristHash(0),
         };
         board.hash = board.compute_hash();
+        board
+    }
+
+    /// A board with no pieces, white to move, full castling rights, and the
+    /// move counters at their initial values.
+    #[must_use]
+    #[cfg(not(feature = "nnue"))]
+    pub const fn empty() -> Self {
+        Self::empty_core()
+    }
+
+    /// A board with no pieces, white to move, full castling rights, and the
+    /// move counters at their initial values.
+    #[must_use]
+    #[cfg(feature = "nnue")]
+    pub fn empty() -> Self {
+        let mut board = Self::empty_core();
+        board.seed_nnue_acc();
         board
     }
 
@@ -384,6 +433,32 @@ impl Board {
         self.eval_phase = phase;
     }
 
+    /// Recompute the NNUE accumulators from scratch over the mailbox and store
+    /// them. The setup analogue of [`Self::seed_eval_acc`]; `put_piece`/
+    /// `remove_piece` then keep them in sync incrementally.
+    #[cfg(feature = "nnue")]
+    fn seed_nnue_acc(&mut self) {
+        self.nnue_white = nnue::bias();
+        self.nnue_black = nnue::bias();
+        for sq in 0..64 {
+            if let Some(piece) = self.pieces[sq] {
+                nnue::add(&mut self.nnue_white, &mut self.nnue_black, piece, sq);
+            }
+        }
+    }
+
+    /// Static NNUE evaluation, in centipawns from the side-to-move's perspective,
+    /// read from the incrementally maintained accumulators.
+    #[cfg(feature = "nnue")]
+    #[must_use]
+    pub fn nnue_eval(&self) -> i32 {
+        nnue::forward(
+            &self.nnue_white,
+            &self.nnue_black,
+            matches!(self.side_to_move, Color::White),
+        )
+    }
+
     /// Place a piece on `sq`, overwriting any existing piece.
     ///
     /// Updates the bitboard and the `piece` array.
@@ -395,6 +470,13 @@ impl Board {
         self.eval_mg += d.mg;
         self.eval_eg += d.eg;
         self.eval_phase += d.ph;
+        #[cfg(feature = "nnue")]
+        nnue::add(
+            &mut self.nnue_white,
+            &mut self.nnue_black,
+            piece,
+            sq.index() as usize,
+        );
     }
 
     /// Remove whatever piece is on `sq` (if any).
@@ -407,6 +489,13 @@ impl Board {
             self.eval_mg -= d.mg;
             self.eval_eg -= d.eg;
             self.eval_phase -= d.ph;
+            #[cfg(feature = "nnue")]
+            nnue::sub(
+                &mut self.nnue_white,
+                &mut self.nnue_black,
+                piece,
+                sq.index() as usize,
+            );
         }
     }
 
@@ -674,6 +763,8 @@ impl Board {
         // the hash also folds in side/castling/en-passant.
         Self::parse_fen_into(fen, &mut board)?;
         board.seed_eval_acc();
+        #[cfg(feature = "nnue")]
+        board.seed_nnue_acc();
         board.hash = board.compute_hash();
         Ok(board)
     }
@@ -1342,5 +1433,62 @@ mod tests {
         )
         .unwrap();
         assert_eval_acc_consistent(&mut kiwi, 3);
+    }
+
+    /// The NNUE analogue of `recompute_eval_acc`: both accumulators reseeded from
+    /// scratch via the trusted seed path.
+    #[cfg(feature = "nnue")]
+    fn recompute_nnue_acc(board: &Board) -> ([i16; nnue::HIDDEN], [i16; nnue::HIDDEN]) {
+        let mut scratch = board.clone();
+        scratch.seed_nnue_acc();
+        (scratch.nnue_white, scratch.nnue_black)
+    }
+
+    /// The NNUE analogue of `assert_eval_acc_consistent`: at every node the
+    /// incrementally maintained accumulators must match a full reseed - before,
+    /// after make (even when illegal), and after unmake.
+    #[cfg(feature = "nnue")]
+    fn assert_nnue_acc_consistent(board: &mut Board, depth: u32) {
+        let live = (board.nnue_white, board.nnue_black);
+        assert_eq!(
+            live,
+            recompute_nnue_acc(board),
+            "incremental nnue acc diverged"
+        );
+        if depth == 0 {
+            return;
+        }
+        let moves = board.pseudo_legal_moves();
+        for &m in moves.iter() {
+            let undo = board.make_move(m);
+            assert_eq!(
+                (board.nnue_white, board.nnue_black),
+                recompute_nnue_acc(board),
+                "nnue acc wrong after make {m}"
+            );
+            if board.is_legal() {
+                assert_nnue_acc_consistent(board, depth - 1);
+            }
+            board.unmake_move(m, undo);
+            assert_eq!(
+                (board.nnue_white, board.nnue_black),
+                live,
+                "nnue acc not restored after unmake {m}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "nnue")]
+    fn nnue_acc_incremental_matches_recompute() {
+        // Same walk as the tapered-eval test: every make/unmake through
+        // put/remove must keep the incremental accumulators equal to a reseed,
+        // across captures, castling, en passant, and promotions.
+        assert_nnue_acc_consistent(&mut Board::starting_position(), 3);
+        let mut kiwi = Board::from_fen(
+            b"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        assert_nnue_acc_consistent(&mut kiwi, 3);
     }
 }
