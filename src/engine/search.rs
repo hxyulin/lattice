@@ -8,6 +8,7 @@
 //!  - SEE pruning of losing captures in quiescence
 
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -375,7 +376,11 @@ impl Searcher {
                     && Some(*mv) != killers[1]
                     && !in_check;
                 let score = if reduce {
-                    let reduced = full_depth.saturating_sub(LMR_R);
+                    // Reduce by the table amount but keep at least one ply of real
+                    // search, so the scout never collapses straight to quiescence.
+                    let reduced = full_depth
+                        .saturating_sub(lmr_reduction(depth, legal))
+                        .max(1);
                     let s = -self.negamax(board, reduced, ply + 1, -beta, -alpha, true);
                     if s > alpha {
                         -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
@@ -552,12 +557,48 @@ const LMR_MIN_DEPTH: u32 = 3;
 /// onward is eligible for reduction.
 const LMR_MIN_MOVES: u32 = 3;
 
-/// Late-move depth reduction - a conservative fixed 1-ply cut.
+/// Constant offset of the late-move reduction formula (in plies).
 ///
 /// # Notes
-/// Kept fixed (not a `log(depth)*log(move number)` table) so this feature's Elo
-/// is attributable on its own.
-const LMR_R: u32 = 1;
+/// `R = LMR_BASE + ln(depth) * ln(move_number) / LMR_DIVISOR`. The base shifts
+/// every entry; the divisor sets how fast the reduction grows. Both are the
+/// classic Ethereal-family starting values and are the primary LMR tuning
+/// knobs - too large over-reduces (tactically blind), too small saves nothing.
+const LMR_BASE: f64 = 0.75;
+
+/// Divisor controlling how quickly the late-move reduction grows with depth and
+/// move number. See [`LMR_BASE`].
+const LMR_DIVISOR: f64 = 2.25;
+
+/// Side length of the [`LMR_TABLE`] - depth and move number are each clamped to
+/// this before indexing.
+const LMR_DIM: usize = MAX_PLY as usize;
+
+/// Precomputed late-move reductions indexed by `[depth][move_number]`.
+///
+/// The `ln(depth) * ln(move_number)` shape grows the reduction sub-linearly:
+/// later moves at deeper nodes are reduced harder, but with diminishing
+/// aggressiveness as the cost of an over-reduction rises. Row and column 0 are
+/// unused (depth and move number both start at 1).
+static LMR_TABLE: LazyLock<[[u8; LMR_DIM]; LMR_DIM]> = LazyLock::new(|| {
+    let mut t = [[0u8; LMR_DIM]; LMR_DIM];
+    for depth in 1..LMR_DIM {
+        for moves in 1..LMR_DIM {
+            let r = LMR_BASE + (depth as f64).ln() * (moves as f64).ln() / LMR_DIVISOR;
+            t[depth][moves] = r as u8;
+        }
+    }
+    t
+});
+
+/// Late-move reduction (in plies) for a quiet move searched at `depth` with
+/// `move_number` legal moves already tried. Both arguments are clamped to the
+/// table bounds.
+fn lmr_reduction(depth: u32, move_number: u32) -> u32 {
+    let d = (depth as usize).min(LMR_DIM - 1);
+    let m = (move_number as usize).min(LMR_DIM - 1);
+    u32::from(LMR_TABLE[d][m])
+}
 
 /// Whether `side` has any piece beyond pawns and the king. Null-move pruning is
 /// gated on this because zugzwang - a free "pass" being misleadingly good -
