@@ -11,4 +11,5 @@ mod engine;
 mod uci;
 
 pub use board::*;
+pub use engine::*;
 pub use uci::*;
