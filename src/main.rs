@@ -1,11 +1,11 @@
 //! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
 
 use std::io::{self, BufReader};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use lattice::{Board, Move};
-use lattice::{MATE, Score, SearchInfo, bench, nps, search_with_info};
-use lattice::{StartPos, UciCommand, UciInterface, UciMove};
+use lattice::{Board, Color, Move};
+use lattice::{Go, StartPos, UciCommand, UciInterface, UciMove};
+use lattice::{Limits, MATE, Score, SearchInfo, bench, budget, nps, search_with_info};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
 const DEFAULT_DEPTH: u32 = 4;
@@ -61,7 +61,7 @@ fn main() -> io::Result<()> {
                     uci.send(&format!("\nNodes searched: {total}"))
                         .map_err(io_err)?;
                 } else {
-                    let depth = go.depth.unwrap_or(DEFAULT_DEPTH);
+                    let limits = limits_from_go(&go, board.side_to_move());
                     let start = Instant::now();
                     // Emit an `info` line as each iterative-deepening depth
                     // completes, so a GUI/Lichess sees the search progress live.
@@ -77,7 +77,7 @@ fn main() -> io::Result<()> {
                             nps(info.nodes, start.elapsed()),
                         ));
                     };
-                    let result = search_with_info(&mut board, depth, &mut on_iter);
+                    let result = search_with_info(&mut board, &limits, &mut on_iter);
                     drop(on_iter);
 
                     let pv = result
@@ -92,6 +92,40 @@ fn main() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Translate a parsed UCI `go` into engine [`Limits`].
+///
+/// `movetime` wins outright; otherwise the side-to-move's clock and increment
+/// give a per-move budget via [`budget`]. A bare `go` with no limit at all falls
+/// back to [`DEFAULT_DEPTH`] so the engine never searches forever.
+fn limits_from_go(go: &Go, stm: Color) -> Limits {
+    let move_time = go.movetime.map(Duration::from_millis).or_else(|| {
+        let (remaining, inc) = match stm {
+            Color::White => (go.wtime, go.winc),
+            Color::Black => (go.btime, go.binc),
+        };
+        remaining.map(|r| {
+            budget(
+                Duration::from_millis(r),
+                Duration::from_millis(inc.unwrap_or(0)),
+            )
+        })
+    });
+    let mut limits = Limits {
+        depth: go.depth,
+        nodes: go.nodes,
+        move_time,
+    };
+
+    if !go.infinite
+        && limits.depth.is_none()
+        && limits.nodes.is_none()
+        && limits.move_time.is_none()
+    {
+        limits.depth = Some(DEFAULT_DEPTH);
+    }
+    limits
 }
 
 /// Run the fixed-suite search benchmark to `depth` and print a human-readable

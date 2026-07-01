@@ -10,7 +10,7 @@ mod search;
 
 pub use bench::{BenchEntry, BenchReport, bench, nps};
 pub use eval::evaluate;
-pub use search::{SearchInfo, SearchResult, search, search_with_info};
+pub use search::{Limits, MAX_PLY, SearchInfo, SearchResult, budget, search, search_with_info};
 
 /// A position score in centipawns,
 pub type Score = i32;
