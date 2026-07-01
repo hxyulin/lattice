@@ -4,7 +4,7 @@ use std::io::{self, BufReader};
 use std::time::Instant;
 
 use lattice::{Board, Move};
-use lattice::{MATE, Score, bench, nps, search};
+use lattice::{MATE, Score, SearchInfo, bench, nps, search_with_info};
 use lattice::{StartPos, UciCommand, UciInterface, UciMove};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
@@ -63,23 +63,26 @@ fn main() -> io::Result<()> {
                 } else {
                     let depth = go.depth.unwrap_or(DEFAULT_DEPTH);
                     let start = Instant::now();
-                    let result = search(&mut board, depth);
-                    let elapsed = start.elapsed();
+                    // Emit an `info` line as each iterative-deepening depth
+                    // completes, so a GUI/Lichess sees the search progress live.
+                    let mut on_iter = |info: SearchInfo| {
+                        let pv = info
+                            .best_move
+                            .map_or_else(|| "0000".to_string(), |m| m.to_string());
+                        let _ = uci.send(&format!(
+                            "info depth {} score {} nodes {} nps {} pv {pv}",
+                            info.depth,
+                            format_score(info.score),
+                            info.nodes,
+                            nps(info.nodes, start.elapsed()),
+                        ));
+                    };
+                    let result = search_with_info(&mut board, depth, &mut on_iter);
+                    drop(on_iter);
 
-                    // Integer nps; clamp elapsed up to 1us so a sub-microsecond
-                    // search doesn't divide by zero.
-                    let micros = elapsed.as_micros().max(1);
-                    let nps = (u128::from(result.nodes) * 1_000_000 / micros) as u64;
                     let pv = result
                         .best_move
                         .map_or_else(|| "0000".to_string(), |m| m.to_string());
-
-                    let nodes = result.nodes;
-                    uci.send(&format!(
-                        "info depth {depth} score {} nodes {nodes} nps {nps} pv {pv}",
-                        format_score(result.score),
-                    ))
-                    .map_err(io_err)?;
                     uci.send(&format!("bestmove {pv}")).map_err(io_err)?;
                 }
             }

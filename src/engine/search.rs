@@ -1,5 +1,6 @@
 //! Recursive search of game state using the following techniques to speed up and rank moves:
 //!  - Negamax (minimax)
+//!  - Iterative deepening
 
 use crate::{Board, Move};
 
@@ -15,12 +16,32 @@ pub struct SearchResult {
     pub nodes: u64,
 }
 
-/// Search `board` to `depth` plies and return the best move with its score.
+/// A snapshot of one completed iterative-deepening iteration, passed to
+/// [`search_with_info`]'s callback so a UCI front end can emit an `info` line
+/// per depth as the search deepens.
+#[derive(Clone, Copy)]
+pub struct SearchInfo {
+    /// Depth, in plies, of the iteration that just completed.
+    pub depth: u32,
+    /// Best move from the root at this depth (`None` only with no legal move).
+    pub best_move: Option<Move>,
+    /// Score of `best_move`, from the side-to-move's perspective.
+    pub score: Score,
+    /// Cumulative nodes searched so far.
+    pub nodes: u64,
+}
+
+/// Search `board` to `depth` plies, reporting each completed depth to `on_iter`.
 ///
-/// `depth` is the number of plies to look ahead; `depth == 0` just statically
-/// evaluates the position and returns no move.
+/// Iterative deepening drives the search; `on_iter` fires once per completed
+/// iteration, in increasing-depth order, so a front end can show the search
+/// deepening live. `depth == 0` just statically evaluates and reports nothing.
 #[must_use]
-pub fn search(board: &mut Board, depth: u32) -> SearchResult {
+pub fn search_with_info(
+    board: &mut Board,
+    depth: u32,
+    on_iter: &mut dyn FnMut(SearchInfo),
+) -> SearchResult {
     if depth == 0 {
         return SearchResult {
             best_move: None,
@@ -31,29 +52,20 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
 
     let mut searcher = Searcher { nodes: 0 };
     let mut best_move = None;
-    let mut best = -MATE;
+    let mut score = -MATE;
 
-    // same as negamax loop but records the best move
-    for mv in &board.pseudo_legal_moves() {
-        let undo = board.make_move(*mv);
-        if board.is_legal() {
-            let score = -searcher.negamax(board, depth - 1, 1);
-            if score > best {
-                best = score;
-                best_move = Some(*mv);
-            }
-        }
-        board.unmake_move(*mv, undo);
+    // Iterative deepening: re-search from depth 1 upward. Each iteration returns
+    // a usable best move (so the search is abortable and time-manageable), and
+    // seeds the next one with its best move for root ordering.
+    for d in 1..=depth {
+        (best_move, score) = searcher.search_root(board, d, best_move);
+        on_iter(SearchInfo {
+            depth: d,
+            best_move,
+            score,
+            nodes: searcher.nodes,
+        });
     }
-
-    // No legal move at the root: checkmate (in check) or stalemate (draw).
-    let score = if best_move.is_some() {
-        best
-    } else if board.in_check(board.side_to_move()) {
-        -MATE
-    } else {
-        0
-    };
 
     SearchResult {
         best_move,
@@ -62,12 +74,63 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     }
 }
 
+/// Search `board` to `depth` plies and return the best move with its score.
+///
+/// The plain entry point for callers (bench, tests) that only want the final
+/// result; see [`search_with_info`] for per-depth reporting.
+#[must_use]
+pub fn search(board: &mut Board, depth: u32) -> SearchResult {
+    search_with_info(board, depth, &mut |_| {})
+}
+
 /// Mutable search state threaded through the recursion.
 struct Searcher {
     nodes: u64,
 }
 
 impl Searcher {
+    /// Search the root to `depth` plies, returning the best move and its score.
+    ///
+    /// `hint` is the best move from the previous iterative-deepening iteration;
+    /// it is searched first (root PV-move ordering). With no pruning yet this
+    /// does not change the result, but sets up the ordering that alpha-beta will
+    /// later exploit.
+    fn search_root(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        hint: Option<Move>,
+    ) -> (Option<Move>, Score) {
+        let mut best_move = None;
+        let mut best = -MATE;
+
+        let moves = board.pseudo_legal_moves();
+        let ordered = hint
+            .into_iter()
+            .chain(moves.iter().copied().filter(|&m| Some(m) != hint));
+        for mv in ordered {
+            let undo = board.make_move(mv);
+            if board.is_legal() {
+                let score = -self.negamax(board, depth - 1, 1);
+                if score > best {
+                    best = score;
+                    best_move = Some(mv);
+                }
+            }
+            board.unmake_move(mv, undo);
+        }
+
+        // No legal move at the root: checkmate (in check) or stalemate (draw).
+        let score = if best_move.is_some() {
+            best
+        } else if board.in_check(board.side_to_move()) {
+            -MATE
+        } else {
+            0
+        };
+        (best_move, score)
+    }
+
     /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
     /// from the root, used only to make mate scores prefer shorter mates.
     fn negamax(&mut self, board: &mut Board, depth: u32, ply: u32) -> Score {
