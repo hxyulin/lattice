@@ -7,6 +7,7 @@
 //!  - Quiescence search
 //!  - SEE pruning of losing captures in quiescence
 //!  - Principal variation search
+//!  - Aspiration windows
 
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -147,7 +148,7 @@ pub fn search_with_info(
     // time-manageable) and seeds the next one with its best move for root
     // ordering.
     for d in 1..=limits.max_depth() {
-        let (bm, sc) = searcher.search_root(board, d, best_move);
+        let (bm, sc) = searcher.aspiration_search(board, d, best_move, score);
         if searcher.stopped {
             break; // partial iteration: discard it, keep the last complete depth
         }
@@ -242,24 +243,63 @@ impl Searcher {
         false
     }
 
-    /// Search the root to `depth` plies, returning the best move and its score.
+    /// Search the root to `depth` with an aspiration window centered on the
+    /// previous iteration's `prev_score`, re-searching with a widening window on
+    /// a fail-low or fail-high. Falls back to a full window for shallow depths
+    /// and mate-range scores, where the estimate is unreliable.
+    ///
+    /// `hint` is the best move from the previous iterative-deepening iteration.
+    fn aspiration_search(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        hint: Option<Move>,
+        prev_score: Score,
+    ) -> (Option<Move>, Score) {
+        let mut delta = ASP_DELTA;
+        let (mut alpha, mut beta) =
+            if depth < ASP_MIN_DEPTH || prev_score.abs() >= MATE - MAX_PLY as Score {
+                (-MATE, MATE)
+            } else {
+                (prev_score - delta, prev_score + delta)
+            };
+        loop {
+            let (bm, sc) = self.search_root(board, depth, hint, alpha, beta);
+            if self.stopped {
+                return (bm, sc); // partial: discarded by the caller
+            }
+            if sc <= alpha && alpha > -MATE {
+                // Fail-low: recenter beta, widen alpha down, keep the prior best
+                // move (this result is unreliable - no move beat alpha).
+                beta = (alpha + beta) / 2;
+                alpha = (sc - delta).max(-MATE);
+                delta *= 2;
+            } else if sc >= beta && beta < MATE {
+                // Fail-high: widen beta up.
+                beta = (sc + delta).min(MATE);
+                delta *= 2;
+            } else {
+                return (bm, sc);
+            }
+        }
+    }
+
+    /// Search the root to `depth` plies inside the window `[alpha, beta]`,
+    /// returning the best move and its score. A score `<= alpha` is a fail-low
+    /// and `>= beta` a fail-high (the caller widens and re-searches).
     ///
     /// `hint` is the best move from the previous iterative-deepening iteration;
-    /// it is searched first (root PV-move ordering). With no pruning yet this
-    /// does not change the result, but sets up the ordering that alpha-beta will
-    /// later exploit.
+    /// it is searched first (root PV-move ordering).
     fn search_root(
         &mut self,
         board: &mut Board,
         depth: u32,
         hint: Option<Move>,
+        mut alpha: Score,
+        beta: Score,
     ) -> (Option<Move>, Score) {
         let mut best_move = None;
         let mut best = -MATE;
-        // The root is a PV node: open the window fully, then raise alpha as
-        // better moves are found so later root moves search a narrower window.
-        let mut alpha = -MATE;
-        let beta = MATE;
 
         let mut moves = board.pseudo_legal_moves();
         let killers = self.killers[0];
@@ -281,7 +321,7 @@ impl Searcher {
                     -self.negamax(board, depth - 1, 1, -beta, -alpha, true)
                 } else {
                     let s = -self.negamax(board, depth - 1, 1, -alpha - 1, -alpha, true);
-                    if s > alpha {
+                    if s > alpha && s < beta {
                         -self.negamax(board, depth - 1, 1, -beta, -alpha, true)
                     } else {
                         s
@@ -290,7 +330,11 @@ impl Searcher {
                 if score > best {
                     best = score;
                     best_move = Some(mv);
-                    alpha = alpha.max(score);
+                }
+                alpha = alpha.max(best);
+                if alpha >= beta {
+                    board.unmake_move(mv, undo);
+                    break; // root fail-high: score is a lower bound, stop early
                 }
             }
             board.unmake_move(mv, undo);
@@ -604,6 +648,18 @@ const ORDER_MIN_DEPTH: u32 = 2;
 
 /// Piece values for move ordering (not evaluation), indexed by `PieceType`.
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
+/// Initial half-width (centipawns) of the root aspiration window.
+///
+/// # Notes
+/// The window opens at `prev_score +/- ASP_DELTA` and doubles on each fail, so a
+/// small value wins the most cutoffs when the estimate holds while still
+/// converging quickly when it does not.
+const ASP_DELTA: Score = 25;
+
+/// First iterative-deepening depth searched with an aspiration window; shallower
+/// iterations use a full window, where the previous score is too rough to trust.
+const ASP_MIN_DEPTH: u32 = 4;
 
 /// Maximum remaining depth at which reverse futility pruning is attempted.
 ///
