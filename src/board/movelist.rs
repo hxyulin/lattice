@@ -2,7 +2,7 @@
 //! replacement for `Vec<Move>` on the movegen and search hot paths.
 
 use std::mem::MaybeUninit;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 use crate::Move;
 
@@ -73,6 +73,16 @@ impl MoveList {
         // `Move` is `Copy` (no `Drop`), so reinterpreting the prefix is sound.
         unsafe { std::slice::from_raw_parts(self.moves.as_ptr().cast::<Move>(), self.len) }
     }
+
+    /// The stored moves as a mutable slice, so the search can reorder in place.
+    #[inline]
+    #[must_use]
+    pub fn as_mut_slice(&mut self) -> &mut [Move] {
+        // SAFETY: identical invariants to `as_slice`; `moves[0..len]` is
+        // initialized and `Move` is `Copy`, so a mutable reinterpretation of
+        // the prefix is sound.
+        unsafe { std::slice::from_raw_parts_mut(self.moves.as_mut_ptr().cast::<Move>(), self.len) }
+    }
 }
 
 impl Default for MoveList {
@@ -87,6 +97,13 @@ impl Deref for MoveList {
     #[inline]
     fn deref(&self) -> &[Move] {
         self.as_slice()
+    }
+}
+
+impl DerefMut for MoveList {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Move] {
+        self.as_mut_slice()
     }
 }
 

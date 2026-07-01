@@ -1,13 +1,14 @@
 //! Recursive search of game state using the following techniques to speed up and rank moves:
 //!  - Negamax (minimax)
 //!  - Alpha-beta pruning
+//!  - MVV-LVA capture move ordering
 //!  - Iterative deepening
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::{Board, Move};
+use crate::{Board, Move, MoveFlag, PieceType};
 
 use crate::{MATE, Score, evaluate};
 
@@ -234,7 +235,9 @@ impl Searcher {
         let mut alpha = -MATE;
         let beta = MATE;
 
-        let moves = board.pseudo_legal_moves();
+        let mut moves = board.pseudo_legal_moves();
+        moves.sort_by_key(|&m| -order_score(board, m));
+        // The PV-move hint still leads; MVV-LVA orders the rest.
         let ordered = hint
             .into_iter()
             .chain(moves.iter().copied().filter(|&m| Some(m) != hint));
@@ -289,7 +292,9 @@ impl Searcher {
         let mut best = -MATE;
         let mut legal = 0u32;
 
-        for mv in &board.pseudo_legal_moves() {
+        let mut moves = board.pseudo_legal_moves();
+        moves.sort_by_key(|&m| -order_score(board, m));
+        for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
@@ -317,6 +322,25 @@ impl Searcher {
 
         best
     }
+}
+
+/// Piece values for move ordering (not evaluation), indexed by `PieceType`.
+const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
+
+/// MVV-LVA ordering key: captures first, most-valuable-victim / least-valuable
+/// attacker. Higher sorts earlier. Quiet moves score 0 (searched last; killers
+/// and history will slot in here later).
+fn order_score(board: &Board, mv: Move) -> i32 {
+    if !mv.flag().is_capture() {
+        return 0;
+    }
+    let attacker = board.piece_at(mv.from()).unwrap().kind();
+    let victim = if mv.flag() == MoveFlag::EnPassant {
+        PieceType::Pawn // the captured pawn sits beside the destination, not on it
+    } else {
+        board.piece_at(mv.to()).unwrap().kind()
+    };
+    VAL[victim as usize] * 100 - VAL[attacker as usize] // MVV dominates, LVA breaks ties
 }
 
 #[cfg(test)]
