@@ -2,3 +2,7 @@
 /.claude/*
 /.worktrees
 /docs/book
+
+# OpenBench `make EXE=...` build artifacts (default EXE + worker's Engine-* names)
+/lattice
+/Engine-*
