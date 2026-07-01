@@ -1,5 +1,6 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
+use super::pesto::PST_DELTA;
 use crate::{Bitboard, Color, Move, MoveFlag, Piece, PieceType, Square};
 
 /// The four castling rights as a bitset (one bit each: white/black x
@@ -126,6 +127,13 @@ pub struct Board {
     full_moves: u16,
     /// Piece mailbox to allow for O(1) piece lookup
     pieces: [Option<Piece>; 64],
+    /// Incrementally-maintained tapered-eval accumulators, White-relative, kept
+    /// in sync by `put_piece`/`remove_piece`. `eval_mg`/`eval_eg` are the
+    /// middlegame/endgame sums (centipawns); `eval_phase` is the raw, uncapped
+    /// game-phase sum. The eval layer clamps the phase and blends.
+    eval_mg: i32,
+    eval_eg: i32,
+    eval_phase: i32,
 }
 
 /// The state needed to revert a [`make_move`](Board::make_move).
@@ -172,7 +180,7 @@ impl Board {
             sq += 1;
         }
 
-        Self {
+        let mut board = Self {
             bitboards,
             en_passant: None,
             castling_rights: CastlingRights::ALL,
@@ -180,7 +188,12 @@ impl Board {
             half_move_clock: 0,
             full_moves: 1,
             pieces,
-        }
+            eval_mg: 0,
+            eval_eg: 0,
+            eval_phase: 0,
+        };
+        board.seed_eval_acc();
+        board
     }
 
     /// A board with no pieces, white to move, full castling rights, and the
@@ -195,6 +208,9 @@ impl Board {
             half_move_clock: 0,
             full_moves: 1,
             pieces: [None; 64],
+            eval_mg: 0,
+            eval_eg: 0,
+            eval_phase: 0,
         }
     }
 
@@ -269,12 +285,58 @@ impl Board {
         self.castling_rights
     }
 
+    /// Running middlegame evaluation accumulator (White-relative, centipawns).
+    #[inline]
+    #[must_use]
+    pub fn eval_mg(&self) -> i32 {
+        self.eval_mg
+    }
+
+    /// Running endgame evaluation accumulator (White-relative, centipawns).
+    #[inline]
+    #[must_use]
+    pub fn eval_eg(&self) -> i32 {
+        self.eval_eg
+    }
+
+    /// Running game-phase accumulator (raw and uncapped; the eval layer clamps it).
+    #[inline]
+    #[must_use]
+    pub fn eval_phase(&self) -> i32 {
+        self.eval_phase
+    }
+
+    /// Recompute the eval accumulators from scratch over the mailbox and store
+    /// them. Seeds constructors that populate the board directly (bypassing the
+    /// `put_piece`/`remove_piece` hooks); `make_move`/`unmake_move` then keep
+    /// them in sync incrementally.
+    const fn seed_eval_acc(&mut self) {
+        let (mut mg, mut eg, mut phase) = (0, 0, 0);
+        let mut sq = 0;
+        while sq < 64 {
+            if let Some(piece) = self.pieces[sq] {
+                let d = PST_DELTA[piece.as_u8() as usize][sq];
+                mg += d.mg;
+                eg += d.eg;
+                phase += d.ph;
+            }
+            sq += 1;
+        }
+        self.eval_mg = mg;
+        self.eval_eg = eg;
+        self.eval_phase = phase;
+    }
+
     /// Place a piece on `sq`, overwriting any existing piece.
     ///
     /// Updates the bitboard and the `piece` array.
     pub fn put_piece(&mut self, sq: Square, piece: Piece) {
         self.bitboard_for_mut(piece).set(sq);
         self.pieces[sq.index() as usize] = Some(piece);
+        let d = PST_DELTA[piece.as_u8() as usize][sq.index() as usize];
+        self.eval_mg += d.mg;
+        self.eval_eg += d.eg;
+        self.eval_phase += d.ph;
     }
 
     /// Remove whatever piece is on `sq` (if any).
@@ -282,6 +344,10 @@ impl Board {
         if let Some(piece) = self.piece_at(sq) {
             self.bitboard_for_mut(piece).clear(sq);
             self.pieces[sq.index() as usize] = None;
+            let d = PST_DELTA[piece.as_u8() as usize][sq.index() as usize];
+            self.eval_mg -= d.mg;
+            self.eval_eg -= d.eg;
+            self.eval_phase -= d.ph;
         }
     }
 
@@ -503,6 +569,9 @@ impl Board {
         board.castling_rights = CastlingRights::NONE;
 
         cur.parse_placement(&mut board)?;
+        // Placement writes the mailbox directly, bypassing put_piece; seed the
+        // eval accumulators here, before any truncated-FEN early return below.
+        board.seed_eval_acc();
         if !cur.next_field()? {
             return Ok(board);
         }
@@ -995,5 +1064,54 @@ mod tests {
 
         let board = Board::from_fen(b"8/8/8/8/8/8/8/8 b - c6").expect("valid fen");
         assert_eq!(board.en_passant, ep("c6"));
+    }
+
+    /// A from-scratch scan of the eval accumulators, via the trusted seed path.
+    fn recompute_eval_acc(board: &Board) -> (i32, i32, i32) {
+        let mut scratch = board.clone();
+        scratch.seed_eval_acc();
+        (scratch.eval_mg, scratch.eval_eg, scratch.eval_phase)
+    }
+
+    /// At every node the incrementally maintained eval sums must match a full
+    /// recompute - before, after make (even when illegal), and after unmake.
+    fn assert_eval_acc_consistent(board: &mut Board, depth: u32) {
+        let live = (board.eval_mg, board.eval_eg, board.eval_phase);
+        assert_eq!(
+            live,
+            recompute_eval_acc(board),
+            "incremental eval acc diverged"
+        );
+        if depth == 0 {
+            return;
+        }
+        let moves = board.pseudo_legal_moves();
+        for &m in moves.iter() {
+            let undo = board.make_move(m);
+            let made = (board.eval_mg, board.eval_eg, board.eval_phase);
+            assert_eq!(
+                made,
+                recompute_eval_acc(board),
+                "eval acc wrong after make {m}"
+            );
+            if board.is_legal() {
+                assert_eval_acc_consistent(board, depth - 1);
+            }
+            board.unmake_move(m, undo);
+            let reverted = (board.eval_mg, board.eval_eg, board.eval_phase);
+            assert_eq!(reverted, live, "eval acc not restored after unmake {m}");
+        }
+    }
+
+    #[test]
+    fn eval_acc_incremental_matches_recompute() {
+        // startpos and kiwipete to depth 3: exercises captures, castling, en
+        // passant, and promotions feeding the accumulator through put/remove.
+        assert_eval_acc_consistent(&mut Board::starting_position(), 3);
+        let mut kiwi = Board::from_fen(
+            b"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        assert_eval_acc_consistent(&mut kiwi, 3);
     }
 }

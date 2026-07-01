@@ -10,6 +10,7 @@ mod board;
 mod r#move;
 mod movegen;
 mod movelist;
+mod pesto;
 mod piece;
 mod square;
 
