@@ -7,8 +7,10 @@ license = "MIT"
 repository = "https://github.com/hxyulin/lattice"
 
 [features]
-# Replace the hand-crafted evaluation with the trained NNUE (loads the embedded
-# network). Off by default: the default build is byte-identical to the HCE engine.
+# NNUE evaluation (loads the embedded network), on by default: this branch is the
+# NNUE engine, and `make`/bench build it so the OpenBench node signature matches.
+# Build the hand-crafted-eval engine with `cargo build --no-default-features`.
+default = ["nnue"]
 nnue = []
 
 [dependencies]
