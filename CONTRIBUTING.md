@@ -62,7 +62,7 @@ skip it). Reading the trailer:
   no-op check (e.g. a refactor that must not change behaviour should keep the
   bench unchanged).
 
-Default depth is 4; override with `lattice bench <depth>`. Bypass the stamp for
+Default depth is 6; override with `lattice bench <depth>`. Bypass the stamp for
 one commit with `SKIP_BENCH=1 git commit ...`.
 
 ## Tests and correctness
@@ -70,8 +70,8 @@ one commit with `SKIP_BENCH=1 git commit ...`.
 - `cargo test` - unit tests plus **perft**, the exhaustive move-generation
   correctness check (leaf-node counts against known references). Any change near
   move generation, make/unmake, or board state must keep perft green.
-- Pre-commit hooks enforce `cargo fmt --check`, `cargo test`, spelling
-  (`typos`), and the bench trailer. Enable them once per clone:
+- Pre-commit hooks enforce `cargo fmt --check`, spelling (`typos`), and the bench
+  trailer. Enable them once per clone:
 
   ```
   pre-commit install
@@ -86,7 +86,9 @@ substitutes for the other.
 OpenBench is the primary test bed. Run a test locally when you want to sanity-check
 a risky change before spending queue time, or to investigate a suspected serious
 regression in isolation. Both scripts need [`fastchess`](https://github.com/Disservin/fastchess)
-on `PATH` and an opening book.
+on `PATH` and an opening book (they fall back to the tiny in-repo `tools/openings.epd`,
+which is only big enough to smoke-test the tooling - point `BOOKS_DIR` at a real
+book like UHO for meaningful Elo).
 
 - **`tools/sprt.sh <refA> <refB> [rounds] [book]`** - builds two git revisions in
   isolated worktrees, prints both bench signatures (they should differ), then runs

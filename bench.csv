@@ -2,5 +2,44 @@ commit,date,subject,bench_nodes
 e8cf2bb,2026-07-01,"feat(engine): material evaluation and fixed-depth negamax search",
 2435e50,2026-07-01,"feat(uci): UCI frontend wiring search to the protocol",
 ab5e2dc,2026-07-01,"feat(bench): search benchmark and OpenBench build entrypoint",11024485
-28409bd,2026-07-01,"chore(dev): stamp Bench trailers via a pre-commit hook",
-7b95e03,2026-07-01,"feat(tools): cross-version SPRT harness and calibration gauntlet",
+44f69ed,2026-07-01,"chore(dev): stamp Bench trailers via a pre-commit hook",
+10f54a5,2026-07-01,"feat(tools): cross-version SPRT harness and calibration gauntlet",
+df5d10e,2026-07-01,"docs: SPRT/bench workflow and generated ledgers",
+7aad052,2026-07-01,"feat(search): iterative deepening with root PV-move ordering",11309249
+71c2d30,2026-07-01,"feat(search): time/node/depth Limits for abortable search",11309249
+7a41d94,2026-07-01,"fix(uci): reserve a move-overhead margin to avoid time forfeits",11309249
+0624236,2026-07-01,"feat(search): external stop flag in Limits for threaded UCI",11309249
+d6995be,2026-07-01,"refactor(uci): route output through a per-message emit() helper",11309249
+aadac8f,2026-07-01,"feat(uci): run search on a worker thread with an atomic stop flag",11309249
+0f766c2,2026-07-01,"feat(eval): piece-square tables",11309249
+9e97267,2026-07-01,"feat(eval): tapered material and PST via PeSTO tables",11309249
+658b024,2026-07-01,"perf(eval): maintain tapered eval incrementally on the board",11309249
+feab1ce,2026-07-01,"feat(search): alpha-beta pruning",394769
+43e4363,2026-07-01,"feat(search): MVV-LVA capture ordering",47953
+f12b8b7,2026-07-01,"perf(search): skip move ordering at the depth-1 frontier",56262
+0f7644f,2026-07-01,"feat(search): killer-move ordering",43170
+0cfe82d,2026-07-01,"feat(search): butterfly history heuristic for quiet ordering",41463
+dfea446,2026-07-01,"feat(search): history malus and gravity for butterfly history",41201
+51355b8,2026-07-01,"feat(search): quiescence search at the leaves",1983862
+0512cf1,2026-07-01,"feat(search): SEE pruning of losing captures in quiescence",6020927
+2f754ab,2026-07-02,"feat(search): null-move pruning",3232600
+cef6c14,2026-07-02,"feat(search): late move reductions",2677312
+50fd0d5,2026-07-02,"feat(search): logarithmic late-move reduction table",2727766
+c1654bb,2026-07-02,"feat(search): principal variation search",1285773
+c97ff3d,2026-07-02,"feat(search): reverse futility pruning at shallow non-PV nodes",437971
+ff7b4fb,2026-07-02,"feat(search): late move pruning of quiet moves",229183
+08e04a2,2026-07-02,"feat(search): extend search by one ply when in check",283144
+d3f28c1,2026-07-02,"feat(search): aspiration windows at the root",309451
+2677aa5,2026-07-02,"feat(core): incremental Zobrist hashing",309451
+05df4fd,2026-07-02,"feat(engine): transposition table module",309451
+1e70286,2026-07-02,"feat(engine): probe/store the transposition table in negamax",281190
+77152ef,2026-07-02,"feat(search): internal iterative reduction",280380
+7c73c42,2026-07-02,"feat(uci): Hash option to size the transposition table",280380
+0e7197b,2026-07-02,"perf(movegen): in-place generate_moves, reuse the buffer in hot paths",280380
+f89ab07,2026-07-02,"perf(movegen): magic bitboards for sliding-piece attacks",280380
+85711da,2026-07-02,"feat(search): expose Tier-1 search params as SPSA tunables",280380
+6765ef3,2026-07-02,"tune(search): apply SPSA-tuned search and history defaults",239827
+91135da,2026-07-02,"feat(eval): piece mobility term in the static evaluation",222963
+91945b3,2026-07-02,"feat(eval): NNUE evaluation behind the nnue feature",222963
+409b79b,2026-07-02,"perf(eval): incremental NNUE accumulator",222963
+cf36c8b,2026-07-02,"build: make nnue the default feature",114259

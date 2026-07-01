@@ -1,7 +1,10 @@
 # Search benchmark
 
-Run with `lattice bench [depth]` (default depth 4). The suite is the six
-canonical perft positions.
+Run with `lattice bench [depth]` (default depth 6). The suite is the six
+canonical perft positions. The default was depth 4 through the quiescence
+commit; SEE pruning then shrank the depth-4 suite to a sub-100ms blip, so the
+`Bench:` trailer / node signature moved to depth 6 from that commit on. Compare
+node counts only within the same depth era.
 
 To compare a new version, re-run the same `bench <depth>` and diff the node
 counts: pruning (alpha-beta, etc.) should cut nodes hard for the same positions.

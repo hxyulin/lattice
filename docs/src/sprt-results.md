@@ -36,4 +36,31 @@ authoritative result.
 <!-- BEGIN generated: tools/gen-ledgers.sh - do not edit this table by hand -->
 | Feature | TC | Games | Elo | Verdict |
 |---------|----|------:|----:|---------|
+| iterative deepening with root PV-move ordering | - | - | - | pending |
+| time/node/depth Limits for abortable search | - | - | - | pending |
+| reserve a move-overhead margin to avoid time forfeits | - | - | - | pending |
+| external stop flag in Limits for threaded UCI | - | - | - | pending |
+| run search on a worker thread with an atomic stop flag | - | - | - | pending |
+| piece-square tables | - | - | - | pending |
+| tapered material and PST via PeSTO tables | - | - | - | pending |
+| alpha-beta pruning | - | - | - | pending |
+| MVV-LVA capture ordering | - | - | - | pending |
+| killer-move ordering | - | - | - | pending |
+| butterfly history heuristic for quiet ordering | - | - | - | pending |
+| history malus and gravity for butterfly history | - | - | - | pending |
+| quiescence search at the leaves | - | - | - | pending |
+| SEE pruning of losing captures in quiescence | - | - | - | pending |
+| null-move pruning | - | - | - | pending |
+| late move reductions | - | - | - | pending |
+| logarithmic late-move reduction table | - | - | - | pending |
+| principal variation search | - | - | - | pending |
+| reverse futility pruning at shallow non-PV nodes | - | - | - | pending |
+| late move pruning of quiet moves | - | - | - | pending |
+| extend search by one ply when in check | - | - | - | pending |
+| aspiration windows at the root | - | - | - | pending |
+| probe/store the transposition table in negamax | - | - | - | pending |
+| internal iterative reduction | - | - | - | pending |
+| apply SPSA-tuned search and history defaults | - | - | - | pending |
+| piece mobility term in the static evaluation | - | - | - | pending |
+| make nnue the default feature | - | - | - | pending |
 <!-- END generated -->

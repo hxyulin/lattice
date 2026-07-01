@@ -1,6 +1,7 @@
 # Lattice
 
-Lattice is a UCI chess engine written in Rust.
+A UCI chess engine written in Rust. The public engine name is **Lattice**;
+the workspace crates are named `lattice-*`.
 
 ## Collaboration
 
@@ -12,19 +13,27 @@ Lattice is a UCI chess engine written in Rust.
 3. Plan before you build. Discuss the design, edge cases, and integration points
    first; begin implementing only once the plan is agreed upon.
 
-## Workspace
+## Crate
 
-A Cargo workspace of three crates:
+A single crate (package `lattice`, output name `lattice`), organized into module
+groups so protocol/IO stays out of the engine core. The grouping is a
+navigational convention, not a compile-enforced wall:
 
-- `lattice-board` - the core: board representation, pieces, squares, moves, and
-  pseudo-legal move generation. Reusable and testable, with no IO.
-- `lattice-engine` - search and evaluation (the "brain"), built on
-  `lattice-board`.
-- `lattice-uci` - the UCI protocol front end: parse commands, format responses.
+- `src/board/` - board representation, bitboards, magic sliders, move generation,
+  Zobrist hashing, the incremental tapered-eval accumulator, and the rules. The
+  pure, perft-tested core.
+- `src/engine/` - search, evaluation, transposition table, and the `bench`
+  suite. Built on `board`.
+- `src/uci.rs` - UCI protocol parsing and types.
+- `src/main.rs` - the runnable binary: the composition root, wiring the modules
+  to stdin/stdout. `src/lib.rs` re-exports the three groups flat.
 
-Keep protocol and IO in `lattice-uci` and pure engine logic in the library
-crates, so the engine stays testable without going through stdin. Documentation
-lives in `docs/` (mdbook) and is written alongside the code.
+Keep protocol/IO in `src/main.rs` and pure engine logic in the modules.
+Documentation lives in `docs/` (mdbook) and is written alongside the code.
+
+The engine is OpenBench-compatible: a root `Makefile` (`make EXE=...` =>
+`target/release/lattice`) and a `bench` subcommand whose final line is
+`<nodes> nodes <nps> nps`, for distributed SPRT testing.
 
 ## Code Style
 

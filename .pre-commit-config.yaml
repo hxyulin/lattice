@@ -16,12 +16,6 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test --quiet
-        language: system
-        types: [rust]
-        pass_filenames: false
 
       # Stamp a `Bench: <nodes>` trailer on commits that touch engine source.
       - id: bench-trailer

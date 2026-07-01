@@ -11,3 +11,6 @@
 # OpenBench `make EXE=...` build artifacts (default EXE + worker's Engine-* names)
 /lattice
 /Engine-*
+
+# Local design specs (brainstorming artifacts), not tracked
+docs/superpowers/
