@@ -30,6 +30,10 @@ const DEFAULT_BENCH_DEPTH: u32 = 6;
 /// Used until a GUI overrides it via `setoption name Hash`; matches the
 /// advertised `Hash` default.
 const DEFAULT_HASH_MB: usize = 16;
+/// Smallest accepted `Hash` value (MB) - one bucket-array still allocates.
+const MIN_HASH_MB: usize = 1;
+/// Largest accepted `Hash` value (MB). A sanity cap, not a hardware limit.
+const MAX_HASH_MB: usize = 1024;
 
 /// Wall-clock reserved per move before the think-time deadline.
 ///
@@ -69,12 +73,33 @@ fn main() -> io::Result<()> {
             UciCommand::Uci => {
                 emit("id name Lattice");
                 emit("id author hxyulin");
+                emit(&format!(
+                    "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
+                ));
                 emit("uciok");
             }
             UciCommand::IsReady => emit("readyok"),
             UciCommand::NewGame => {
                 reap(&mut idle, &mut idle_tt, &mut running);
                 idle = Some(Board::starting_position());
+                if let Some(tt) = idle_tt.as_mut() {
+                    tt.clear(); // a new game shares nothing with the last
+                }
+            }
+            UciCommand::SetOption { name, value } => {
+                // Only `Hash` (in MB) is supported; ignore anything else, per UCI.
+                // Reap first so the table is back in `idle_tt` to resize.
+                if name.eq_ignore_ascii_case(b"Hash")
+                    && let Some(mb) = value
+                        .as_ref()
+                        .and_then(|v| std::str::from_utf8(v).ok())
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    reap(&mut idle, &mut idle_tt, &mut running);
+                    if let Some(tt) = idle_tt.as_mut() {
+                        tt.resize(mb.clamp(MIN_HASH_MB, MAX_HASH_MB));
+                    }
+                }
             }
             UciCommand::Position { start, moves } => {
                 reap(&mut idle, &mut idle_tt, &mut running);
