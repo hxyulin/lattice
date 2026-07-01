@@ -1,6 +1,7 @@
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 use super::pesto::PST_DELTA;
+use super::zobrist::{ZOBRIST, ZobristHash};
 use crate::{Bitboard, Color, Move, MoveFlag, Piece, PieceType, Square};
 
 /// The four castling rights as a bitset (one bit each: white/black x
@@ -134,6 +135,10 @@ pub struct Board {
     eval_mg: i32,
     eval_eg: i32,
     eval_phase: i32,
+    /// Incrementally-maintained Zobrist hash. A pure function of the other
+    /// fields (excluding the move counters), kept in sync by `put_piece`/
+    /// `remove_piece` and the state bracket in `make_move`/`unmake_move`.
+    hash: ZobristHash,
 }
 
 /// The state needed to revert a [`make_move`](Board::make_move).
@@ -200,8 +205,10 @@ impl Board {
             eval_mg: 0,
             eval_eg: 0,
             eval_phase: 0,
+            hash: ZobristHash(0),
         };
         board.seed_eval_acc();
+        board.hash = board.compute_hash();
         board
     }
 
@@ -209,7 +216,7 @@ impl Board {
     /// move counters at their initial values.
     #[must_use]
     pub const fn empty() -> Self {
-        Self {
+        let mut board = Self {
             bitboards: [Bitboard::EMPTY; 12],
             en_passant: None,
             castling_rights: CastlingRights::ALL,
@@ -220,7 +227,10 @@ impl Board {
             eval_mg: 0,
             eval_eg: 0,
             eval_phase: 0,
-        }
+            hash: ZobristHash(0),
+        };
+        board.hash = board.compute_hash();
+        board
     }
 
     /// The bitboard of all squares holding `piece`.
@@ -294,6 +304,44 @@ impl Board {
         self.castling_rights
     }
 
+    /// The position's [`ZobristHash`] - its transposition-table key. Maintained
+    /// incrementally, so this is a field read, not a recomputation.
+    #[inline]
+    #[must_use]
+    pub fn zobrist(&self) -> ZobristHash {
+        self.hash
+    }
+
+    /// Recompute the hash from scratch by scanning every piece and the state.
+    /// The authoritative source used to seed [`Self::zobrist`] at construction;
+    /// the incremental path must always agree with it (a test asserts this).
+    const fn compute_hash(&self) -> ZobristHash {
+        let mut acc = self.state_hash();
+        let mut i = 0u8;
+        while i < 64 {
+            if let Some(piece) = self.pieces[i as usize] {
+                acc ^= ZOBRIST.piece(piece.as_u8(), i);
+            }
+            i += 1;
+        }
+        ZobristHash(acc)
+    }
+
+    /// The XOR of the non-piece keys: side-to-move, castling rights, en passant.
+    /// Bracketing a mutation with `hash ^= state_hash()` before and after toggles
+    /// the old keys out and the new keys in - the piece keys are handled
+    /// separately by `put_piece`/`remove_piece`.
+    const fn state_hash(&self) -> u64 {
+        let mut h = ZOBRIST.castling(self.castling_rights.0);
+        if matches!(self.side_to_move, Color::Black) {
+            h ^= ZOBRIST.side();
+        }
+        if let Some(ep) = self.en_passant {
+            h ^= ZOBRIST.en_passant(ep.file());
+        }
+        h
+    }
+
     /// Running middlegame evaluation accumulator (White-relative, centipawns).
     #[inline]
     #[must_use]
@@ -342,6 +390,7 @@ impl Board {
     pub fn put_piece(&mut self, sq: Square, piece: Piece) {
         self.bitboard_for_mut(piece).set(sq);
         self.pieces[sq.index() as usize] = Some(piece);
+        self.hash.0 ^= ZOBRIST.piece(piece.as_u8(), sq.index());
         let d = PST_DELTA[piece.as_u8() as usize][sq.index() as usize];
         self.eval_mg += d.mg;
         self.eval_eg += d.eg;
@@ -351,6 +400,7 @@ impl Board {
     /// Remove whatever piece is on `sq` (if any).
     pub fn remove_piece(&mut self, sq: Square) {
         if let Some(piece) = self.piece_at(sq) {
+            self.hash.0 ^= ZOBRIST.piece(piece.as_u8(), sq.index());
             self.bitboard_for_mut(piece).clear(sq);
             self.pieces[sq.index() as usize] = None;
             let d = PST_DELTA[piece.as_u8() as usize][sq.index() as usize];
@@ -413,6 +463,11 @@ impl Board {
             self.half_move_clock += 1;
         }
 
+        // Toggle the old side/castling/en-passant keys OUT of the hash; the
+        // matching toggle-IN at the end of the function folds the new ones in.
+        // Piece keys are handled by put_piece/remove_piece below.
+        self.hash.0 ^= self.state_hash();
+
         // The en-passant target lives for exactly one ply: clear it, re-arm on double pawn push
         self.en_passant = None;
 
@@ -453,12 +508,20 @@ impl Board {
         }
         self.side_to_move = us.flip();
 
+        // Toggle the new side/castling/en-passant keys IN (see toggle-OUT above).
+        self.hash.0 ^= self.state_hash();
+
         undo
     }
 
     /// Revert a move applied by [`make_move`](Self::make_move), given its
     /// [`Undo`]. Restores the board to its exact prior state.
     pub fn unmake_move(&mut self, mv: Move, undo: Undo) {
+        // Toggle the post-move side/castling/en-passant keys OUT; the toggle-IN
+        // at the end folds the restored (pre-move) ones back. Piece keys are
+        // handled by put_piece/remove_piece below.
+        self.hash.0 ^= self.state_hash();
+
         // Flip the side back first, so us is the correct color at the time of move
         self.side_to_move = self.side_to_move.flip();
         let us = self.side_to_move;
@@ -497,6 +560,9 @@ impl Board {
         self.castling_rights = undo.castling_rights;
         self.en_passant = undo.en_passant;
         self.half_move_clock = undo.half_move_clock;
+
+        // Toggle the restored (pre-move) state keys back IN (see toggle-OUT above).
+        self.hash.0 ^= self.state_hash();
     }
 
     /// Apply a null move: pass the turn to the opponent without moving a piece,
@@ -512,15 +578,20 @@ impl Board {
         let undo = NullUndo {
             en_passant: self.en_passant,
         };
+        // Toggle old side/en-passant keys OUT, mutate, toggle new ones IN.
+        self.hash.0 ^= self.state_hash();
         self.side_to_move = self.side_to_move.flip();
         self.en_passant = None;
+        self.hash.0 ^= self.state_hash();
         undo
     }
 
     /// Revert a [`make_null_move`](Self::make_null_move), given its [`NullUndo`].
     pub fn unmake_null_move(&mut self, undo: NullUndo) {
+        self.hash.0 ^= self.state_hash();
         self.side_to_move = self.side_to_move.flip();
         self.en_passant = undo.en_passant;
+        self.hash.0 ^= self.state_hash();
     }
 
     /// An iterator over all occupied squares and their pieces, in square-index
@@ -596,39 +667,50 @@ impl Board {
     /// Single-pass, no-allocation, lenient: parsing may stop after any complete
     /// field, and every absent field takes its default value.
     pub fn from_fen(fen: &[u8]) -> Result<Self, ParseFenError> {
-        let mut cur = FenCursor { fen, pos: 0 };
         let mut board = Board::empty();
-        // an absent castling field means no rights, not all.
+        // The fields are written directly (bypassing put_piece and the hash
+        // hooks), so seed the authoritative accumulators once, after parsing,
+        // from the finished position: the eval sums depend only on placement, but
+        // the hash also folds in side/castling/en-passant.
+        Self::parse_fen_into(fen, &mut board)?;
+        board.seed_eval_acc();
+        board.hash = board.compute_hash();
+        Ok(board)
+    }
+
+    /// Parse `fen` into `board`'s fields. Factored out of [`Self::from_fen`] so
+    /// the accumulators are recomputed exactly once at the single exit there,
+    /// rather than at each "field absent, stop here" early return.
+    fn parse_fen_into(fen: &[u8], board: &mut Board) -> Result<(), ParseFenError> {
+        let mut cur = FenCursor { fen, pos: 0 };
+        // Lenient default: an absent castling field means no rights, not all.
         board.castling_rights = CastlingRights::NONE;
 
-        cur.parse_placement(&mut board)?;
-        // Placement writes the mailbox directly, bypassing put_piece; seed the
-        // eval accumulators here, before any truncated-FEN early return below.
-        board.seed_eval_acc();
+        cur.parse_placement(board)?;
         if !cur.next_field()? {
-            return Ok(board);
+            return Ok(());
         }
         board.side_to_move = cur.parse_side_to_move()?;
         if !cur.next_field()? {
-            return Ok(board);
+            return Ok(());
         }
         board.castling_rights = cur.parse_castling_rights()?;
         if !cur.next_field()? {
-            return Ok(board);
+            return Ok(());
         }
         board.en_passant = cur.parse_en_passant()?;
         if !cur.next_field()? {
-            return Ok(board);
+            return Ok(());
         }
         board.half_move_clock = cur.parse_half_move_clock()?;
         if !cur.next_field()? {
-            return Ok(board);
+            return Ok(());
         }
         board.full_moves = cur.parse_full_move()?;
         if cur.peek().is_some() {
             return Err(ParseFenError::UnexpectedChar(cur.pos));
         }
-        Ok(board)
+        Ok(())
     }
 }
 
@@ -1107,15 +1189,111 @@ mod tests {
         let before = board.clone();
 
         let undo = board.make_null_move();
-        // Side flipped, en passant cleared, no piece moved.
+        // Side flipped, en passant cleared, hash still self-consistent.
         assert_eq!(board.side_to_move(), Color::Black);
         assert_eq!(board.en_passant(), None);
+        assert_eq!(
+            board.zobrist(),
+            board.compute_hash(),
+            "hash wrong after null move"
+        );
+        // No piece moved.
         assert_eq!(board.occupied(), before.occupied());
 
         board.unmake_null_move(undo);
-        // Exact restoration - side, en passant, everything.
+        // Exact restoration - side, en passant, hash, everything.
         assert!(board == before, "null move not fully reverted");
+        assert_eq!(
+            board.zobrist(),
+            board.compute_hash(),
+            "hash wrong after unmake null"
+        );
     }
+
+    /// Walk the legal-move tree, asserting at every node that the incrementally
+    /// maintained hash equals a from-scratch recompute - before, after make, and
+    /// after unmake. This is the core Zobrist invariant.
+    fn assert_zobrist_consistent(board: &mut Board, depth: u32) {
+        assert_eq!(
+            board.zobrist(),
+            board.compute_hash(),
+            "incremental hash diverged"
+        );
+        if depth == 0 {
+            return;
+        }
+        let moves = board.pseudo_legal_moves();
+        for &m in moves.iter() {
+            let undo = board.make_move(m);
+            // The hash must be correct even for moves that turn out illegal -
+            // make/unmake are purely mechanical.
+            assert_eq!(
+                board.zobrist(),
+                board.compute_hash(),
+                "hash wrong after make {m}"
+            );
+            if board.is_legal() {
+                assert_zobrist_consistent(board, depth - 1);
+            }
+            board.unmake_move(m, undo);
+            assert_eq!(
+                board.zobrist(),
+                board.compute_hash(),
+                "hash not restored after unmake {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn zobrist_incremental_matches_recompute() {
+        // startpos and kiwipete (castling, en passant, captures, pins) to a depth
+        // that exercises every move kind and the state bracket thoroughly.
+        assert_zobrist_consistent(&mut Board::starting_position(), 3);
+        let mut kiwi = Board::from_fen(
+            b"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        assert_zobrist_consistent(&mut kiwi, 3);
+    }
+
+    #[test]
+    fn zobrist_transposition_converges() {
+        // Two different move orders reaching the same position must hash equal.
+        // 1.Nf3 Nf6 2.Ng1 Ng8 returns to the start: same hash as startpos.
+        let mut b = Board::starting_position();
+        let start_hash = b.zobrist();
+        for m in [
+            mv("g1", "f3", MoveFlag::Quiet),
+            mv("g8", "f6", MoveFlag::Quiet),
+            mv("f3", "g1", MoveFlag::Quiet),
+            mv("f6", "g8", MoveFlag::Quiet),
+        ] {
+            let _ = b.make_move(m);
+        }
+        assert_eq!(
+            b.zobrist(),
+            start_hash,
+            "round trip to startpos must rehash equal"
+        );
+    }
+
+    #[test]
+    fn zobrist_side_to_move_matters() {
+        // Same placement, opposite side to move => different hash (the side key).
+        let w = Board::from_fen(b"4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        let b = Board::from_fen(b"4k3/8/8/8/8/8/8/4K3 b - - 0 1").unwrap();
+        assert_ne!(w.zobrist(), b.zobrist());
+    }
+
+    #[test]
+    fn zobrist_startpos_is_stable() {
+        // Pins the compile-time key table: any change to the PRNG/seed or the
+        // draw order trips this. Update the literal only on a deliberate change.
+        assert_eq!(Board::starting_position().zobrist().get(), STARTPOS_HASH);
+    }
+
+    // Pinned from the compile-time key table (SplitMix64, fixed seed).
+    const STARTPOS_HASH: u64 = 0xDDD1_E28F_8A09_AC12;
 
     /// A from-scratch scan of the eval accumulators, via the trusted seed path.
     fn recompute_eval_acc(board: &Board) -> (i32, i32, i32) {
