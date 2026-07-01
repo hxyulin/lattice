@@ -14,6 +14,10 @@ const NOT_FILE_H: u64 = !0x8080_8080_8080_8080;
 const NOT_FILE_AB: u64 = !0x0303_0303_0303_0303; // knight +/-2 jumps
 const NOT_FILE_GH: u64 = !0xC0C0_C0C0_C0C0_C0C0; // knight +/-2 jumps
 
+/// Piece values (centipawns) for [`Board::see`], indexed by `PieceType::as_u8()`.
+/// The king is near-infinite so it is never picked to recapture into defense.
+const SEE_VALUE: [i32; 6] = [100, 320, 330, 500, 900, 10_000];
+
 /// Knight attack set for every square.
 const KNIGHT_ATTACKS: [Bitboard; 64] = {
     let mut table = [Bitboard::EMPTY; 64];
@@ -325,6 +329,116 @@ impl Board {
         rook_attacks(sq, occ).bits() & (rooks | queens) != 0
     }
 
+    /// All pieces of either color attacking `sq` under occupancy `occ`.
+    ///
+    /// # Notes
+    /// Sliders are re-derived from `occ` rather than the board's real occupancy,
+    /// so a square cleared mid-exchange exposes any x-ray attacker lined up
+    /// behind the piece that just left. Pawns/knights/kings do not x-ray; pieces
+    /// removed from `occ` are masked out of the result.
+    fn attackers_to(&self, sq: Square, occ: Bitboard) -> Bitboard {
+        let i = sq.index() as usize;
+        let bit = 1u64 << i;
+        let both =
+            |kind| self.pieces(Color::White, kind).bits() | self.pieces(Color::Black, kind).bits();
+        let mut bb = 0u64;
+        bb |= KNIGHT_ATTACKS[i].bits() & both(PieceType::Knight);
+        bb |= KING_ATTACKS[i].bits() & both(PieceType::King);
+        // A `by` pawn attacks `sq` iff `sq` lies on the opposite color's capture
+        // pattern read from `sq` (the is_attacked trick): white pawns are found
+        // via the black attack mask and vice versa.
+        bb |= pawn_attacks(bit, Color::White) & self.pieces(Color::Black, PieceType::Pawn).bits();
+        bb |= pawn_attacks(bit, Color::Black) & self.pieces(Color::White, PieceType::Pawn).bits();
+        let bishops_queens = both(PieceType::Bishop) | both(PieceType::Queen);
+        bb |= bishop_attacks(sq, occ).bits() & bishops_queens;
+        let rooks_queens = both(PieceType::Rook) | both(PieceType::Queen);
+        bb |= rook_attacks(sq, occ).bits() & rooks_queens;
+        Bitboard::from_bits(bb & occ.bits())
+    }
+
+    /// Static Exchange Evaluation: the net material (centipawns, from the moving
+    /// side's point of view) of playing capture `mv` and then letting both sides
+    /// recapture on the target square with their least valuable piece until
+    /// neither can or wants to.
+    ///
+    /// `mv` must be a capture or en-passant capture; for any other move there is
+    /// no victim and the result is `0`. No board state is mutated. The king is
+    /// valued near-infinite so it is never chosen to recapture into a defended
+    /// square.
+    #[must_use]
+    pub fn see(&self, mv: Move) -> i32 {
+        let to = mv.to();
+        let from = mv.from();
+        let mut occ = self.occupied();
+
+        // Victim value, and (for en passant) clear the captured pawn that sits
+        // beside `to` so the exchange and any 5th-rank x-ray see it gone.
+        let victim = if mv.flag() == MoveFlag::EnPassant {
+            let cap_rank = 4 - self.side_to_move().as_u8();
+            let cap = Square::new(cap_rank, to.file());
+            occ = Bitboard::from_bits(occ.bits() & !(1u64 << cap.index()));
+            SEE_VALUE[PieceType::Pawn.as_u8() as usize]
+        } else {
+            match self.piece_at(to) {
+                Some(p) => SEE_VALUE[p.kind().as_u8() as usize],
+                None => return 0, // not a capture
+            }
+        };
+
+        // Value of the piece currently standing on `to`. After our capture that
+        // is the moving piece; each recapture replaces it with the recapturer.
+        let mut on_square = match self.piece_at(from) {
+            Some(p) => SEE_VALUE[p.kind().as_u8() as usize],
+            None => return 0,
+        };
+
+        // gain[d] is the running swap balance after the d-th capture; folded back
+        // with negamax at the end (each side keeps the better of stand/continue).
+        let mut gain = [0i32; 32];
+        gain[0] = victim;
+
+        // Remove the first attacker so a slider behind it x-rays through.
+        occ = Bitboard::from_bits(occ.bits() & !(1u64 << from.index()));
+        let mut side = self.side_to_move().flip();
+        let mut attackers = self.attackers_to(to, occ);
+        let mut top = 0usize;
+
+        loop {
+            // Least valuable attacker of the side now to recapture; if none, the
+            // exchange ends.
+            let mut chosen = 0u64;
+            let mut chosen_val = 0;
+            for kind in 0..6u8 {
+                let bb = attackers.bits() & self.pieces(side, PieceType::from_u8(kind)).bits();
+                if bb != 0 {
+                    chosen = bb & bb.wrapping_neg(); // isolate one attacker
+                    chosen_val = SEE_VALUE[kind as usize];
+                    break;
+                }
+            }
+            if chosen == 0 {
+                break;
+            }
+            top += 1;
+            gain[top] = on_square - gain[top - 1];
+            // If even the optimistic balance is losing for the side that just
+            // captured, it would have declined - deeper captures cannot help it.
+            if (-gain[top - 1]).max(gain[top]) < 0 {
+                break;
+            }
+            on_square = chosen_val;
+            occ = Bitboard::from_bits(occ.bits() & !chosen);
+            attackers = self.attackers_to(to, occ); // re-derive: handles x-ray
+            side = side.flip();
+        }
+
+        // Negamax fold, deepest first: each side keeps max(stand, continue).
+        for i in (0..top).rev() {
+            gain[i] = -(-gain[i]).max(gain[i + 1]);
+        }
+        gain[0]
+    }
+
     /// Generate pawn moves.
     fn gen_pawns(&self, us: Color, enemy: Bitboard, occ: Bitboard, out: &mut MoveList) {
         let pawns = self.pieces(us, PieceType::Pawn).bits();
@@ -405,6 +519,104 @@ mod tests {
             .unwrap()
             .pseudo_legal_moves()
             .len()
+    }
+
+    /// SEE of the pseudo-legal capture `from`->`to` in `fen`. Resolves the flag
+    /// (Capture vs EnPassant) by matching against generated moves.
+    fn see_of(fen: &str, from: &str, to: &str) -> i32 {
+        let board = Board::from_fen(fen.as_bytes()).unwrap();
+        let from: Square = from.parse().unwrap();
+        let to: Square = to.parse().unwrap();
+        let mv = board
+            .pseudo_legal_moves()
+            .iter()
+            .copied()
+            .find(|m| m.from() == from && m.to() == to)
+            .expect("capture must be pseudo-legal");
+        board.see(mv)
+    }
+
+    #[test]
+    fn see_wins_an_undefended_pawn() {
+        // d4 pawn takes an undefended e5 pawn: +100, no recapture.
+        assert_eq!(see_of("4k3/8/8/4p3/3P4/8/8/4K3 w - - 0 1", "d4", "e5"), 100);
+    }
+
+    #[test]
+    fn see_loses_queen_for_a_defended_pawn() {
+        // Qh2xe5 grabs a pawn defended by the d6 pawn: +100 - 900 = -800.
+        assert_eq!(
+            see_of("4k3/8/3p4/4p3/8/8/7Q/4K3 w - - 0 1", "h2", "e5"),
+            -800
+        );
+    }
+
+    #[test]
+    fn see_equal_trade_is_zero() {
+        // d4xe5 pawn trade, recaptured by the f6 pawn: +100 - 100 = 0.
+        assert_eq!(see_of("4k3/8/5p2/4p3/3P4/8/8/4K3 w - - 0 1", "d4", "e5"), 0);
+    }
+
+    #[test]
+    fn see_wins_a_defended_queen_with_a_pawn() {
+        // d4 pawn takes a queen defended by the d6 pawn: +900 - 100 = +800.
+        assert_eq!(
+            see_of("4k3/8/3p4/4q3/3P4/8/8/4K3 w - - 0 1", "d4", "e5"),
+            800
+        );
+    }
+
+    #[test]
+    fn see_sees_through_an_xray_battery() {
+        // Re2xe5 with Re1 stacked behind it, vs a single e8 rook defending the
+        // pawn. The x-ray makes the back rook a real second attacker, so white
+        // wins pawn + rook for one rook: +100. Without x-ray it would read -400.
+        assert_eq!(
+            see_of("4r1k1/8/8/4p3/8/8/4R3/4R1K1 w - - 0 1", "e2", "e5"),
+            100
+        );
+    }
+
+    #[test]
+    fn see_handles_en_passant() {
+        // e5xd6 e.p. removes the d5 pawn (undefended): +100.
+        assert_eq!(see_of("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5", "d6"), 100);
+    }
+
+    #[test]
+    fn see_resolves_a_bishop_queen_battery() {
+        // Diagonal battery a1-h8: Bb2 in front, Qa1 behind it. Bxe5 wins the
+        // pawn; Nc6 recaptures the bishop; the queen x-rays through and takes the
+        // knight. White: +pawn +knight -bishop = +100 +320 -330 = +90.
+        assert_eq!(
+            see_of("6k1/8/2n5/4p3/8/8/1B6/Q5K1 w - - 0 1", "b2", "e5"),
+            90
+        );
+    }
+
+    #[test]
+    fn see_resolves_a_triple_file_battery() {
+        // e-file: white Re3/Re2/Qe1 stacked, black Re7/Re8 defending. Geometry
+        // forces front-first on each side (a blocked piece is not yet an
+        // attacker), so the queen only joins last. Five captures resolve to the
+        // pawn plus an even rook-for-rook swap: +100.
+        assert_eq!(
+            see_of("4r2k/4r3/8/4p3/8/4R3/4R3/4Q2K w - - 0 1", "e3", "e5"),
+            100
+        );
+    }
+
+    #[test]
+    fn see_ignores_a_pin_against_the_king() {
+        // The d6 bishop is absolutely pinned to its king by Rd1, so it cannot
+        // legally recapture on e5 - the pawn is really hanging (true value +100).
+        // SEE has no legality model: it counts the pinned bishop as a defender
+        // and reports Qxe5 as losing the queen for a pawn, -800. This documents
+        // the accepted blind spot, it is not a defect to "fix".
+        assert_eq!(
+            see_of("3k4/8/3b4/4p3/8/8/7Q/3R3K w - - 0 1", "h2", "e5"),
+            -800
+        );
     }
 
     #[test]

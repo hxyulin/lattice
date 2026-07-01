@@ -5,6 +5,7 @@
 //!  - Killer-move ordering
 //!  - Iterative deepening
 //!  - Quiescence search
+//!  - SEE pruning of losing captures in quiescence
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -428,9 +429,19 @@ impl Searcher {
         // empty killer slots.
         let mut moves = board.pseudo_legal_moves();
         moves.sort_by_key(|&m| -order_score(board, m, [None, None], &self.history));
+        // When in check, every capture is a candidate escape, so SEE pruning is
+        // suppressed (we may have to make a losing capture). Probed once per node.
+        let in_check = board.in_check(board.side_to_move());
         for mv in &moves {
             if !(mv.flag().is_capture() || mv.flag().is_promotion()) {
                 continue; // quiet move: not searched in quiescence
+            }
+            // SEE pruning: a capture that loses material by static exchange is
+            // almost never the best move, so skip it and its recapture subtree.
+            // Promotions are exempt (SEE misses the queening gain), as are all
+            // captures while in check.
+            if !in_check && !mv.flag().is_promotion() && board.see(*mv) < 0 {
+                continue;
             }
             let undo = board.make_move(*mv);
             if board.is_legal() {

@@ -14,7 +14,13 @@ use lattice::{Limits, MATE, Score, SearchInfo, bench, budget, nps, search_with_i
 const DEFAULT_DEPTH: u32 = 4;
 
 /// Depth for `lattice bench [depth]` when none is given.
-const DEFAULT_BENCH_DEPTH: u32 = 4;
+///
+/// # Notes
+/// Bumped from 4 to 6 once SEE pruning shrank the depth-4 suite to a sub-100ms
+/// blip: depth 6 is a steadier NPS signal and a larger build fingerprint, and it
+/// trends down (not up) as further pruning lands. The `Bench:` trailer /
+/// `bench.csv` switch from depth-4 to depth-6 signatures at that commit.
+const DEFAULT_BENCH_DEPTH: u32 = 6;
 
 /// Wall-clock reserved per move before the think-time deadline.
 ///
