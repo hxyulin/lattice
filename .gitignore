@@ -3,6 +3,9 @@
 /.worktrees
 /docs/book
 
+# fastchess writes this on each run
+/config.json
+
 # OpenBench `make EXE=...` build artifacts (default EXE + worker's Engine-* names)
 /lattice
 /Engine-*
