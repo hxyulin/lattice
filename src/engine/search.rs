@@ -6,6 +6,7 @@
 //!  - Iterative deepening
 //!  - Quiescence search
 //!  - SEE pruning of losing captures in quiescence
+//!  - Principal variation search
 
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -273,7 +274,19 @@ impl Searcher {
             }
             let undo = board.make_move(mv);
             if board.is_legal() {
-                let score = -self.negamax(board, depth - 1, 1, -beta, -alpha, true);
+                // PVS at the root: the first legal move gets the full window for an
+                // exact baseline; later moves are scouted with a null window and
+                // only re-searched wide when the scout beats alpha.
+                let score = if best_move.is_none() {
+                    -self.negamax(board, depth - 1, 1, -beta, -alpha, true)
+                } else {
+                    let s = -self.negamax(board, depth - 1, 1, -alpha - 1, -alpha, true);
+                    if s > alpha {
+                        -self.negamax(board, depth - 1, 1, -beta, -alpha, true)
+                    } else {
+                        s
+                    }
+                };
                 if score > best {
                     best = score;
                     best_move = Some(mv);
@@ -364,31 +377,47 @@ impl Searcher {
             if board.is_legal() {
                 legal += 1;
                 let full_depth = depth - 1;
-                // Late move reductions. Past the first few well-ordered moves a
-                // quiet non-killer is rarely best, so search it shallower; if that
-                // raises alpha the reduction is not trusted and we re-search at
-                // full depth.
-                let reduce = depth >= LMR_MIN_DEPTH
-                    && legal > LMR_MIN_MOVES
-                    && !mv.flag().is_capture()
-                    && !mv.flag().is_promotion()
-                    && Some(*mv) != killers[0]
-                    && Some(*mv) != killers[1]
-                    && !in_check;
-                let score = if reduce {
+                // Principal variation search. The first (best-ordered) move is
+                // searched with the full window for an exact PV score; every later
+                // move is scouted with a null window that only has to prove it
+                // fails low (cheaper, since a 1-wide window cuts off far more often).
+                let score = if legal == 1 {
+                    -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
+                } else {
+                    // Late move reductions. Past the first few well-ordered moves a
+                    // quiet non-killer rarely is best, so scout it shallower.
+                    let reduce = depth >= LMR_MIN_DEPTH
+                        && legal > LMR_MIN_MOVES
+                        && !mv.flag().is_capture()
+                        && !mv.flag().is_promotion()
+                        && Some(*mv) != killers[0]
+                        && Some(*mv) != killers[1]
+                        && !in_check;
                     // Reduce by the table amount but keep at least one ply of real
                     // search, so the scout never collapses straight to quiescence.
-                    let reduced = full_depth
-                        .saturating_sub(lmr_reduction(depth, legal))
-                        .max(1);
-                    let s = -self.negamax(board, reduced, ply + 1, -beta, -alpha, true);
-                    if s > alpha {
-                        -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
+                    let scout_depth = if reduce {
+                        full_depth
+                            .saturating_sub(lmr_reduction(depth, legal))
+                            .max(1)
                     } else {
-                        s
+                        full_depth
+                    };
+                    let mut s =
+                        -self.negamax(board, scout_depth, ply + 1, -alpha - 1, -alpha, true);
+                    // A reduced scout that beat alpha may have under-searched:
+                    // verify it at full depth (still the null window) first.
+                    if reduce && s > alpha {
+                        s = -self.negamax(board, full_depth, ply + 1, -alpha - 1, -alpha, true);
                     }
-                } else {
-                    -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
+                    // The null-window scout can only fail high or low. If it landed
+                    // above alpha and inside the real window the move may be a new
+                    // PV, so re-search wide for its exact value. At null-window
+                    // nodes beta == alpha + 1, so this never fires - PVS only ever
+                    // re-searches along the principal variation.
+                    if s > alpha && s < beta {
+                        s = -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true);
+                    }
+                    s
                 };
                 if score >= beta {
                     board.unmake_move(*mv, undo);
@@ -762,6 +791,22 @@ mod tests {
         // still surface Ra8 with the correct mate distance, not drop it.
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
         let r = search(&mut b, &Limits::to_depth(6));
+        assert_eq!(
+            r.best_move.map(|m| (m.from(), m.to())),
+            Some((sq("a1"), sq("a8")))
+        );
+        assert_eq!(r.score, MATE - 1);
+    }
+
+    #[test]
+    fn pvs_resurfaces_a_late_winning_move() {
+        // Ra8 is a quiet rook move that mates, but MVV-LVA orders captures and
+        // other quiets ahead of it, so PVS scouts it with a null window first. The
+        // scout fails high (it is a mate), which must trigger the full-window
+        // re-search that recovers the exact mate distance. A wrong scout bound
+        // would either drop the move or report an inexact score.
+        let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
+        let r = search(&mut b, &Limits::to_depth(4));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
