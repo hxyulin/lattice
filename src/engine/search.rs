@@ -317,13 +317,17 @@ impl Searcher {
             return self.quiescence(board, 0, alpha, beta);
         }
 
+        // Whether this node is in check - loop-invariant, so computed once and
+        // shared by null-move pruning and the LMR guard in the move loop.
+        let in_check = board.in_check(board.side_to_move());
+
         // Null-move pruning. Pass to the opponent; if a reduced zero-window
         // search still beats beta, the real move would too, so prune. Skipped
         // without non-pawn material: pawn-only endgames are where zugzwang makes
         // a "pass" misleadingly good.
         if can_null
             && depth >= NMP_MIN_DEPTH
-            && !board.in_check(board.side_to_move())
+            && !in_check
             && has_non_pawn_material(board, board.side_to_move())
         {
             let undo = board.make_null_move();
@@ -350,15 +354,37 @@ impl Searcher {
         let mut tried_quiets = MoveList::new();
 
         let mut moves = board.pseudo_legal_moves();
+        let killers = self.killers[ply as usize];
         if depth >= ORDER_MIN_DEPTH {
-            let killers = self.killers[ply as usize];
             moves.sort_by_key(|&m| -order_score(board, m, killers, &self.history));
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
-                let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha, true);
+                let full_depth = depth - 1;
+                // Late move reductions. Past the first few well-ordered moves a
+                // quiet non-killer is rarely best, so search it shallower; if that
+                // raises alpha the reduction is not trusted and we re-search at
+                // full depth.
+                let reduce = depth >= LMR_MIN_DEPTH
+                    && legal > LMR_MIN_MOVES
+                    && !mv.flag().is_capture()
+                    && !mv.flag().is_promotion()
+                    && Some(*mv) != killers[0]
+                    && Some(*mv) != killers[1]
+                    && !in_check;
+                let score = if reduce {
+                    let reduced = full_depth.saturating_sub(LMR_R);
+                    let s = -self.negamax(board, reduced, ply + 1, -beta, -alpha, true);
+                    if s > alpha {
+                        -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
+                    } else {
+                        s
+                    }
+                } else {
+                    -self.negamax(board, full_depth, ply + 1, -beta, -alpha, true)
+                };
                 if score >= beta {
                     board.unmake_move(*mv, undo);
                     // A quiet move that fails high becomes a killer and earns a
@@ -511,6 +537,28 @@ const NMP_MIN_DEPTH: u32 = 3;
 /// a refutation, cheap enough to be worth it. `R = 2` is the conservative classic.
 const NMP_R: u32 = 2;
 
+/// Minimum remaining depth to attempt a late-move reduction.
+///
+/// # Notes
+/// Below this there is too little depth to give back, and the risk of
+/// under-searching a good move outweighs the saving.
+const LMR_MIN_DEPTH: u32 = 3;
+
+/// Number of leading (well-ordered) legal moves searched at full depth before
+/// reductions start.
+///
+/// # Notes
+/// The TT move, captures, and killers occupy this prefix; the 4th legal move
+/// onward is eligible for reduction.
+const LMR_MIN_MOVES: u32 = 3;
+
+/// Late-move depth reduction - a conservative fixed 1-ply cut.
+///
+/// # Notes
+/// Kept fixed (not a `log(depth)*log(move number)` table) so this feature's Elo
+/// is attributable on its own.
+const LMR_R: u32 = 1;
+
 /// Whether `side` has any piece beyond pawns and the king. Null-move pruning is
 /// gated on this because zugzwang - a free "pass" being misleadingly good -
 /// essentially only occurs in pawn-and-king endgames.
@@ -657,6 +705,22 @@ mod tests {
         // not corrupt the reported mate (still MATE - 1, one ply from the root).
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
         let r = search(&mut b, &Limits::to_depth(5));
+        assert_eq!(
+            r.best_move.map(|m| (m.from(), m.to())),
+            Some((sq("a1"), sq("a8")))
+        );
+        assert_eq!(r.score, MATE - 1);
+    }
+
+    #[test]
+    fn lmr_preserves_a_mate_at_active_depth() {
+        // The back-rank mate searched to depth 6 - deep enough that late-move
+        // reductions are active (LMR_MIN_DEPTH = 3). Even if the mating move is
+        // sorted late and gets reduced, its reduced search returns a mate score,
+        // which beats alpha and forces the full-depth re-search - so LMR must
+        // still surface Ra8 with the correct mate distance, not drop it.
+        let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
+        let r = search(&mut b, &Limits::to_depth(6));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
