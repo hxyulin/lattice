@@ -2,6 +2,8 @@
 //!  - Negamax (minimax)
 //!  - Iterative deepening
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::{Board, Move};
@@ -23,6 +25,9 @@ pub struct Limits {
     pub nodes: Option<u64>,
     /// Wall-clock budget for the whole search.
     pub move_time: Option<Duration>,
+    /// External stop signal raised by another thread; aborts at the next
+    /// `should_stop()` check (after depth 1). `None` (the default) means none.
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl Limits {
@@ -115,6 +120,7 @@ pub fn search_with_info(
         deadline: limits.move_time.map(|t| Instant::now() + t),
         stopped: false,
         armed: false,
+        stop: limits.stop.clone(),
     };
     let mut best_move = None;
     let mut score = -MATE;
@@ -168,6 +174,9 @@ struct Searcher {
     /// False during depth 1 so the first iteration always completes and yields a
     /// legal move even under a tiny budget. True after depth 1.
     armed: bool,
+    /// External stop flag from [`Limits::stop`], polled in
+    /// [`Searcher::should_stop`]. `None` = no external stop.
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl Searcher {
@@ -182,6 +191,12 @@ impl Searcher {
         }
         if !self.armed {
             return false;
+        }
+        if let Some(flag) = &self.stop
+            && flag.load(Ordering::Relaxed)
+        {
+            self.stopped = true;
+            return true;
         }
         if let Some(limit) = self.node_limit
             && self.nodes >= limit
@@ -294,6 +309,47 @@ mod tests {
 
     fn sq(s: &str) -> Square {
         Square::from_ascii(s.as_bytes()).unwrap()
+    }
+
+    const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+    #[test]
+    fn preset_stop_flag_returns_a_legal_move_after_depth_one() {
+        // Flag already raised before the search starts. Depth 1 still completes
+        // (the `armed` gate ignores every stop until the first iteration banks a
+        // move), so we always get a legal move; depth 2+ is aborted immediately.
+        let mut b = board(STARTPOS);
+        let limits = Limits {
+            stop: Some(Arc::new(AtomicBool::new(true))),
+            ..Limits::default()
+        };
+        let r = search(&mut b, &limits);
+        assert!(r.best_move.is_some(), "depth 1 must yield a legal move");
+        assert!(r.depth >= 1);
+    }
+
+    #[test]
+    fn stop_flag_set_from_another_thread_halts_an_infinite_search() {
+        // `Limits::default()` has no depth/node/time cap -> runs to MAX_PLY (an
+        // "infinite" search). A second thread raises the flag; the search must
+        // observe it (cross-thread) and return a legal move rather than running
+        // to depth 64.
+        let flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = flag.clone();
+        let handle = std::thread::spawn(move || {
+            let mut b = board(STARTPOS);
+            let limits = Limits {
+                stop: Some(worker_flag),
+                ..Limits::default()
+            };
+            search(&mut b, &limits)
+        });
+        // The `armed` gate guarantees depth 1 finishes regardless of timing, so
+        // raising the flag immediately is safe and non-flaky.
+        flag.store(true, Ordering::Relaxed);
+        let r = handle.join().expect("search thread panicked");
+        assert!(r.best_move.is_some());
+        assert!(r.depth >= 1);
     }
 
     #[test]
