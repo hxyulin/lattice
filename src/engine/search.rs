@@ -1,5 +1,6 @@
 //! Recursive search of game state using the following techniques to speed up and rank moves:
 //!  - Negamax (minimax)
+//!  - Alpha-beta pruning
 //!  - Iterative deepening
 
 use std::sync::Arc;
@@ -228,6 +229,10 @@ impl Searcher {
     ) -> (Option<Move>, Score) {
         let mut best_move = None;
         let mut best = -MATE;
+        // The root is a PV node: open the window fully, then raise alpha as
+        // better moves are found so later root moves search a narrower window.
+        let mut alpha = -MATE;
+        let beta = MATE;
 
         let moves = board.pseudo_legal_moves();
         let ordered = hint
@@ -239,10 +244,11 @@ impl Searcher {
             }
             let undo = board.make_move(mv);
             if board.is_legal() {
-                let score = -self.negamax(board, depth - 1, 1);
+                let score = -self.negamax(board, depth - 1, 1, -beta, -alpha);
                 if score > best {
                     best = score;
                     best_move = Some(mv);
+                    alpha = alpha.max(score);
                 }
             }
             board.unmake_move(mv, undo);
@@ -259,9 +265,18 @@ impl Searcher {
         (best_move, score)
     }
 
-    /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
-    /// from the root, used only to make mate scores prefer shorter mates.
-    fn negamax(&mut self, board: &mut Board, depth: u32, ply: u32) -> Score {
+    /// Negamax score of `board` searched to `depth` plies, bounded by the
+    /// `[alpha, beta]` window. `ply` is the distance from the root, used only to
+    /// make mate scores prefer shorter mates. Fail-soft: the returned score may
+    /// fall outside the window.
+    fn negamax(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        ply: u32,
+        mut alpha: Score,
+        beta: Score,
+    ) -> Score {
         self.nodes += 1;
         if self.should_stop() {
             return 0; // abort: `search` discards the whole partial iteration
@@ -278,7 +293,13 @@ impl Searcher {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
-                best = best.max(-self.negamax(board, depth - 1, ply + 1));
+                let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
+                if score >= beta {
+                    board.unmake_move(*mv, undo);
+                    return score; // beta cutoff
+                }
+                alpha = alpha.max(score);
+                best = best.max(score);
             }
             board.unmake_move(*mv, undo);
         }
