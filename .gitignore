@@ -1,4 +1,6 @@
 /target
+/tools/*/target
+/tools/*/checkpoints
 /.claude/*
 /.worktrees
 /docs/book

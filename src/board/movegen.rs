@@ -300,6 +300,7 @@ impl Board {
     /// occupancy (sliders blocked by intervening pieces). Used by evaluation for
     /// mobility; only the knight/bishop/rook/queen arms are meaningful (pawn and
     /// king return empty, they are not mobility-scored).
+    #[cfg_attr(feature = "nnue", allow(dead_code))]
     pub(crate) fn attacks_from(&self, sq: Square, kind: PieceType) -> Bitboard {
         let occ = self.occupied();
         match kind {
@@ -312,6 +313,7 @@ impl Board {
     }
 
     /// Every square attacked by one or more of `color`'s pawns.
+    #[cfg_attr(feature = "nnue", allow(dead_code))]
     pub(crate) fn pawn_attack_span(&self, color: Color) -> Bitboard {
         let pawns = self.pieces(color, PieceType::Pawn).bits();
         Bitboard::from_bits(pawn_attacks(pawns, color))
