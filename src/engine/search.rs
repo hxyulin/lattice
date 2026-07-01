@@ -7,6 +7,7 @@
 //!  - Quiescence search
 //!  - SEE pruning of losing captures in quiescence
 //!  - Principal variation search
+//!  - Transposition table (cutoffs and move ordering)
 //!  - Aspiration windows
 
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::{Board, Color, Move, MoveFlag, MoveList, PieceType};
 
-use crate::{MATE, Score, evaluate};
+use crate::{Bound, MATE, Score, TranspositionTable, evaluate};
 
 /// Upper bound on iterative-deepening depth when no explicit depth cap is given;
 /// bounds the loop so the search always terminates.
@@ -126,8 +127,10 @@ pub struct SearchInfo {
 pub fn search_with_info(
     board: &mut Board,
     limits: &Limits,
+    tt: &mut TranspositionTable,
     on_iter: &mut dyn FnMut(SearchInfo),
 ) -> SearchResult {
+    tt.new_search(); // age the previous move's entries before this search reuses them
     let mut searcher = Searcher {
         nodes: 0,
         qnodes: 0,
@@ -138,6 +141,7 @@ pub fn search_with_info(
         stop: limits.stop.clone(),
         killers: [[None; 2]; MAX_PLY as usize],
         history: [[[0; 64]; 64]; 2],
+        tt,
     };
     let mut best_move = None;
     let mut score = -MATE;
@@ -176,12 +180,12 @@ pub fn search_with_info(
 /// The plain entry point for callers (bench, tests) that only want the final
 /// result; see [`search_with_info`] for per-depth reporting.
 #[must_use]
-pub fn search(board: &mut Board, limits: &Limits) -> SearchResult {
-    search_with_info(board, limits, &mut |_| {})
+pub fn search(board: &mut Board, limits: &Limits, tt: &mut TranspositionTable) -> SearchResult {
+    search_with_info(board, limits, tt, &mut |_| {})
 }
 
 /// Mutable search state threaded through the recursion.
-struct Searcher {
+struct Searcher<'a> {
     nodes: u64,
     /// Subset of `nodes` spent in [`Searcher::quiescence`]. Surfaced in
     /// [`SearchResult`] for debugging the quiescence/main-search split.
@@ -206,9 +210,12 @@ struct Searcher {
     /// orders non-killer quiets. Persists across the search; saturates at
     /// [`HISTORY_MAX`].
     history: HistoryTable,
+    /// Transposition table, owned by the caller and reused across moves. Probed
+    /// for cutoffs and a move-ordering hint, and written after each node.
+    tt: &'a mut TranspositionTable,
 }
 
-impl Searcher {
+impl Searcher<'_> {
     /// Whether a node/time budget has been hit.
     ///
     /// # Performance
@@ -303,16 +310,15 @@ impl Searcher {
 
         let mut moves = board.pseudo_legal_moves();
         let killers = self.killers[0];
-        moves.sort_by_key(|&m| -order_score(board, m, killers, &self.history));
-        // The PV-move hint still leads; captures then killers then quiets follow.
-        let ordered = hint
-            .into_iter()
-            .chain(moves.iter().copied().filter(|&m| Some(m) != hint));
-        for mv in ordered {
+        // The PV-move hint from the previous iteration leads (PV_BONUS); captures
+        // then killers then quiets follow. The root is not probed or stored - its
+        // best move is re-supplied as `hint` each iteration.
+        moves.sort_by_key(|&m| -order_score(board, m, hint, killers, &self.history));
+        for mv in &moves {
             if self.should_stop() {
                 break; // budget hit mid-iteration; `search` discards this depth
             }
-            let undo = board.make_move(mv);
+            let undo = board.make_move(*mv);
             if board.is_legal() {
                 // PVS at the root: the first legal move gets the full window for an
                 // exact baseline; later moves are scouted with a null window and
@@ -329,15 +335,15 @@ impl Searcher {
                 };
                 if score > best {
                     best = score;
-                    best_move = Some(mv);
+                    best_move = Some(*mv);
                 }
                 alpha = alpha.max(best);
                 if alpha >= beta {
-                    board.unmake_move(mv, undo);
+                    board.unmake_move(*mv, undo);
                     break; // root fail-high: score is a lower bound, stop early
                 }
             }
-            board.unmake_move(mv, undo);
+            board.unmake_move(*mv, undo);
         }
 
         // No legal move at the root: checkmate (in check) or stalemate (draw).
@@ -380,6 +386,26 @@ impl Searcher {
             // Resolve pending captures before evaluating, so the static eval
             // only ever sees a quiet position (no piece hanging mid-exchange).
             return self.quiescence(board, 0, alpha, beta);
+        }
+
+        // Transposition probe. A stored entry whose search was at least as deep
+        // (`entry.depth() >= depth`) can cut this node outright, subject to its
+        // bound; either way its best move is the #1 ordering hint (see the sort
+        // below). The root is not probed - it re-supplies its own PV hint.
+        let orig_alpha = alpha;
+        let hash = board.zobrist();
+        let mut tt_move = None;
+        if let Some(e) = self.tt.probe(hash) {
+            tt_move = e.best();
+            if u32::from(e.depth()) >= depth {
+                let s = e.score(ply);
+                match e.bound() {
+                    Bound::Exact => return s,
+                    Bound::Lower if s >= beta => return s,
+                    Bound::Upper if s <= alpha => return s,
+                    _ => {}
+                }
+            }
         }
 
         // Whether this node is in check - loop-invariant, so computed once and
@@ -438,6 +464,7 @@ impl Searcher {
         }
 
         let mut best = -MATE;
+        let mut best_move = None;
         let mut legal = 0u32;
         // Quiets searched at this node that did not cut; charged a history malus
         // if a later quiet causes the cutoff.
@@ -446,7 +473,9 @@ impl Searcher {
         let mut moves = board.pseudo_legal_moves();
         let killers = self.killers[ply as usize];
         if depth >= ORDER_MIN_DEPTH {
-            moves.sort_by_key(|&m| -order_score(board, m, killers, &self.history));
+            // The TT move (this position's best from a previous, possibly
+            // shallower, search) is ordered first - the strongest hint there is.
+            moves.sort_by_key(|&m| -order_score(board, m, tt_move, killers, &self.history));
         }
         for mv in &moves {
             // Late move pruning. At shallow non-PV nodes, once enough legal moves
@@ -511,6 +540,10 @@ impl Searcher {
                     }
                     s
                 };
+                if score > best {
+                    best = score;
+                    best_move = Some(*mv);
+                }
                 if score >= beta {
                     board.unmake_move(*mv, undo);
                     // A quiet move that fails high becomes a killer and earns a
@@ -526,10 +559,11 @@ impl Searcher {
                             self.update_history(side, *q, -bonus);
                         }
                     }
-                    return score; // beta cutoff
+                    // Fail-high: `best` is a lower bound on the true score.
+                    self.store(hash, best_move, best, depth, Bound::Lower, ply);
+                    return best; // beta cutoff
                 }
                 alpha = alpha.max(score);
-                best = best.max(score);
                 if !mv.flag().is_capture() && !mv.flag().is_promotion() {
                     tried_quiets.push(*mv);
                 }
@@ -541,14 +575,41 @@ impl Searcher {
             // Terminal node:
             //  - checkmate is `MATE` discounted by distance from the root
             //  - if not in check, then it is stalemate (draw)
-            return if board.in_check(board.side_to_move()) {
+            let score = if board.in_check(board.side_to_move()) {
                 -(MATE - ply as Score)
             } else {
                 0
             };
+            self.store(hash, None, score, depth, Bound::Exact, ply);
+            return score;
         }
 
+        // A score that beat `orig_alpha` was searched inside the window -> exact;
+        // otherwise every move failed low and `best` is only an upper bound.
+        let bound = if best > orig_alpha {
+            Bound::Exact
+        } else {
+            Bound::Upper
+        };
+        self.store(hash, best_move, best, depth, bound, ply);
         best
+    }
+
+    /// Write a node's result to the transposition table, but only while the
+    /// search is running: an aborted iteration's children return the sentinel `0`,
+    /// so storing its garbage scores would poison the table.
+    fn store(
+        &mut self,
+        hash: crate::ZobristHash,
+        best: Option<Move>,
+        score: Score,
+        depth: u32,
+        bound: Bound,
+        ply: u32,
+    ) {
+        if !self.stopped {
+            self.tt.store(hash, best, score, depth as u8, bound, ply);
+        }
     }
 
     /// Record a quiet cutoff move as a killer for `ply`, most-recent in slot 0.
@@ -607,7 +668,7 @@ impl Searcher {
         // captures/promotions below. Killers and history are quiet-only, so pass
         // empty killer slots.
         let mut moves = board.pseudo_legal_moves();
-        moves.sort_by_key(|&m| -order_score(board, m, [None, None], &self.history));
+        moves.sort_by_key(|&m| -order_score(board, m, None, [None, None], &self.history));
         // When in check, every capture is a candidate escape, so SEE pruning is
         // suppressed (we may have to make a losing capture). Probed once per node.
         let in_check = board.in_check(board.side_to_move());
@@ -799,12 +860,30 @@ type HistoryTable = [[[i32; 64]; 64]; 2];
 /// outranks a killer, keeping the ordering tiers fixed.
 const HISTORY_MAX: i32 = 7_000;
 
-/// MVV-LVA capture key with killer and history quiets slotted in: captures first
-/// (most-valuable-victim / least-valuable-attacker), then this ply's two killers,
-/// then the remaining quiets ranked by history (0 if never a cutoff). Higher
-/// sorts earlier. History is capped below the killer band, so the tiers never
-/// cross.
-fn order_score(board: &Board, mv: Move, killers: [Option<Move>; 2], history: &HistoryTable) -> i32 {
+/// Ordering bonus for the `hint` move (the TT/PV best move) - searched before
+/// everything else.
+///
+/// # Notes
+/// An order of magnitude above the largest capture key, so the hint always leads
+/// regardless of what it captures.
+const PV_BONUS: i32 = 1_000_000;
+
+/// MVV-LVA capture key with the hint and killer/history quiets slotted in: the
+/// `hint` move first (TT best at interior nodes, PV move at the root), then
+/// captures (most-valuable-victim / least-valuable-attacker), then this ply's two
+/// killers, then the remaining quiets ranked by history (0 if never a cutoff).
+/// Higher sorts earlier. History is capped below the killer band, so the tiers
+/// never cross.
+fn order_score(
+    board: &Board,
+    mv: Move,
+    hint: Option<Move>,
+    killers: [Option<Move>; 2],
+    history: &HistoryTable,
+) -> i32 {
+    if Some(mv) == hint {
+        return PV_BONUS; // the TT/PV best move: searched first
+    }
     if !mv.flag().is_capture() {
         if Some(mv) == killers[0] {
             return KILLER_1_BONUS;
@@ -837,6 +916,12 @@ mod tests {
         Square::from_ascii(s.as_bytes()).unwrap()
     }
 
+    /// Run a search with a throwaway 1 MB table - these tests probe behaviour,
+    /// not cross-move reuse.
+    fn go(b: &mut Board, limits: &Limits) -> SearchResult {
+        search(b, limits, &mut TranspositionTable::new(1))
+    }
+
     const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
     #[test]
@@ -849,7 +934,7 @@ mod tests {
             stop: Some(Arc::new(AtomicBool::new(true))),
             ..Limits::default()
         };
-        let r = search(&mut b, &limits);
+        let r = go(&mut b, &limits);
         assert!(r.best_move.is_some(), "depth 1 must yield a legal move");
         assert!(r.depth >= 1);
     }
@@ -868,7 +953,7 @@ mod tests {
                 stop: Some(worker_flag),
                 ..Limits::default()
             };
-            search(&mut b, &limits)
+            go(&mut b, &limits)
         });
         // The `armed` gate guarantees depth 1 finishes regardless of timing, so
         // raising the flag immediately is safe and non-flaky.
@@ -882,7 +967,7 @@ mod tests {
     fn grabs_a_hanging_queen() {
         // White pawn e2 can capture an undefended Black queen on d3.
         let mut b = board("4k3/8/8/8/8/3q4/4P3/4K3 w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(1));
+        let r = go(&mut b, &Limits::to_depth(1));
         let mv = r.best_move.expect("a legal move exists");
         assert_eq!(mv.from(), sq("e2"));
         assert_eq!(mv.to(), sq("d3"));
@@ -897,7 +982,7 @@ mod tests {
         // Needs depth 2: the mated node must be expanded (depth >= 1 there) to
         // discover it has no legal replies
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(2));
+        let r = go(&mut b, &Limits::to_depth(2));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
@@ -912,7 +997,7 @@ mod tests {
         // not prune the mating move, and the mate-score cap on a null cutoff must
         // not corrupt the reported mate (still MATE - 1, one ply from the root).
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(5));
+        let r = go(&mut b, &Limits::to_depth(5));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
@@ -928,7 +1013,7 @@ mod tests {
         // which beats alpha and forces the full-depth re-search - so LMR must
         // still surface Ra8 with the correct mate distance, not drop it.
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(6));
+        let r = go(&mut b, &Limits::to_depth(6));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
@@ -944,7 +1029,7 @@ mod tests {
         // re-search that recovers the exact mate distance. A wrong scout bound
         // would either drop the move or report an inexact score.
         let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(4));
+        let r = go(&mut b, &Limits::to_depth(4));
         assert_eq!(
             r.best_move.map(|m| (m.from(), m.to())),
             Some((sq("a1"), sq("a8")))
@@ -956,7 +1041,7 @@ mod tests {
     fn stalemate_scores_zero() {
         // Classic stalemate: Black to move, not in check, no legal move.
         let mut b = board("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(1));
+        let r = go(&mut b, &Limits::to_depth(1));
         assert_eq!(r.best_move, None);
         assert_eq!(r.score, 0);
     }
@@ -970,7 +1055,7 @@ mod tests {
         // resolved, Qxd5 scores as losing the queen, and the engine keeps its
         // material instead.
         let mut b = board("4k3/8/2p5/3p4/8/8/8/3QK3 w - - 0 1");
-        let r = search(&mut b, &Limits::to_depth(1));
+        let r = go(&mut b, &Limits::to_depth(1));
         let mv = r.best_move.expect("a legal move exists");
         assert_ne!(mv.to(), sq("d5"), "must not grab the defended pawn");
         // Had it blundered Qxd5 the score would crater (a queen down for a pawn);
@@ -984,7 +1069,7 @@ mod tests {
         // A tiny node budget must still yield a legal move - depth 1 always
         // completes (see `armed`) - while keeping the search short.
         let mut b = board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        let r = search(&mut b, &Limits::to_nodes(5_000));
+        let r = go(&mut b, &Limits::to_nodes(5_000));
         assert!(r.best_move.is_some(), "must return a move under any budget");
         assert!(
             r.nodes < 50_000,
@@ -1018,9 +1103,9 @@ mod tests {
         let killers = [Some(killer), None];
         let empty = [[[0; 64]; 64]; 2];
 
-        let cap_score = order_score(&b, capture, killers, &empty);
-        let killer_score = order_score(&b, killer, killers, &empty);
-        let other_score = order_score(&b, other, killers, &empty);
+        let cap_score = order_score(&b, capture, None, killers, &empty);
+        let killer_score = order_score(&b, killer, None, killers, &empty);
+        let other_score = order_score(&b, other, None, killers, &empty);
 
         assert!(cap_score > killer_score, "captures outrank killers");
         assert!(killer_score > other_score, "killer outranks plain quiets");
@@ -1060,10 +1145,10 @@ mod tests {
         let white = b.side_to_move().as_u8() as usize;
         history[white][hot.from().index() as usize][hot.to().index() as usize] = 500;
 
-        let cap_s = order_score(&b, capture, killers, &history);
-        let killer_s = order_score(&b, killer, killers, &history);
-        let hot_s = order_score(&b, hot, killers, &history);
-        let cold_s = order_score(&b, cold, killers, &history);
+        let cap_s = order_score(&b, capture, None, killers, &history);
+        let killer_s = order_score(&b, killer, None, killers, &history);
+        let hot_s = order_score(&b, hot, None, killers, &history);
+        let cold_s = order_score(&b, cold, None, killers, &history);
 
         assert_eq!(hot_s, 500, "history quiet carries its score");
         assert!(cap_s > killer_s, "capture > killer");

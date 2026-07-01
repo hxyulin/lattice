@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use lattice::{Board, Color, Move};
 use lattice::{Go, StartPos, UciCommand, UciInterface, UciMove};
-use lattice::{Limits, MATE, Score, SearchInfo, bench, budget, nps, search_with_info};
+use lattice::{
+    Limits, MATE, Score, SearchInfo, TranspositionTable, bench, budget, nps, search_with_info,
+};
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
 const DEFAULT_DEPTH: u32 = 4;
@@ -21,6 +23,13 @@ const DEFAULT_DEPTH: u32 = 4;
 /// trends down (not up) as further pruning lands. The `Bench:` trailer /
 /// `bench.csv` switch from depth-4 to depth-6 signatures at that commit.
 const DEFAULT_BENCH_DEPTH: u32 = 6;
+
+/// Default transposition-table size in MB.
+///
+/// # Notes
+/// Used until a GUI overrides it via `setoption name Hash`; matches the
+/// advertised `Hash` default.
+const DEFAULT_HASH_MB: usize = 16;
 
 /// Wall-clock reserved per move before the think-time deadline.
 ///
@@ -46,10 +55,13 @@ fn main() -> io::Result<()> {
     // Output goes through emit() (a brief per-message stdout lock), not the
     // interface's writer, so give it a sink; it is only used to read commands.
     let mut uci = UciInterface::new(BufReader::new(stdin.lock()), io::sink());
-    // The board lives in exactly one place at a time: `idle` while nothing runs;
-    // on `go` it moves into the worker thread and `running` holds the handle
-    // until `reap` joins the worker and brings the board back.
+    // The board and transposition table live in exactly one place at a time:
+    // `idle`/`idle_tt` while nothing runs; on `go` they move into the worker
+    // thread together and `running` holds the handle until `reap` joins the
+    // worker and brings them both back. The table persists across moves, so each
+    // `go` reuses what the previous search learned.
     let mut idle: Option<Board> = Some(Board::starting_position());
+    let mut idle_tt: Option<TranspositionTable> = Some(TranspositionTable::new(DEFAULT_HASH_MB));
     let mut running: Option<RunningSearch> = None;
 
     while let Some(cmd) = uci.poll().map_err(io_err)? {
@@ -61,11 +73,11 @@ fn main() -> io::Result<()> {
             }
             UciCommand::IsReady => emit("readyok"),
             UciCommand::NewGame => {
-                reap(&mut idle, &mut running);
+                reap(&mut idle, &mut idle_tt, &mut running);
                 idle = Some(Board::starting_position());
             }
             UciCommand::Position { start, moves } => {
-                reap(&mut idle, &mut running);
+                reap(&mut idle, &mut idle_tt, &mut running);
                 let base = match start {
                     StartPos::Startpos => Some(Board::starting_position()),
                     StartPos::Fen(fen) => Board::from_fen(&fen).ok(),
@@ -81,7 +93,7 @@ fn main() -> io::Result<()> {
                 }
             }
             UciCommand::Go(go) => {
-                reap(&mut idle, &mut running);
+                reap(&mut idle, &mut idle_tt, &mut running);
                 if let Some(depth) = go.perft {
                     let board = idle.as_mut().expect("idle after reap");
                     let mut total = 0;
@@ -91,12 +103,14 @@ fn main() -> io::Result<()> {
                     }
                     emit(&format!("\nNodes searched: {total}"));
                 } else {
-                    // Hand the board to a worker so the read loop stays free for
-                    // `stop`/`isready`/`quit`. The worker prints its own
+                    // Hand the board and table to a worker so the read loop stays
+                    // free for `stop`/`isready`/`quit`. The worker prints its own
                     // `info`/`bestmove` (a channel back would not print until the
                     // main thread returned from its blocking stdin read) and
-                    // returns the board through the handle.
+                    // returns both through the handle so the next search reuses the
+                    // table.
                     let mut board = idle.take().expect("idle after reap");
+                    let mut tt = idle_tt.take().expect("idle after reap");
                     let stop = Arc::new(AtomicBool::new(false));
                     let mut limits = limits_from_go(&go, board.side_to_move());
                     limits.stop = Some(stop.clone());
@@ -115,12 +129,12 @@ fn main() -> io::Result<()> {
                                 nps(info.nodes, start.elapsed()),
                             ));
                         };
-                        let result = search_with_info(&mut board, &limits, &mut on_iter);
+                        let result = search_with_info(&mut board, &limits, &mut tt, &mut on_iter);
                         let pv = result
                             .best_move
                             .map_or_else(|| "0000".to_string(), |m| m.to_string());
                         emit(&format!("bestmove {pv}"));
-                        board
+                        (board, tt)
                     });
                     running = Some(RunningSearch { stop, handle });
                 }
@@ -133,7 +147,7 @@ fn main() -> io::Result<()> {
                 }
             }
             UciCommand::Quit => {
-                reap(&mut idle, &mut running); // stop + join the worker cleanly
+                reap(&mut idle, &mut idle_tt, &mut running); // stop + join the worker cleanly
                 break;
             }
             UciCommand::Unknown(_) => {} // UCI: ignore unrecognized input
@@ -145,23 +159,30 @@ fn main() -> io::Result<()> {
 /// A search running on a worker thread.
 ///
 /// # Notes
-/// The worker owns the `Board` for the search and returns it through `handle`;
-/// `stop` is the flag the main thread raises to abort it.
+/// The worker owns the `Board` and [`TranspositionTable`] for the search and
+/// returns them through `handle`; `stop` is the flag the main thread raises to
+/// abort it.
 struct RunningSearch {
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<Board>,
+    handle: JoinHandle<(Board, TranspositionTable)>,
 }
 
 /// Bring the engine back to idle, joining any running worker and reclaiming its
-/// `Board`. No-op if already idle.
+/// `Board` and [`TranspositionTable`]. No-op if already idle.
 ///
 /// # Notes
-/// Invariant: on return, `idle.is_some()` and `running.is_none()`.
-fn reap(idle: &mut Option<Board>, running: &mut Option<RunningSearch>) {
+/// Invariant: on return, `idle.is_some()`, `idle_tt.is_some()`, and
+/// `running.is_none()`.
+fn reap(
+    idle: &mut Option<Board>,
+    idle_tt: &mut Option<TranspositionTable>,
+    running: &mut Option<RunningSearch>,
+) {
     if let Some(r) = running.take() {
         r.stop.store(true, Ordering::Relaxed);
-        let reclaimed = r.handle.join().expect("search thread panicked");
-        *idle = Some(reclaimed);
+        let (board, tt) = r.handle.join().expect("search thread panicked");
+        *idle = Some(board);
+        *idle_tt = Some(tt);
     }
 }
 

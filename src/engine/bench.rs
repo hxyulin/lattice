@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::Board;
 
-use crate::{Limits, search};
+use crate::{Limits, TranspositionTable, search};
 
 /// `(label, FEN)` for each benchmark position: the six standard perft positions.
 const SUITE: &[(&str, &str)] = &[
@@ -108,8 +108,11 @@ pub fn bench(depth: u32) -> BenchReport {
         .iter()
         .map(|&(name, fen)| {
             let mut board = Board::from_fen(fen.as_bytes()).expect("suite FEN must parse");
+            // Fresh table per position: keeps node counts independent and
+            // deterministic, no cross-position carryover.
+            let mut tt = TranspositionTable::new(16);
             let start = Instant::now();
-            let result = search(&mut board, &Limits::to_depth(depth));
+            let result = search(&mut board, &Limits::to_depth(depth), &mut tt);
             BenchEntry {
                 name,
                 nodes: result.nodes,
