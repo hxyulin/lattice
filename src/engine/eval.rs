@@ -10,11 +10,22 @@
 //! accumulators are updated on every piece placement). This module only clamps
 //! the phase and blends the two sums.
 
-use crate::{Board, Color, PieceType};
-
+use crate::Board;
 use crate::Score;
+#[cfg(not(feature = "nnue"))]
+use crate::{Color, PieceType};
+
+/// NNUE static evaluation, from the side-to-move's perspective. Replaces the
+/// hand-crafted terms wholesale; the network is embedded and maintained by the
+/// board (see `board::nnue`).
+#[cfg(feature = "nnue")]
+#[must_use]
+pub fn evaluate(board: &Board) -> Score {
+    board.nnue_eval()
+}
 
 /// Maximum game phase (full starting non-pawn material).
+#[cfg(not(feature = "nnue"))]
 const PHASE_MAX: i32 = 24;
 
 /// Per-piece mobility weights, centipawns per reachable square in the mobility
@@ -22,6 +33,7 @@ const PHASE_MAX: i32 = 24;
 /// search without distorting the material balance (a coarse local fixed-depth
 /// sweep preferred these over weights twice as large). Rooks value mobility more
 /// in the endgame; the king and pawns are not mobility-scored.
+#[cfg(not(feature = "nnue"))]
 const MOBILITY: [(PieceType, i32, i32); 4] = [
     (PieceType::Knight, 2, 2),
     (PieceType::Bishop, 2, 2),
@@ -29,6 +41,7 @@ const MOBILITY: [(PieceType, i32, i32); 4] = [
     (PieceType::Queen, 1, 1),
 ];
 
+#[cfg(not(feature = "nnue"))]
 /// White-relative `(mg, eg)` mobility differential: for each knight, bishop,
 /// rook, and queen, the number of squares it reaches that are neither occupied
 /// by a friendly piece nor attacked by an enemy pawn, weighted by piece and
@@ -57,6 +70,7 @@ fn mobility(board: &Board) -> (i32, i32) {
 }
 
 /// Static evaluation of `board`, from the side-to-move's perspective.
+#[cfg(not(feature = "nnue"))]
 #[must_use]
 pub fn evaluate(board: &Board) -> Score {
     // The board keeps White-relative middlegame/endgame/phase sums up to date;
@@ -75,7 +89,7 @@ pub fn evaluate(board: &Board) -> Score {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "nnue")))]
 mod tests {
     use super::*;
 

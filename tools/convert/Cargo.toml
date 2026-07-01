@@ -1,0 +1,16 @@
+[package]
+name = "lattice-convert"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Text (`<FEN> | <score> | <result>`) -> bulletformat ChessBoard binary. Kept
+# out of the engine workspace: it is a one-shot data tool, not engine code.
+
+[[bin]]
+name = "convert"
+path = "src/main.rs"
+
+[dependencies]
+bulletformat = "1.8"

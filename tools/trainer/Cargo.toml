@@ -1,0 +1,24 @@
+[package]
+name = "lattice-trainer"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# bullet NNUE trainer for Lattice's (768 -> 256) x2 -> 1 perspective net.
+# Kept out of the engine workspace so the heavy GPU dependency never touches the
+# engine build. Select a backend feature to train:
+#   macOS: cargo run --release --features metal -- <data.data>
+#   NVIDIA: cargo run --release --features cuda  -- <data.data>
+
+[[bin]]
+name = "trainer"
+path = "src/main.rs"
+
+[features]
+default = []
+metal = ["bullet/metal"]
+cuda = ["bullet/cuda"]
+
+[dependencies]
+bullet = { git = "https://github.com/jw1912/bullet", package = "bullet_lib" }

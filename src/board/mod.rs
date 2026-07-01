@@ -11,6 +11,8 @@ mod magic;
 mod r#move;
 mod movegen;
 mod movelist;
+#[cfg(feature = "nnue")]
+mod nnue;
 mod pesto;
 mod piece;
 mod square;
