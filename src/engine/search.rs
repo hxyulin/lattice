@@ -293,7 +293,9 @@ impl Searcher {
         let mut legal = 0u32;
 
         let mut moves = board.pseudo_legal_moves();
-        moves.sort_by_key(|&m| -order_score(board, m));
+        if depth >= ORDER_MIN_DEPTH {
+            moves.sort_by_key(|&m| -order_score(board, m));
+        }
         for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_legal() {
@@ -323,6 +325,13 @@ impl Searcher {
         best
     }
 }
+
+/// Skip MVV-LVA ordering at remaining depth below this.
+///
+/// # Performance
+/// The depth-1 frontier is the largest node layer but its children are leaves
+/// (static eval), so sorting there costs more than the sibling evals it saves.
+const ORDER_MIN_DEPTH: u32 = 2;
 
 /// Piece values for move ordering (not evaluation), indexed by `PieceType`.
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
