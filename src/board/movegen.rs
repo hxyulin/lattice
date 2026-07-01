@@ -147,29 +147,35 @@ fn push_promotions(from: Square, to: Square, capture: bool, out: &mut MoveList) 
 }
 
 impl Board {
-    /// Generate every pseudo-legal move for the side to move.
-    ///
-    /// Pseudo-legal: movement rules are obeyed but self-check is *not* filtered.
-    /// Destinations onto friendly pieces are excluded. Castling is the lone
-    /// exception - it's emitted only when fully legal (see module docs).
+    /// Generate every pseudo-legal move for the side to move
     #[must_use]
     pub fn pseudo_legal_moves(&self) -> MoveList {
+        let mut moves = MoveList::new();
+        self.generate_moves(&mut moves);
+        moves
+    }
+
+    /// Fill `out` with every pseudo-legal move for the side to move.
+    ///
+    /// # Notes
+    /// `out` is cleared first.
+    pub fn generate_moves(&self, out: &mut MoveList) {
+        out.clear();
         let us = self.side_to_move();
         let friendly = self.occupied_by(us);
         let enemy = self.occupied_by(us.flip());
         let occ = self.occupied();
 
-        // Stack-allocated: no per-call heap allocation (unlike the old `Vec`).
-        let mut moves = MoveList::new();
+        let moves = out;
 
-        self.gen_pawns(us, enemy, occ, &mut moves);
+        self.gen_pawns(us, enemy, occ, moves);
 
         for from in self.pieces(us, PieceType::Knight) {
             push_targets(
                 from,
                 KNIGHT_ATTACKS[from.index() as usize] & !friendly,
                 enemy,
-                &mut moves,
+                moves,
             );
         }
         for from in self.pieces(us, PieceType::King) {
@@ -177,28 +183,21 @@ impl Board {
                 from,
                 KING_ATTACKS[from.index() as usize] & !friendly,
                 enemy,
-                &mut moves,
+                moves,
             );
         }
         for from in self.pieces(us, PieceType::Bishop) {
-            push_targets(
-                from,
-                bishop_attacks(from, occ) & !friendly,
-                enemy,
-                &mut moves,
-            );
+            push_targets(from, bishop_attacks(from, occ) & !friendly, enemy, moves);
         }
         for from in self.pieces(us, PieceType::Rook) {
-            push_targets(from, rook_attacks(from, occ) & !friendly, enemy, &mut moves);
+            push_targets(from, rook_attacks(from, occ) & !friendly, enemy, moves);
         }
         for from in self.pieces(us, PieceType::Queen) {
             let attacks = (rook_attacks(from, occ) | bishop_attacks(from, occ)) & !friendly;
-            push_targets(from, attacks, enemy, &mut moves);
+            push_targets(from, attacks, enemy, moves);
         }
 
-        self.gen_castling(us, occ, &mut moves);
-
-        moves
+        self.gen_castling(us, occ, moves);
     }
 
     /// Emit legal castling moves for `us` (standard chess, not Chess960).
@@ -247,9 +246,8 @@ impl Board {
         let us = self.side_to_move();
         let opp = us.flip();
         let mut out = Vec::new();
-        // Iterate by reference: the MoveList stays put rather than being moved
-        // into an owned iterator (it's 512 bytes).
-        let moves = self.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        self.generate_moves(&mut moves);
         for &mv in &moves {
             let undo = self.make_move(mv);
             let king = self
@@ -283,7 +281,8 @@ impl Board {
         let us = self.side_to_move();
         let opp = us.flip();
         let mut nodes = 0;
-        let moves = self.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        self.generate_moves(&mut moves);
         for &mv in &moves {
             let undo = self.make_move(mv);
             let king = self

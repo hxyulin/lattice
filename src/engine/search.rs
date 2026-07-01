@@ -308,7 +308,8 @@ impl Searcher<'_> {
         let mut best_move = None;
         let mut best = -MATE;
 
-        let mut moves = board.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
         let killers = self.killers[0];
         // The PV-move hint from the previous iteration leads (PV_BONUS); captures
         // then killers then quiets follow. The root is not probed or stored - its
@@ -480,7 +481,8 @@ impl Searcher<'_> {
         // if a later quiet causes the cutoff.
         let mut tried_quiets = MoveList::new();
 
-        let mut moves = board.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
         let killers = self.killers[ply as usize];
         if depth >= ORDER_MIN_DEPTH {
             // The TT move (this position's best from a previous, possibly
@@ -677,7 +679,8 @@ impl Searcher<'_> {
         // No capture-only generator: generate all moves and filter to
         // captures/promotions below. Killers and history are quiet-only, so pass
         // empty killer slots.
-        let mut moves = board.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        board.generate_moves(&mut moves);
         moves.sort_by_key(|&m| -order_score(board, m, None, [None, None], &self.history));
         // When in check, every capture is a candidate escape, so SEE pruning is
         // suppressed (we may have to make a losing capture). Probed once per node.
@@ -1099,7 +1102,8 @@ mod tests {
         // White Pe4 has a capture (e4xd5) and several quiets. Make one quiet the
         // slot-0 killer and assert the ordering contract: capture > killer > quiet.
         let b = board("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1");
-        let moves = b.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        b.generate_moves(&mut moves);
 
         let mut capture = None;
         let mut quiets = Vec::new();
@@ -1133,7 +1137,8 @@ mod tests {
         // quiet (0) but still below a killer and a capture - the tier order is
         // capture > killer > history-quiet > cold-quiet.
         let b = board("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1");
-        let moves = b.pseudo_legal_moves();
+        let mut moves = MoveList::new();
+        b.generate_moves(&mut moves);
 
         let mut capture = None;
         let mut quiets = Vec::new();
