@@ -144,6 +144,15 @@ pub struct Undo {
     half_move_clock: u8,
 }
 
+/// The state needed to revert a [`make_null_move`](Board::make_null_move).
+///
+/// # Notes
+/// A null move flips the side and clears en passant; only that square needs
+/// saving to undo it.
+pub struct NullUndo {
+    en_passant: Option<Square>,
+}
+
 impl Board {
     /// Creates a new board with the starting position.
     ///
@@ -488,6 +497,30 @@ impl Board {
         self.castling_rights = undo.castling_rights;
         self.en_passant = undo.en_passant;
         self.half_move_clock = undo.half_move_clock;
+    }
+
+    /// Apply a null move: pass the turn to the opponent without moving a piece,
+    /// returning the [`NullUndo`] to revert it.
+    ///
+    /// # Notes
+    /// Flips the side and clears en passant. Used by null-move pruning. The
+    /// caller must ensure the side to move is not in check; passing out of check
+    /// is illegal. `half_move_clock` is intentionally left untouched: the 50-move
+    /// rule is not consulted in search yet.
+    #[must_use]
+    pub fn make_null_move(&mut self) -> NullUndo {
+        let undo = NullUndo {
+            en_passant: self.en_passant,
+        };
+        self.side_to_move = self.side_to_move.flip();
+        self.en_passant = None;
+        undo
+    }
+
+    /// Revert a [`make_null_move`](Self::make_null_move), given its [`NullUndo`].
+    pub fn unmake_null_move(&mut self, undo: NullUndo) {
+        self.side_to_move = self.side_to_move.flip();
+        self.en_passant = undo.en_passant;
     }
 
     /// An iterator over all occupied squares and their pieces, in square-index
@@ -1064,6 +1097,24 @@ mod tests {
 
         let board = Board::from_fen(b"8/8/8/8/8/8/8/8 b - c6").expect("valid fen");
         assert_eq!(board.en_passant, ep("c6"));
+    }
+
+    #[test]
+    fn null_move_round_trips() {
+        // A position with an en-passant square, so we exercise the EP clear/restore.
+        let fen = b"rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3";
+        let mut board = Board::from_fen(fen).unwrap();
+        let before = board.clone();
+
+        let undo = board.make_null_move();
+        // Side flipped, en passant cleared, no piece moved.
+        assert_eq!(board.side_to_move(), Color::Black);
+        assert_eq!(board.en_passant(), None);
+        assert_eq!(board.occupied(), before.occupied());
+
+        board.unmake_null_move(undo);
+        // Exact restoration - side, en passant, everything.
+        assert!(board == before, "null move not fully reverted");
     }
 
     /// A from-scratch scan of the eval accumulators, via the trusted seed path.
