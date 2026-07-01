@@ -7,6 +7,7 @@
 
 mod bitboard;
 mod board;
+mod magic;
 mod r#move;
 mod movegen;
 mod movelist;
@@ -15,5 +16,6 @@ mod piece;
 mod square;
 mod zobrist;
 
+pub use magic::init_tables;
 pub use zobrist::ZobristHash;
 pub use {bitboard::*, board::*, r#move::*, movelist::*, piece::*, square::*};

@@ -71,6 +71,9 @@ fn main() -> io::Result<()> {
     while let Some(cmd) = uci.poll().map_err(io_err)? {
         match cmd {
             UciCommand::Uci => {
+                // Spec: do engine init on `uci`. Builds the magic slider tables
+                // now (a few ms) so the first search isn't charged for it.
+                lattice::init_tables();
                 emit("id name Lattice");
                 emit("id author hxyulin");
                 emit(&format!(
