@@ -40,7 +40,10 @@ pub struct BenchEntry {
     /// Human label for the position.
     pub name: &'static str,
     /// Nodes the search visited - deterministic for a given position and depth.
+    /// Includes [`Self::qnodes`].
     pub nodes: u64,
+    /// Subset of [`Self::nodes`] spent in quiescence.
+    pub qnodes: u64,
     /// Wall-clock time the search took.
     pub elapsed: Duration,
 }
@@ -58,6 +61,18 @@ impl BenchReport {
     #[must_use]
     pub fn total_nodes(&self) -> u64 {
         self.entries.iter().map(|e| e.nodes).sum()
+    }
+
+    /// Total quiescence nodes across the suite (a subset of [`Self::total_nodes`]).
+    #[must_use]
+    pub fn total_qnodes(&self) -> u64 {
+        self.entries.iter().map(|e| e.qnodes).sum()
+    }
+
+    /// Quiescence nodes per second over the whole suite (machine-dependent).
+    #[must_use]
+    pub fn qnps(&self) -> u64 {
+        nps(self.total_qnodes(), self.total_time())
     }
 
     /// Total wall-clock time across the suite.
@@ -98,6 +113,7 @@ pub fn bench(depth: u32) -> BenchReport {
             BenchEntry {
                 name,
                 nodes: result.nodes,
+                qnodes: result.qnodes,
                 elapsed: start.elapsed(),
             }
         })
