@@ -2,6 +2,7 @@
 //!  - Negamax (minimax)
 //!  - Alpha-beta pruning
 //!  - MVV-LVA capture move ordering
+//!  - Killer-move ordering
 //!  - Iterative deepening
 
 use std::sync::Arc;
@@ -123,6 +124,7 @@ pub fn search_with_info(
         stopped: false,
         armed: false,
         stop: limits.stop.clone(),
+        killers: [[None; 2]; MAX_PLY as usize],
     };
     let mut best_move = None;
     let mut score = -MATE;
@@ -179,6 +181,10 @@ struct Searcher {
     /// External stop flag from [`Limits::stop`], polled in
     /// [`Searcher::should_stop`]. `None` = no external stop.
     stop: Option<Arc<AtomicBool>>,
+    /// Killer moves: up to two quiet beta-cutoff moves per ply, ordered ahead of
+    /// other quiets at sibling nodes (see [`order_score`]). Persists across the
+    /// search; slot 0 is the most recent.
+    killers: [[Option<Move>; 2]; MAX_PLY as usize],
 }
 
 impl Searcher {
@@ -236,8 +242,8 @@ impl Searcher {
         let beta = MATE;
 
         let mut moves = board.pseudo_legal_moves();
-        moves.sort_by_key(|&m| -order_score(board, m));
-        // The PV-move hint still leads; MVV-LVA orders the rest.
+        moves.sort_by_key(|&m| -order_score(board, m, self.killers[0]));
+        // The PV-move hint still leads; captures then killers then quiets follow.
         let ordered = hint
             .into_iter()
             .chain(moves.iter().copied().filter(|&m| Some(m) != hint));
@@ -294,7 +300,7 @@ impl Searcher {
 
         let mut moves = board.pseudo_legal_moves();
         if depth >= ORDER_MIN_DEPTH {
-            moves.sort_by_key(|&m| -order_score(board, m));
+            moves.sort_by_key(|&m| -order_score(board, m, self.killers[ply as usize]));
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
@@ -303,6 +309,12 @@ impl Searcher {
                 let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
                 if score >= beta {
                     board.unmake_move(*mv, undo);
+                    // A quiet move that fails high is a killer for this ply -
+                    // record it so siblings try it ahead of their other quiets.
+                    // Captures and promotions are excluded (MVV-LVA orders them).
+                    if !mv.flag().is_capture() && !mv.flag().is_promotion() {
+                        self.store_killer(ply, *mv);
+                    }
                     return score; // beta cutoff
                 }
                 alpha = alpha.max(score);
@@ -324,6 +336,16 @@ impl Searcher {
 
         best
     }
+
+    /// Record a quiet cutoff move as a killer for `ply`, most-recent in slot 0.
+    /// A move already in slot 0 is a no-op, so it cannot evict slot 1 with a copy.
+    fn store_killer(&mut self, ply: u32, mv: Move) {
+        let slot = &mut self.killers[ply as usize];
+        if slot[0] != Some(mv) {
+            slot[1] = slot[0];
+            slot[0] = Some(mv);
+        }
+    }
 }
 
 /// Skip MVV-LVA ordering at remaining depth below this.
@@ -336,11 +358,27 @@ const ORDER_MIN_DEPTH: u32 = 2;
 /// Piece values for move ordering (not evaluation), indexed by `PieceType`.
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
-/// MVV-LVA ordering key: captures first, most-valuable-victim / least-valuable
-/// attacker. Higher sorts earlier. Quiet moves score 0 (searched last; killers
-/// and history will slot in here later).
-fn order_score(board: &Board, mv: Move) -> i32 {
+/// Ordering bonuses for killer moves.
+///
+/// # Notes
+/// Below every capture (the smallest MVV-LVA score is 9100) and above ordinary
+/// quiets (0), so a proven refutation is searched right after captures. Slot 0
+/// (more recent) outranks slot 1.
+const KILLER_1_BONUS: i32 = 9_000;
+const KILLER_2_BONUS: i32 = 8_000;
+
+/// MVV-LVA capture key with killer quiets slotted in: captures first
+/// (most-valuable-victim / least-valuable-attacker), then this ply's two killers,
+/// then ordinary quiets at 0. Higher sorts earlier. (History will refine the 0s
+/// later.)
+fn order_score(board: &Board, mv: Move, killers: [Option<Move>; 2]) -> i32 {
     if !mv.flag().is_capture() {
+        if Some(mv) == killers[0] {
+            return KILLER_1_BONUS;
+        }
+        if Some(mv) == killers[1] {
+            return KILLER_2_BONUS;
+        }
         return 0;
     }
     let attacker = board.piece_at(mv.from()).unwrap().kind();
@@ -455,5 +493,37 @@ mod tests {
             r.nodes
         );
         assert!(r.depth >= 1);
+    }
+
+    #[test]
+    fn killer_sorts_after_captures_and_before_other_quiets() {
+        // White Pe4 has a capture (e4xd5) and several quiets. Make one quiet the
+        // slot-0 killer and assert the ordering contract: capture > killer > quiet.
+        let b = board("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1");
+        let moves = b.pseudo_legal_moves();
+
+        let mut capture = None;
+        let mut quiets = Vec::new();
+        for &m in &moves {
+            if m.flag().is_capture() {
+                capture = Some(m);
+            } else if !m.flag().is_promotion() {
+                quiets.push(m);
+            }
+        }
+        let capture = capture.expect("e4xd5 is a capture");
+        assert!(quiets.len() >= 2, "need a killer and another quiet");
+
+        let killer = quiets[0];
+        let other = quiets[1];
+        let killers = [Some(killer), None];
+
+        let cap_score = order_score(&b, capture, killers);
+        let killer_score = order_score(&b, killer, killers);
+        let other_score = order_score(&b, other, killers);
+
+        assert!(cap_score > killer_score, "captures outrank killers");
+        assert!(killer_score > other_score, "killer outranks plain quiets");
+        assert_eq!(other_score, 0, "a non-killer quiet scores 0");
     }
 }
