@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::{Board, Move, MoveFlag, PieceType};
+use crate::{Board, Color, Move, MoveFlag, PieceType};
 
 use crate::{MATE, Score, evaluate};
 
@@ -125,6 +125,7 @@ pub fn search_with_info(
         armed: false,
         stop: limits.stop.clone(),
         killers: [[None; 2]; MAX_PLY as usize],
+        history: [[[0; 64]; 64]; 2],
     };
     let mut best_move = None;
     let mut score = -MATE;
@@ -185,6 +186,10 @@ struct Searcher {
     /// other quiets at sibling nodes (see [`order_score`]). Persists across the
     /// search; slot 0 is the most recent.
     killers: [[Option<Move>; 2]; MAX_PLY as usize],
+    /// Butterfly history (`[side][from][to]`): cumulative quiet-cutoff score that
+    /// orders non-killer quiets. Persists across the search; saturates at
+    /// [`HISTORY_MAX`].
+    history: HistoryTable,
 }
 
 impl Searcher {
@@ -242,7 +247,8 @@ impl Searcher {
         let beta = MATE;
 
         let mut moves = board.pseudo_legal_moves();
-        moves.sort_by_key(|&m| -order_score(board, m, self.killers[0]));
+        let killers = self.killers[0];
+        moves.sort_by_key(|&m| -order_score(board, m, killers, &self.history));
         // The PV-move hint still leads; captures then killers then quiets follow.
         let ordered = hint
             .into_iter()
@@ -300,7 +306,8 @@ impl Searcher {
 
         let mut moves = board.pseudo_legal_moves();
         if depth >= ORDER_MIN_DEPTH {
-            moves.sort_by_key(|&m| -order_score(board, m, self.killers[ply as usize]));
+            let killers = self.killers[ply as usize];
+            moves.sort_by_key(|&m| -order_score(board, m, killers, &self.history));
         }
         for mv in &moves {
             let undo = board.make_move(*mv);
@@ -309,11 +316,13 @@ impl Searcher {
                 let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
                 if score >= beta {
                     board.unmake_move(*mv, undo);
-                    // A quiet move that fails high is a killer for this ply -
-                    // record it so siblings try it ahead of their other quiets.
-                    // Captures and promotions are excluded (MVV-LVA orders them).
+                    // A quiet move that fails high becomes a killer and earns
+                    // history credit; captures and promotions are excluded
+                    // (MVV-LVA orders them). After the unmake, `side_to_move` is
+                    // the mover again.
                     if !mv.flag().is_capture() && !mv.flag().is_promotion() {
                         self.store_killer(ply, *mv);
+                        self.update_history(board.side_to_move(), *mv, depth);
                     }
                     return score; // beta cutoff
                 }
@@ -346,6 +355,16 @@ impl Searcher {
             slot[0] = Some(mv);
         }
     }
+
+    /// Credit a quiet cutoff move in the butterfly history. The bonus is `depth^2`
+    /// (a cutoff found deeper in the tree was more expensive to discover, so it
+    /// weighs more), saturating at [`HISTORY_MAX`]. `side` is the move's mover.
+    fn update_history(&mut self, side: Color, mv: Move, depth: u32) {
+        let bonus = (depth * depth) as i32;
+        let cell = &mut self.history[side.as_u8() as usize][mv.from().index() as usize]
+            [mv.to().index() as usize];
+        *cell = (*cell + bonus).min(HISTORY_MAX);
+    }
 }
 
 /// Skip MVV-LVA ordering at remaining depth below this.
@@ -367,11 +386,23 @@ const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 const KILLER_1_BONUS: i32 = 9_000;
 const KILLER_2_BONUS: i32 = 8_000;
 
-/// MVV-LVA capture key with killer quiets slotted in: captures first
+/// Butterfly history table: a running `depth^2` count per `[side][from][to]` of
+/// quiet beta-cutoff moves, used to order non-killer quiets (see [`order_score`]).
+type HistoryTable = [[[i32; 64]; 64]; 2];
+
+/// Saturation cap on a history entry.
+///
+/// # Notes
+/// Held one band below [`KILLER_2_BONUS`] so a history-ranked quiet never
+/// outranks a killer, keeping the ordering tiers fixed.
+const HISTORY_MAX: i32 = 7_000;
+
+/// MVV-LVA capture key with killer and history quiets slotted in: captures first
 /// (most-valuable-victim / least-valuable-attacker), then this ply's two killers,
-/// then ordinary quiets at 0. Higher sorts earlier. (History will refine the 0s
-/// later.)
-fn order_score(board: &Board, mv: Move, killers: [Option<Move>; 2]) -> i32 {
+/// then the remaining quiets ranked by history (0 if never a cutoff). Higher
+/// sorts earlier. History is capped below the killer band, so the tiers never
+/// cross.
+fn order_score(board: &Board, mv: Move, killers: [Option<Move>; 2], history: &HistoryTable) -> i32 {
     if !mv.flag().is_capture() {
         if Some(mv) == killers[0] {
             return KILLER_1_BONUS;
@@ -379,7 +410,8 @@ fn order_score(board: &Board, mv: Move, killers: [Option<Move>; 2]) -> i32 {
         if Some(mv) == killers[1] {
             return KILLER_2_BONUS;
         }
-        return 0;
+        let side = board.side_to_move().as_u8() as usize;
+        return history[side][mv.from().index() as usize][mv.to().index() as usize];
     }
     let attacker = board.piece_at(mv.from()).unwrap().kind();
     let victim = if mv.flag() == MoveFlag::EnPassant {
@@ -517,13 +549,59 @@ mod tests {
         let killer = quiets[0];
         let other = quiets[1];
         let killers = [Some(killer), None];
+        let empty = [[[0; 64]; 64]; 2];
 
-        let cap_score = order_score(&b, capture, killers);
-        let killer_score = order_score(&b, killer, killers);
-        let other_score = order_score(&b, other, killers);
+        let cap_score = order_score(&b, capture, killers, &empty);
+        let killer_score = order_score(&b, killer, killers, &empty);
+        let other_score = order_score(&b, other, killers, &empty);
 
         assert!(cap_score > killer_score, "captures outrank killers");
         assert!(killer_score > other_score, "killer outranks plain quiets");
         assert_eq!(other_score, 0, "a non-killer quiet scores 0");
+    }
+
+    #[test]
+    fn history_ranks_quiets_below_killers_and_above_cold_quiets() {
+        // Same position. A quiet with history credit sorts above a never-tried
+        // quiet (0) but still below a killer and a capture - the tier order is
+        // capture > killer > history-quiet > cold-quiet.
+        let b = board("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1");
+        let moves = b.pseudo_legal_moves();
+
+        let mut capture = None;
+        let mut quiets = Vec::new();
+        for &m in &moves {
+            if m.flag().is_capture() {
+                capture = Some(m);
+            } else if !m.flag().is_promotion() {
+                quiets.push(m);
+            }
+        }
+        let capture = capture.expect("e4xd5 is a capture");
+        assert!(
+            quiets.len() >= 3,
+            "need a killer, a hot quiet, and a cold one"
+        );
+
+        let killer = quiets[0];
+        let hot = quiets[1]; // earns history credit
+        let cold = quiets[2]; // never a cutoff
+        let killers = [Some(killer), None];
+
+        // Credit `hot` in the history table for White (side to move).
+        let mut history = [[[0; 64]; 64]; 2];
+        let white = b.side_to_move().as_u8() as usize;
+        history[white][hot.from().index() as usize][hot.to().index() as usize] = 500;
+
+        let cap_s = order_score(&b, capture, killers, &history);
+        let killer_s = order_score(&b, killer, killers, &history);
+        let hot_s = order_score(&b, hot, killers, &history);
+        let cold_s = order_score(&b, cold, killers, &history);
+
+        assert_eq!(hot_s, 500, "history quiet carries its score");
+        assert!(cap_s > killer_s, "capture > killer");
+        assert!(killer_s > hot_s, "killer > history quiet");
+        assert!(hot_s > cold_s, "history quiet > cold quiet");
+        assert_eq!(cold_s, 0, "a cold quiet scores 0");
     }
 }
