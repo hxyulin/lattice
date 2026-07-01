@@ -13,6 +13,16 @@ const DEFAULT_DEPTH: u32 = 4;
 /// Depth for `lattice bench [depth]` when none is given.
 const DEFAULT_BENCH_DEPTH: u32 = 4;
 
+/// Wall-clock reserved per move before the think-time deadline.
+///
+/// # Notes
+/// The search polls the clock only every few thousand nodes and must still
+/// unwind and emit `bestmove`, so without a margin it overshoots and forfeits
+/// on time. A fixed 10ms margin is uniform across builds, so it does not skew
+/// equal-time comparisons the way a raw overrun (which scales with each build's
+/// NPS) would.
+const MOVE_OVERHEAD: Duration = Duration::from_millis(10);
+
 fn main() -> io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("bench") {
         let depth = std::env::args()
@@ -94,11 +104,22 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// Reserve [`MOVE_OVERHEAD`] from an allotted think time, flooring at 1ms.
+///
+/// # Notes
+/// A tiny budget still yields a move (depth 1 always completes via the search's
+/// `armed` guard) rather than getting a zero-length deadline.
+fn reserve_overhead(t: Duration) -> Duration {
+    t.saturating_sub(MOVE_OVERHEAD)
+        .max(Duration::from_millis(1))
+}
+
 /// Translate a parsed UCI `go` into engine [`Limits`].
 ///
 /// `movetime` wins outright; otherwise the side-to-move's clock and increment
-/// give a per-move budget via [`budget`]. A bare `go` with no limit at all falls
-/// back to [`DEFAULT_DEPTH`] so the engine never searches forever.
+/// give a per-move budget via [`budget`], less a [`reserve_overhead`] margin. A
+/// bare `go` with no limit at all falls back to [`DEFAULT_DEPTH`] so the engine
+/// never searches forever.
 fn limits_from_go(go: &Go, stm: Color) -> Limits {
     let move_time = go.movetime.map(Duration::from_millis).or_else(|| {
         let (remaining, inc) = match stm {
@@ -112,6 +133,9 @@ fn limits_from_go(go: &Go, stm: Color) -> Limits {
             )
         })
     });
+    // Reserve the fixed move-overhead margin from any wall-clock budget so the
+    // search's poll-and-unwind overshoot stays inside the allotted time.
+    let move_time = move_time.map(reserve_overhead);
     let mut limits = Limits {
         depth: go.depth,
         nodes: go.nodes,
@@ -179,5 +203,25 @@ fn resolve(board: &Board, um: UciMove) -> Option<Move> {
 fn io_err(e: lattice::UciError) -> io::Error {
     match e {
         lattice::UciError::Io(e) => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserve_overhead_subtracts_and_floors() {
+        // A normal budget loses exactly the overhead.
+        assert_eq!(
+            reserve_overhead(Duration::from_millis(100)),
+            Duration::from_millis(90)
+        );
+        // A budget at or below the overhead floors at 1ms - never zero - so the
+        // engine still produces a move instead of getting a dead deadline.
+        assert_eq!(
+            reserve_overhead(Duration::from_millis(5)),
+            Duration::from_millis(1)
+        );
     }
 }
