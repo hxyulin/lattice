@@ -18,18 +18,18 @@
 //! invariant to whose turn it is; at eval time the side to move's accumulator is
 //! `us` and the other is `them`, matching bullet's `(stm, ntm)` ordering.
 //!
-//! This is the correctness-first path: the accumulators are recomputed from the
-//! mailbox on every call. An incremental accumulator (kept in sync by
-//! `put_piece`/`remove_piece`, like the tapered-eval one) is a later,
-//! eval-neutral optimisation - its correctness test is simply that it equals
-//! this from-scratch result.
+//! The two accumulators are maintained incrementally by the board's
+//! `put_piece`/`remove_piece` hooks (like the tapered-eval accumulator) and
+//! seeded from the mailbox on setup; this module owns the network, the feature
+//! math, and the forward pass. A from-scratch reseed is the oracle the
+//! incremental path is tested against (`nnue_acc_incremental_matches_recompute`).
 
 use std::sync::LazyLock;
 
-use super::{Board, Color, Square};
+use super::Piece;
 
 /// Hidden-layer width per perspective.
-const HIDDEN: usize = 256;
+pub(super) const HIDDEN: usize = 256;
 /// Feature-transformer quantisation constant (bullet `QA`).
 const QA: i32 = 255;
 /// Output-layer quantisation constant (bullet `QB`).
@@ -99,38 +99,60 @@ fn screlu(x: i16) -> i64 {
     c * c
 }
 
-impl Board {
-    /// Static NNUE evaluation, in centipawns from the side-to-move's perspective.
-    #[must_use]
-    pub fn nnue_eval(&self) -> i32 {
-        let net = &**NET;
-        let mut white = net.l0b;
-        let mut black = net.l0b;
-        for i in 0..64u8 {
-            let Some(piece) = self.piece_at(Square::from_index(i)) else {
-                continue;
-            };
-            let c = piece.color().as_u8() as usize;
-            let pt = (piece.as_u8() >> 1) as usize;
-            let sq = i as usize;
-            let fw = (c * 384 + pt * 64 + sq) * HIDDEN;
-            let fb = ((1 ^ c) * 384 + pt * 64 + (sq ^ 56)) * HIDDEN;
-            for h in 0..HIDDEN {
-                white[h] = white[h].wrapping_add(net.l0w[fw + h]);
-                black[h] = black[h].wrapping_add(net.l0w[fb + h]);
-            }
-        }
-        let (us, them) = if self.side_to_move() == Color::White {
-            (&white, &black)
-        } else {
-            (&black, &white)
-        };
-        let mut out: i64 = 0;
-        for h in 0..HIDDEN {
-            out += screlu(us[h]) * i64::from(net.l1w[h]);
-            out += screlu(them[h]) * i64::from(net.l1w[HIDDEN + h]);
-        }
-        out = out / i64::from(QA) + i64::from(net.l1b);
-        (out * i64::from(SCALE) / i64::from(QA * QB)) as i32
+/// The feature-transformer bias: the accumulator value for an empty board, the
+/// base a seed or reseed starts from.
+pub(super) fn bias() -> [i16; HIDDEN] {
+    NET.l0b
+}
+
+/// Base offsets into `l0w` for `piece` on `sq` (LERF), for the white- and
+/// black-perspective accumulators respectively. Both perspectives are keyed on
+/// absolute color, so this is invariant to whose turn it is.
+#[inline]
+fn offsets(piece: Piece, sq: usize) -> (usize, usize) {
+    let c = piece.color().as_u8() as usize;
+    let pt = (piece.as_u8() >> 1) as usize;
+    let fw = (c * 384 + pt * 64 + sq) * HIDDEN;
+    let fb = ((1 ^ c) * 384 + pt * 64 + (sq ^ 56)) * HIDDEN;
+    (fw, fb)
+}
+
+/// Add `piece` on `sq` (LERF) into both perspective accumulators.
+#[inline]
+pub(super) fn add(white: &mut [i16; HIDDEN], black: &mut [i16; HIDDEN], piece: Piece, sq: usize) {
+    let (fw, fb) = offsets(piece, sq);
+    let net = &**NET;
+    for h in 0..HIDDEN {
+        white[h] = white[h].wrapping_add(net.l0w[fw + h]);
+        black[h] = black[h].wrapping_add(net.l0w[fb + h]);
     }
+}
+
+/// Remove `piece` on `sq` (LERF) from both perspective accumulators.
+#[inline]
+pub(super) fn sub(white: &mut [i16; HIDDEN], black: &mut [i16; HIDDEN], piece: Piece, sq: usize) {
+    let (fw, fb) = offsets(piece, sq);
+    let net = &**NET;
+    for h in 0..HIDDEN {
+        white[h] = white[h].wrapping_sub(net.l0w[fw + h]);
+        black[h] = black[h].wrapping_sub(net.l0w[fb + h]);
+    }
+}
+
+/// Forward pass from the maintained accumulators, in centipawns from the side to
+/// move's perspective. `white_to_move` selects which accumulator is `us`.
+pub(super) fn forward(white: &[i16; HIDDEN], black: &[i16; HIDDEN], white_to_move: bool) -> i32 {
+    let net = &**NET;
+    let (us, them) = if white_to_move {
+        (white, black)
+    } else {
+        (black, white)
+    };
+    let mut out: i64 = 0;
+    for h in 0..HIDDEN {
+        out += screlu(us[h]) * i64::from(net.l1w[h]);
+        out += screlu(them[h]) * i64::from(net.l1w[HIDDEN + h]);
+    }
+    out = out / i64::from(QA) + i64::from(net.l1b);
+    (out * i64::from(SCALE) / i64::from(QA * QB)) as i32
 }
