@@ -676,6 +676,16 @@ impl Searcher<'_> {
             }
         }
 
+        // Internal iterative reduction. With no TT move this node has no strong
+        // first move to try, so a full-depth search would burn effort on a badly
+        // ordered list. Search one ply shallower instead; the reduced search fills
+        // the TT, so the parent's re-search (or the next iteration) is well
+        // ordered. Gated on real depth to spare and skipped in check, where the
+        // extension above wants more depth, not less.
+        if depth >= IIR_MIN_DEPTH && tt_move.is_none() && !in_check {
+            depth -= 1;
+        }
+
         let mut best = -MATE;
         let mut best_move = None;
         let mut legal = 0u32;
@@ -934,6 +944,11 @@ impl Searcher<'_> {
 /// The depth-1 frontier is the largest node layer but its children are leaves
 /// (static eval), so sorting there costs more than the sibling evals it saves.
 const ORDER_MIN_DEPTH: u32 = 2;
+
+/// Minimum remaining depth for internal iterative reduction. Below this the node
+/// is too shallow for a missing TT move to be worth a reduction: the saved plies
+/// are few and the re-search overhead dominates.
+const IIR_MIN_DEPTH: u32 = 4;
 
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
