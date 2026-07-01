@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use lattice::{Board, Color, Move};
 use lattice::{Go, StartPos, UciCommand, UciInterface, UciMove};
 use lattice::{
-    Limits, MATE, Score, SearchInfo, TranspositionTable, bench, budget, nps, search_with_info,
+    Limits, MATE, Score, SearchInfo, TUNABLES, TranspositionTable, Tunables, bench, budget, nps,
+    search_with_info,
 };
 
 /// Depth used for a bare `go`, no search limits exist, small enough to be fast
@@ -67,6 +68,9 @@ fn main() -> io::Result<()> {
     let mut idle: Option<Board> = Some(Board::starting_position());
     let mut idle_tt: Option<TranspositionTable> = Some(TranspositionTable::new(DEFAULT_HASH_MB));
     let mut running: Option<RunningSearch> = None;
+    // SPSA-tunable search parameters, set via `setoption` and handed to each
+    // search. Persists across moves; defaults reproduce the untuned engine.
+    let mut tunables = Tunables::default();
 
     while let Some(cmd) = uci.poll().map_err(io_err)? {
         match cmd {
@@ -79,6 +83,12 @@ fn main() -> io::Result<()> {
                 emit(&format!(
                     "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
                 ));
+                for t in TUNABLES {
+                    emit(&format!(
+                        "option name {} type spin default {} min {} max {}",
+                        t.name, t.default, t.min, t.max
+                    ));
+                }
                 emit("uciok");
             }
             UciCommand::IsReady => emit("readyok"),
@@ -90,18 +100,21 @@ fn main() -> io::Result<()> {
                 }
             }
             UciCommand::SetOption { name, value } => {
-                // Only `Hash` (in MB) is supported; ignore anything else, per UCI.
-                // Reap first so the table is back in `idle_tt` to resize.
-                if name.eq_ignore_ascii_case(b"Hash")
-                    && let Some(mb) = value
-                        .as_ref()
-                        .and_then(|v| std::str::from_utf8(v).ok())
-                        .and_then(|s| s.trim().parse::<usize>().ok())
-                {
-                    reap(&mut idle, &mut idle_tt, &mut running);
-                    if let Some(tt) = idle_tt.as_mut() {
-                        tt.resize(mb.clamp(MIN_HASH_MB, MAX_HASH_MB));
+                let parsed = value
+                    .as_ref()
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|s| s.trim().parse::<i32>().ok());
+                if name.eq_ignore_ascii_case(b"Hash") {
+                    // Reap first so the table is back in `idle_tt` to resize.
+                    if let Some(mb) = parsed {
+                        reap(&mut idle, &mut idle_tt, &mut running);
+                        if let Some(tt) = idle_tt.as_mut() {
+                            tt.resize((mb.max(0) as usize).clamp(MIN_HASH_MB, MAX_HASH_MB));
+                        }
                     }
+                } else if let (Ok(name), Some(v)) = (std::str::from_utf8(&name), parsed) {
+                    // SPSA tunables; an unknown name is ignored, per UCI.
+                    tunables.set(name, v);
                 }
             }
             UciCommand::Position { start, moves } => {
@@ -142,6 +155,7 @@ fn main() -> io::Result<()> {
                     let stop = Arc::new(AtomicBool::new(false));
                     let mut limits = limits_from_go(&go, board.side_to_move());
                     limits.stop = Some(stop.clone());
+                    let tun = tunables.clone();
                     let handle = thread::spawn(move || {
                         let start = Instant::now();
                         // One `info` line per completed iterative-deepening depth.
@@ -157,7 +171,8 @@ fn main() -> io::Result<()> {
                                 nps(info.nodes, start.elapsed()),
                             ));
                         };
-                        let result = search_with_info(&mut board, &limits, &mut tt, &mut on_iter);
+                        let result =
+                            search_with_info(&mut board, &limits, &mut tt, &tun, &mut on_iter);
                         let pv = result
                             .best_move
                             .map_or_else(|| "0000".to_string(), |m| m.to_string());
