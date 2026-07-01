@@ -1,0 +1,6 @@
+commit,date,subject,bench_nodes
+e8cf2bb,2026-07-01,"feat(engine): material evaluation and fixed-depth negamax search",
+2435e50,2026-07-01,"feat(uci): UCI frontend wiring search to the protocol",
+ab5e2dc,2026-07-01,"feat(bench): search benchmark and OpenBench build entrypoint",11024485
+28409bd,2026-07-01,"chore(dev): stamp Bench trailers via a pre-commit hook",
+7b95e03,2026-07-01,"feat(tools): cross-version SPRT harness and calibration gauntlet",

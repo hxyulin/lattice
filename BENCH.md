@@ -6,6 +6,10 @@ canonical perft positions.
 To compare a new version, re-run the same `bench <depth>` and diff the node
 counts: pruning (alpha-beta, etc.) should cut nodes hard for the same positions.
 
+Per-commit totals live in `bench.csv` (generated from the `Bench:` commit
+trailers by `tools/gen-ledgers.sh`); per-feature Elo lives in
+[`docs/src/sprt-results.md`](docs/src/sprt-results.md).
+
 ## Baseline - material eval + fixed-depth negamax, no pruning
 
 - Commit: `undetermined` (pre-alpha-beta)
