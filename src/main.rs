@@ -1,14 +1,19 @@
 //! A runnable UCI engine wrapping `lattice-engine` and `lattice-board`
 
 use std::io::{self, BufReader};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use lattice::{Board, Move};
-use lattice::{MATE, Score, bench, nps, search};
-use lattice::{StartPos, UciCommand, UciInterface, UciMove};
+use lattice::{Board, Color, Move};
+use lattice::{Go, StartPos, UciCommand, UciInterface, UciMove};
+use lattice::{MATE, Score, bench, nps, search, search_deadline};
 
-/// Depth used for a bare `go`, no search limits exist, small enough to be fast
+/// Depth used for a bare `go` with no time or depth limit: shallow enough to
+/// answer instantly rather than hang.
 const DEFAULT_DEPTH: u32 = 4;
+
+/// Hard ceiling on iterative-deepening depth; the clock stops a timed search
+/// long before this, it only bounds `go infinite` and fixed-time searches.
+const MAX_DEPTH: u32 = 64;
 
 /// Depth for `lattice bench [depth]` when none is given.
 const DEFAULT_BENCH_DEPTH: u32 = 4;
@@ -61,9 +66,21 @@ fn main() -> io::Result<()> {
                     uci.send(&format!("\nNodes searched: {total}"))
                         .map_err(io_err)?;
                 } else {
-                    let depth = go.depth.unwrap_or(DEFAULT_DEPTH);
+                    let deadline = think_time_ms(&go, board.side_to_move())
+                        .map(|ms| Instant::now() + Duration::from_millis(ms));
                     let start = Instant::now();
-                    let result = search(&mut board, depth);
+                    // Fixed `go depth N` with no clock stays deterministic; any
+                    // other form runs iterative deepening.
+                    let result = if go.depth.is_some() && deadline.is_none() {
+                        search(&mut board, go.depth.unwrap_or(DEFAULT_DEPTH))
+                    } else {
+                        let max_depth = go.depth.unwrap_or(if deadline.is_some() || go.infinite {
+                            MAX_DEPTH
+                        } else {
+                            DEFAULT_DEPTH
+                        });
+                        search_deadline(&mut board, max_depth, deadline)
+                    };
                     let elapsed = start.elapsed();
 
                     // Integer nps; clamp elapsed up to 1us so a sub-microsecond
@@ -74,7 +91,7 @@ fn main() -> io::Result<()> {
                         .best_move
                         .map_or_else(|| "0000".to_string(), |m| m.to_string());
 
-                    let nodes = result.nodes;
+                    let (depth, nodes) = (result.depth, result.nodes);
                     uci.send(&format!(
                         "info depth {depth} score {} nodes {nodes} nps {nps} pv {pv}",
                         format_score(result.score),
@@ -129,6 +146,20 @@ fn format_score(score: Score) -> String {
     } else {
         format!("cp {score}")
     }
+}
+
+/// Milliseconds to spend on this move, or `None` to search unbounded (no clock
+/// and no `movetime`). Budget is a twentieth of the side-to-move's remaining
+/// clock plus half its increment; `movetime` overrides it exactly.
+fn think_time_ms(go: &Go, stm: Color) -> Option<u64> {
+    if let Some(mt) = go.movetime {
+        return Some(mt);
+    }
+    let (time, inc) = match stm {
+        Color::White => (go.wtime, go.winc),
+        Color::Black => (go.btime, go.binc),
+    };
+    time.map(|t| t / 20 + inc.unwrap_or(0) / 2)
 }
 
 /// Turn a UCI from/to(/promo) into a flagged engine [`Move`]

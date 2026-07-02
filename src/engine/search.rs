@@ -1,9 +1,20 @@
 //! Recursive search of game state using the following techniques to speed up and rank moves:
 //!  - Negamax (minimax)
+//!  - Iterative deepening with a wall-clock deadline
+
+use std::time::Instant;
 
 use crate::{Board, Move};
 
 use crate::{MATE, Score, evaluate};
+
+/// Any score at least this close to `MATE` is a mate score; the search never
+/// reaches this many plies, so it cannot be a real centipawn evaluation.
+const MATE_THRESHOLD: Score = MATE - 1000;
+
+/// How often (in nodes) the clock is polled. A power of two so the check is a
+/// cheap bit mask; small enough that overshoot past the deadline is bounded.
+const CHECK_INTERVAL: u64 = 2048;
 
 /// The outcome of a [`search`].
 pub struct SearchResult {
@@ -13,12 +24,15 @@ pub struct SearchResult {
     pub score: Score,
     /// Nodes visited during the search
     pub nodes: u64,
+    /// Deepest iteration fully completed (0 for a bare static evaluation).
+    pub depth: u32,
 }
 
-/// Search `board` to `depth` plies and return the best move with its score.
+/// Search `board` to a fixed `depth` and return the best move with its score.
 ///
 /// `depth` is the number of plies to look ahead; `depth == 0` just statically
-/// evaluates the position and returns no move.
+/// evaluates the position and returns no move. This is the deterministic entry
+/// point used by the benchmark and tests; timed play uses [`search_deadline`].
 #[must_use]
 pub fn search(board: &mut Board, depth: u32) -> SearchResult {
     if depth == 0 {
@@ -26,52 +40,128 @@ pub fn search(board: &mut Board, depth: u32) -> SearchResult {
             best_move: None,
             score: evaluate(board),
             nodes: 1,
+            depth: 0,
         };
     }
 
-    let mut searcher = Searcher { nodes: 0 };
-    let mut best_move = None;
-    let mut best = -MATE;
-
-    // same as negamax loop but records the best move
-    for mv in &board.pseudo_legal_moves() {
-        let undo = board.make_move(*mv);
-        if board.is_legal() {
-            let score = -searcher.negamax(board, depth - 1, 1);
-            if score > best {
-                best = score;
-                best_move = Some(*mv);
-            }
-        }
-        board.unmake_move(*mv, undo);
-    }
-
-    // No legal move at the root: checkmate (in check) or stalemate (draw).
-    let score = if best_move.is_some() {
-        best
-    } else if board.in_check(board.side_to_move()) {
-        -MATE
-    } else {
-        0
-    };
-
+    let mut searcher = Searcher::new(None);
+    let (best_move, score) = searcher.search_root(board, depth);
     SearchResult {
         best_move,
         score,
         nodes: searcher.nodes,
+        depth,
     }
+}
+
+/// Iterative deepening: search depth 1, 2, 3, ... keeping the best move from the
+/// deepest iteration that completed before `deadline`. A partially searched
+/// depth is discarded, so the returned move is always from a full search.
+///
+/// `max_depth` caps the iteration. `deadline == None` searches every depth up to
+/// `max_depth` with no time limit.
+#[must_use]
+pub fn search_deadline(
+    board: &mut Board,
+    max_depth: u32,
+    deadline: Option<Instant>,
+) -> SearchResult {
+    let mut searcher = Searcher::new(deadline);
+    let mut result = SearchResult {
+        best_move: None,
+        score: 0,
+        nodes: 0,
+        depth: 0,
+    };
+
+    for depth in 1..=max_depth {
+        let (best_move, score) = searcher.search_root(board, depth);
+        // Ran out of time mid-iteration: drop it and keep the last full depth.
+        if searcher.stopped {
+            break;
+        }
+        result.best_move = best_move;
+        result.score = score;
+        result.depth = depth;
+        result.nodes = searcher.nodes;
+        // A forced mate is exact at any depth; searching deeper cannot improve it.
+        if score.abs() >= MATE_THRESHOLD {
+            break;
+        }
+    }
+
+    result
 }
 
 /// Mutable search state threaded through the recursion.
 struct Searcher {
     nodes: u64,
+    /// Wall-clock stop, or `None` for an untimed (fixed-depth) search.
+    deadline: Option<Instant>,
+    /// Set once the deadline passes; every node unwinds without expanding.
+    stopped: bool,
 }
 
 impl Searcher {
+    fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            nodes: 0,
+            deadline,
+            stopped: false,
+        }
+    }
+
+    /// Poll the clock every `CHECK_INTERVAL` nodes and latch `stopped`.
+    fn check_time(&mut self) {
+        if self.nodes.is_multiple_of(CHECK_INTERVAL)
+            && let Some(deadline) = self.deadline
+            && Instant::now() >= deadline
+        {
+            self.stopped = true;
+        }
+    }
+
+    /// Root search: like [`Self::negamax`] but records which move scored best.
+    /// Returns `(best_move, score)`; `best_move` is `None` only at a terminal
+    /// (mate/stalemate) position or if the search stops before a legal move.
+    fn search_root(&mut self, board: &mut Board, depth: u32) -> (Option<Move>, Score) {
+        let mut best_move = None;
+        let mut best = -MATE;
+
+        for mv in &board.pseudo_legal_moves() {
+            let undo = board.make_move(*mv);
+            if board.is_legal() {
+                let score = -self.negamax(board, depth - 1, 1);
+                if score > best {
+                    best = score;
+                    best_move = Some(*mv);
+                }
+            }
+            board.unmake_move(*mv, undo);
+            if self.stopped {
+                break;
+            }
+        }
+
+        // No legal move at the root: checkmate (in check) or stalemate (draw).
+        let score = if best_move.is_some() {
+            best
+        } else if board.in_check(board.side_to_move()) {
+            -MATE
+        } else {
+            0
+        };
+        (best_move, score)
+    }
+
     /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
     /// from the root, used only to make mate scores prefer shorter mates.
     fn negamax(&mut self, board: &mut Board, depth: u32, ply: u32) -> Score {
         self.nodes += 1;
+        self.check_time();
+        if self.stopped {
+            return 0;
+        }
 
         if depth == 0 {
             return evaluate(board);
@@ -87,6 +177,9 @@ impl Searcher {
                 best = best.max(-self.negamax(board, depth - 1, ply + 1));
             }
             board.unmake_move(*mv, undo);
+            if self.stopped {
+                return best;
+            }
         }
 
         if legal == 0 {
@@ -149,5 +242,35 @@ mod tests {
         let r = search(&mut b, 1);
         assert_eq!(r.best_move, None);
         assert_eq!(r.score, 0);
+    }
+
+    #[test]
+    fn iterative_deepening_reaches_max_depth() {
+        // With no deadline, ID must complete every depth up to the cap.
+        let mut b = board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let r = search_deadline(&mut b, 4, None);
+        assert_eq!(r.depth, 4);
+        assert!(r.best_move.is_some());
+    }
+
+    #[test]
+    fn iterative_deepening_finds_mate_in_one() {
+        let mut b = board("6k1/5ppp/8/8/8/8/8/R6K w - - 0 1");
+        let r = search_deadline(&mut b, 8, None);
+        assert_eq!(
+            r.best_move.map(|m| (m.from(), m.to())),
+            Some((sq("a1"), sq("a8")))
+        );
+        assert_eq!(r.score, MATE - 1);
+    }
+
+    #[test]
+    fn expired_deadline_still_returns_a_move() {
+        // A deadline already in the past must not yield a null move: depth 1 is
+        // tiny enough to finish before the clock is ever polled.
+        let mut b = board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let r = search_deadline(&mut b, 64, Some(Instant::now()));
+        assert!(r.best_move.is_some());
+        assert!(r.depth >= 1);
     }
 }
