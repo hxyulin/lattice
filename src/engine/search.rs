@@ -128,13 +128,24 @@ impl Searcher {
         let mut best_move = None;
         let mut best = -MATE;
 
+        let mut alpha = -MATE;
+        let beta = MATE;
+
         for mv in &board.pseudo_legal_moves() {
             let undo = board.make_move(*mv);
             if board.is_legal() {
-                let score = -self.negamax(board, depth - 1, 1);
+                let score = -self.negamax(board, depth - 1, 1, -beta, -alpha);
                 if score > best {
                     best = score;
                     best_move = Some(*mv);
+                }
+
+                alpha = alpha.max(score);
+                if alpha >= beta {
+                    // Beta cutoff: the opponent has a better option, so this
+                    // branch will never be reached.
+                    board.unmake_move(*mv, undo);
+                    break;
                 }
             }
             board.unmake_move(*mv, undo);
@@ -156,7 +167,14 @@ impl Searcher {
 
     /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
     /// from the root, used only to make mate scores prefer shorter mates.
-    fn negamax(&mut self, board: &mut Board, depth: u32, ply: u32) -> Score {
+    fn negamax(
+        &mut self,
+        board: &mut Board,
+        depth: u32,
+        ply: u32,
+        mut alpha: Score,
+        beta: Score,
+    ) -> Score {
         self.nodes += 1;
         self.check_time();
         if self.stopped {
@@ -174,7 +192,19 @@ impl Searcher {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
-                best = best.max(-self.negamax(board, depth - 1, ply + 1));
+
+                // The alpha-beta window is [alpha, beta), from the opponents point of view it is:
+                // [-beta, -alpha), therefore we negate the score and swap alpha and beta.
+                let score = -self.negamax(board, depth - 1, ply + 1, -beta, -alpha);
+                best = best.max(score);
+                alpha = alpha.max(score);
+
+                if alpha >= beta {
+                    // Beta cutoff: the opponent has a better option, so this
+                    // branch will never be reached.
+                    board.unmake_move(*mv, undo);
+                    break;
+                }
             }
             board.unmake_move(*mv, undo);
             if self.stopped {

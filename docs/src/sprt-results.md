@@ -36,4 +36,6 @@ authoritative result.
 <!-- BEGIN generated: tools/gen-ledgers.sh - do not edit this table by hand -->
 | Feature | TC | Games | Elo | Verdict |
 |---------|----|------:|----:|---------|
+| alpha-beta pruning in negamax | STC | 38 | +348.7 | pass |
+| alpha-beta pruning in negamax | LTC | 100 | +263 | pass |
 <!-- END generated -->

@@ -6,4 +6,5 @@ ab5e2dc,2026-07-01,"feat(bench): search benchmark and OpenBench build entrypoint
 10f54a5,2026-07-01,"feat(tools): cross-version SPRT harness and calibration gauntlet",
 df5d10e,2026-07-01,"docs: SPRT/bench workflow and generated ledgers",
 e40ca3a,2026-07-02,"feat(search): iterative deepening with time management",11024485
-8f7e451,2026-07-05,"fix(tools): parse multi-run and decimal SPRT trailers in gen-ledgers",
+c6e2180,2026-07-05,"fix(tools): parse multi-run and decimal SPRT trailers in gen-ledgers",
+91942a1,2026-07-03,"feat(search): alpha-beta pruning in negamax",335385
