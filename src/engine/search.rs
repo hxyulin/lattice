@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use crate::{Board, Move};
+use crate::{Board, Move, MoveList};
 
 use crate::{MATE, Score, evaluate};
 
@@ -131,7 +131,9 @@ impl Searcher {
         let mut alpha = -MATE;
         let beta = MATE;
 
-        for mv in &board.pseudo_legal_moves() {
+        let mut moves = board.pseudo_legal_moves();
+        order_moves(board, &mut moves);
+        for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 let score = -self.negamax(board, depth - 1, 1, -beta, -alpha);
@@ -188,7 +190,9 @@ impl Searcher {
         let mut best = -MATE;
         let mut legal = 0u32;
 
-        for mv in &board.pseudo_legal_moves() {
+        let mut moves = board.pseudo_legal_moves();
+        order_moves(board, &mut moves);
+        for mv in &moves {
             let undo = board.make_move(*mv);
             if board.is_legal() {
                 legal += 1;
@@ -225,6 +229,23 @@ impl Searcher {
 
         best
     }
+}
+
+const PIECE_VALUES_ATTACKER: [Score; 6] = [100, 300, 300, 500, 900, 0];
+const PIECE_VALUES_VICTIM: [Score; 6] = [100, 300, 300, 500, 900, 10000];
+
+fn order_moves(board: &Board, moves: &mut MoveList) {
+    // order by MVV-LVA heuristic: most valuable victim, least valuable attacker
+
+    moves.sort_unstable_by_key(|mv| {
+        let victim_value = board
+            .piece_at(mv.to())
+            .map_or(0, |p| PIECE_VALUES_VICTIM[p.kind() as usize]);
+        let attacker_value = board
+            .piece_at(mv.from())
+            .map_or(0, |p| PIECE_VALUES_ATTACKER[p.kind() as usize]);
+        (-victim_value, attacker_value)
+    });
 }
 
 #[cfg(test)]
