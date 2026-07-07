@@ -167,6 +167,54 @@ impl Searcher {
         (best_move, score)
     }
 
+    fn quiescience(
+        &mut self,
+        board: &mut Board,
+        ply: u32,
+        depth: u32,
+        mut alpha: Score,
+        beta: Score,
+    ) -> Score {
+        self.nodes += 1;
+        self.check_time();
+        if self.stopped {
+            return 0;
+        }
+        // record baseline
+        let stand_pat = evaluate(board);
+        if stand_pat >= beta {
+            return beta;
+        }
+        alpha = alpha.max(stand_pat);
+        if depth == 0 {
+            // prevent repeating or long quiescience searches
+            return stand_pat;
+        }
+
+        // generate moves
+        // TODO(perf): generate only captures
+        let moves = board.pseudo_legal_moves();
+        for mv in moves.iter().filter(|m| m.flag().is_capture()) {
+            let undo = board.make_move(*mv);
+            if !board.is_legal() {
+                board.unmake_move(*mv, undo);
+                continue;
+            }
+            let score = -self.quiescience(board, ply + 1, depth - 1, -beta, -alpha);
+            board.unmake_move(*mv, undo);
+
+            if self.stopped {
+                return 0;
+            }
+            if score >= beta {
+                return beta;
+            }
+            alpha = alpha.max(score);
+        }
+
+        alpha
+    }
+
     /// Negamax score of `board` searched to `depth` plies. `ply` is the distance
     /// from the root, used only to make mate scores prefer shorter mates.
     fn negamax(
@@ -184,7 +232,7 @@ impl Searcher {
         }
 
         if depth == 0 {
-            return evaluate(board);
+            return self.quiescience(board, ply, 4, alpha, beta);
         }
 
         let mut best = -MATE;
