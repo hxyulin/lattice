@@ -269,7 +269,8 @@ mod tests {
         let mv = r.best_move.expect("a legal move exists");
         assert_eq!(mv.from(), sq("e2"));
         assert_eq!(mv.to(), sq("d3"));
-        assert_eq!(r.score, 100);
+        // 100 material for the queen-vs-pawn trade + 10 PST for the d3 pawn.
+        assert_eq!(r.score, 110);
     }
 
     #[test]
