@@ -1,0 +1,13 @@
+# Configuration for the typos spell checker (https://github.com/crate-ci/typos).
+# Run with `typos` (install: `cargo install typos-cli`).
+
+[files]
+extend-exclude = ["Cargo.lock"]
+
+[default]
+# Add false positives here when typos flags a chess term it should not, e.g.
+# a FEN fragment or an identifier:
+#   extend-ignore-identifiers-re = ["..."]
+# or a specific word:
+#   [default.extend-words]
+#   "wQ" = "wQ"
