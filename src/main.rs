@@ -12,10 +12,6 @@ use lattice::search::search;
 use lattice::uci::{Command, move_text, parse};
 
 fn main() {
-    // Off the clock: lazily building these inside the first search charges
-    // roughly 150ms to that move.
-    lattice::movegen::init();
-
     if std::env::args().nth(1).as_deref() == Some("bench") {
         bench::run(&mut io::stdout().lock());
         return;
@@ -32,7 +28,12 @@ fn main() {
         };
         // ponytail: keep UCI dispatch flat while the protocol surface is small.
         match command {
-            Command::Uci => write_protocol("id name Lattice\nid author hxyulin\nuciok"),
+            Command::Uci => {
+                // Off the clock: building these lazily inside the first search
+                // charges roughly 150ms to that move. The handshake has seconds.
+                lattice::movegen::init();
+                write_protocol("id name Lattice\nid author hxyulin\nuciok");
+            }
             Command::IsReady => write_protocol("readyok"),
             Command::NewGame => board = Board::startpos(),
             Command::Position(position) => board = position,
