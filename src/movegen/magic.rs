@@ -125,6 +125,14 @@ fn lookup(magic: &Magic, occ: Bitboard) -> Bitboard {
     TABLES.pool[magic.offset as usize + index]
 }
 
+/// Forces magic table generation.
+///
+/// The tables build lazily on first attack lookup, which otherwise happens
+/// inside the first search and bills roughly 150ms to that move's clock.
+pub fn init() {
+    LazyLock::force(&TABLES);
+}
+
 pub(crate) fn rook_attacks(sq: Square, occ: Bitboard) -> Bitboard {
     lookup(&TABLES.rook[sq.index() as usize], occ)
 }

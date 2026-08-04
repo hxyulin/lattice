@@ -1,10 +1,11 @@
 # Search benchmark
 
-`lattice bench [depth]` searches a fixed position suite to a fixed depth and
-prints, as its final line, the OpenBench-format signature:
+`lattice bench` searches a fixed 12-position suite to depth 4 and prints a
+ChessEval-compatible signature:
 
 ```
-<nodes> nodes <nps> nps
+Nodes searched: <nodes>
+Nodes/second: <nps>
 ```
 
 The node count is deterministic and machine-independent - a fingerprint of the

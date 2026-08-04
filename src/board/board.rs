@@ -34,7 +34,7 @@ fn side_key() -> u64 {
 }
 
 /// A chess position with synchronized bitboards and mailbox storage.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
     pieces: [Bitboard; 6],
     colors: [Bitboard; 2],

@@ -9,6 +9,7 @@ mod tables;
 use core::ops::Index;
 
 use crate::{Bitboard, Board, CastlingRights, Color, Move, MoveType, PieceType, Square};
+pub use magic::init;
 use magic::{bishop_attacks, queen_attacks, rook_attacks};
 use tables::{KING, KNIGHT, PAWN};
 
