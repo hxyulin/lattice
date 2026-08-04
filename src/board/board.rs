@@ -45,6 +45,18 @@ pub struct Board {
 }
 
 impl Board {
+    /// Returns the standard chess starting position.
+    pub fn startpos() -> Self {
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            .parse()
+            .unwrap()
+    }
+    /// Returns the square occupied by a side's king.
+    pub fn king_square(&self, color: Color) -> Square {
+        (self.pieces(PieceType::King) & self.color(color))
+            .lsb()
+            .unwrap()
+    }
     pub(crate) fn empty(state: State) -> Self {
         Self {
             pieces: [Bitboard::empty(); 6],

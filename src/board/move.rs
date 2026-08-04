@@ -223,6 +223,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[cfg(debug_assertions)]
     fn rejects_equal_squares() {
         let square = Square::from_index(1).unwrap();
         Move::new(square, square, MoveType::Quiet);
@@ -230,6 +231,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[cfg(debug_assertions)]
     fn rejects_reserved_6() {
         Move::new(
             Square::from_index(1).unwrap(),
@@ -240,6 +242,7 @@ mod tests {
 
     #[test]
     #[should_panic]
+    #[cfg(debug_assertions)]
     fn rejects_reserved_7() {
         Move::new(
             Square::from_index(1).unwrap(),

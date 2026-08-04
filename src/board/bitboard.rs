@@ -7,6 +7,14 @@ use super::Square;
 pub struct Bitboard(u64);
 
 impl Bitboard {
+    /// Builds a bitboard from its raw bits.
+    pub const fn new(bits: u64) -> Self {
+        Self(bits)
+    }
+    /// Returns the raw bits.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
     /// Returns an empty bitboard.
     pub const fn empty() -> Self {
         Self(0)
