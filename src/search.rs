@@ -144,7 +144,9 @@ fn negamax_root(
     let mut best_score = -INFINITY;
     for &mv in moves.iter() {
         board.make(mv);
-        let result = negamax(board, depth - 1, 1, ctx);
+        // Beta stays at INFINITY so no root move can fail low: a score above
+        // `best_score` is exact, and one below is a safe rejection.
+        let result = negamax(board, depth - 1, 1, -INFINITY, -best_score, ctx);
         board.unmake(mv);
         let score = -result?;
         if score > best_score {
@@ -155,7 +157,14 @@ fn negamax_root(
     Ok((best_move, best_score))
 }
 
-fn negamax(board: &mut Board, depth: u32, ply: u32, ctx: &mut Ctx<'_>) -> Result<i32, Aborted> {
+fn negamax(
+    board: &mut Board,
+    depth: u32,
+    ply: u32,
+    mut alpha: i32,
+    beta: i32,
+    ctx: &mut Ctx<'_>,
+) -> Result<i32, Aborted> {
     ctx.nodes += 1;
     ctx.check_abort()?;
     if depth == 0 {
@@ -169,9 +178,13 @@ fn negamax(board: &mut Board, depth: u32, ply: u32, ctx: &mut Ctx<'_>) -> Result
     let mut best = -INFINITY;
     for &mv in moves.iter() {
         board.make(mv);
-        let result = negamax(board, depth - 1, ply + 1, ctx);
+        let result = negamax(board, depth - 1, ply + 1, -beta, -alpha, ctx);
         board.unmake(mv);
         best = best.max(-result?);
+        alpha = alpha.max(best);
+        if alpha >= beta {
+            break;
+        }
     }
     Ok(best)
 }
@@ -253,6 +266,58 @@ mod tests {
             true,
         );
         (result, String::from_utf8(output).unwrap())
+    }
+
+    /// Unpruned negamax, kept as the oracle for `pruning_preserves_scores`.
+    fn plain_negamax(board: &mut Board, depth: u32, ply: u32, nodes: &mut u64) -> i32 {
+        *nodes += 1;
+        if depth == 0 {
+            return evaluate(board);
+        }
+        let mut moves = MoveList::new();
+        generate_legal(board, &mut moves);
+        if moves.is_empty() {
+            return terminal_score(board, ply);
+        }
+        let mut best = -INFINITY;
+        for &mv in moves.iter() {
+            board.make(mv);
+            let score = -plain_negamax(board, depth - 1, ply + 1, nodes);
+            board.unmake(mv);
+            best = best.max(score);
+        }
+        best
+    }
+
+    #[test]
+    fn pruning_preserves_scores() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+        ];
+        for fen in fens {
+            let mut board: Board = fen.parse().unwrap();
+            let mut plain_nodes = 0;
+            let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
+
+            let mut ctx = Ctx {
+                limits: Limits::default(),
+                stop: &AtomicBool::new(false),
+                deadline: None,
+                nodes: 0,
+                iteration_depth: 3,
+            };
+            let (best_move, score) = negamax_root(&mut board, 3, &mut ctx).unwrap();
+            assert_eq!(score, expected, "score changed for {fen}");
+            assert!(best_move.is_some());
+            assert!(
+                ctx.nodes < plain_nodes,
+                "no pruning for {fen}: {} vs {plain_nodes}",
+                ctx.nodes
+            );
+        }
     }
 
     #[test]
