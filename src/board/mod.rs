@@ -1,13 +1,22 @@
 //! Core chess board value types.
 
+mod bitboard;
+#[allow(clippy::module_inception)]
+mod board;
+mod fen;
 /// Packed chess move types.
 pub mod r#move;
 mod piece;
 mod square;
+mod state;
 
+pub use bitboard::Bitboard;
+pub use board::Board;
+pub use fen::FenError;
 pub use r#move::{Move, MoveType};
 pub use piece::{Color, Piece, PieceType};
 pub use square::Square;
+pub use state::{CastlingRights, State, Undo};
 
 #[cfg(test)]
 mod tests {
