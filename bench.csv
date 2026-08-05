@@ -15,14 +15,15 @@ b2b9107,2026-08-05,"feat(bench): report the qnode share",384975
 fc01883,2026-08-05,"docs: refresh bench ledger after moving SEE to its own branch",
 24e3884,2026-08-05,"feat(eval): PeSTO tapered piece-square tables",428564
 f1cc7f3,2026-08-05,"docs: record the PeSTO SPRT result",
-aae31ce,2026-08-05,"feat(search): killer moves",289853
-8e17826,2026-08-05,"feat(search): history heuristic",273736
-6a1df1c,2026-08-05,"feat(search): transposition table",208948
-bb90530,2026-08-05,"docs: record the killer moves and history heuristic SPRT results",
-9674647,2026-08-05,"docs: refresh bench ledger after moving the quiescence TT to its own branch",
-0d17398,2026-08-05,"test(search): count perft leaves instead of an unpruned search",208948
-d19c5a9,2026-08-05,"feat(search): principal variation search",186523
-ad4b6f6,2026-08-05,"test(search): order promotions from a legal position",186523
-b0165e5,2026-08-05,"feat(board): reject illegal positions when parsing FEN",186523
-ab76d57,2026-08-05,"test(eval): pin evaluation and protocol against mutation",186523
-9014059,2026-08-05,"test(movegen): split deep perft out and pin the masked branches",186523
+3e4afb0,2026-08-05,"feat(search): killer moves",289853
+6a57196,2026-08-05,"feat(search): history heuristic",273736
+9b5ba97,2026-08-05,"feat(search): transposition table",208948
+463b46f,2026-08-05,"docs: record the killer moves and history heuristic SPRT results",
+be86479,2026-08-05,"docs: refresh bench ledger after moving the quiescence TT to its own branch",
+caee112,2026-08-05,"test(search): count perft leaves instead of an unpruned search",208948
+961a361,2026-08-05,"feat(search): principal variation search",186523
+36aa81f,2026-08-05,"test(search): order promotions from a legal position",186523
+6c7454f,2026-08-05,"feat(board): reject illegal positions when parsing FEN",186523
+bb06dbd,2026-08-05,"test(eval): pin evaluation and protocol against mutation",186523
+8190e77,2026-08-05,"test(movegen): split deep perft out and pin the masked branches",186523
+db78427,2026-08-05,"docs: record the principal variation search SPRT result",
