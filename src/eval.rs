@@ -271,6 +271,42 @@ mod tests {
         )
     }
 
+    // catches: any change to the arithmetic that the relational tests below
+    // are blind to, because they hold under it. Verified by mutation: swapping
+    // the midgame and endgame lookups, inverting the phase interpolation,
+    // dropping the phase clamp, zeroing a piece-square table, and making
+    // `fold` drop the material values all leave every other test in this file
+    // passing. Expected values are derived by hand from the published PeSTO
+    // tables, not read back from `evaluate`.
+    #[test]
+    fn scores_match_hand_computed_pesto_values() {
+        // MG_TABLE[kind][flip] and EG_TABLE[kind][flip] blended as
+        // (mg * p + eg * (24 - p)) / 24 for phase p.
+        let cases = [
+            // d5 pawn, phase 0: pure endgame, EG_PAWN[27] + 94 = 5 + 94.
+            ("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1", 99),
+            // e4 knight, phase 1: (365 * 1 + 297 * 23) / 24.
+            ("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1", 299),
+            // c4 bishop, phase 1: (378 * 1 + 309 * 23) / 24.
+            ("4k3/8/8/8/2B5/8/8/4K3 w - - 0 1", 312),
+            // a1 rook, phase 2: (458 * 2 + 503 * 22) / 24.
+            ("4k3/8/8/8/8/8/8/R3K3 w Q - 0 1", 499),
+            // d1 queen, phase 4: (1035 * 4 + 893 * 20) / 24.
+            ("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", 916),
+            // Queens on mirrored squares cancel; only the king placement is
+            // left, so this pins the king tables rather than material.
+            ("3qk3/8/8/8/8/8/8/3Q2K1 w - - 0 1", 8),
+            // Phase 28 clamps to 24, so this reads the pure midgame tables.
+            ("4k3/8/8/8/8/8/8/QQQQKQQQ w - - 0 1", 7051),
+        ];
+        for (fen, want) in cases {
+            let board: Board = fen.parse().unwrap();
+            assert_eq!(evaluate(&board), want, "{fen}");
+        }
+    }
+
+    // catches: white indexing the tables without `flip_rank`, and the sign
+    // flip dropped from either the per-piece term or the side-to-move return.
     #[test]
     fn evaluation_is_color_symmetric() {
         // Equality, not negation: the score is relative to the side to move,

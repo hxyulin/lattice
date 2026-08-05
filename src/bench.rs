@@ -112,11 +112,32 @@ mod tests {
         assert!(qnodes < first_nodes, "qnodes are part of the total");
     }
 
+    // catches: the loop searching only some of POSITIONS. The count is the
+    // whole point of the bench - it is the signature ChessEval compares
+    // across commits - and nothing else notices if positions go missing.
     #[test]
-    #[ignore = "runs the full depth-4 suite; minutes in debug"]
-    fn bench_is_stable() {
-        let mut first = Vec::new();
-        let mut second = Vec::new();
-        assert_eq!(run(&mut first), run(&mut second));
+    fn every_position_contributes_to_the_count() {
+        let all = run_at(&mut std::io::sink(), TEST_DEPTH);
+        let stop = AtomicBool::new(false);
+        let mut summed = 0;
+        for fen in POSITIONS {
+            let tt = TranspositionTable::new();
+            let mut board: Board = fen.parse().expect("bench FEN must be valid");
+            let result = search_inner(
+                &mut board,
+                Limits {
+                    depth: Some(TEST_DEPTH),
+                    infinite: true,
+                    ..Limits::default()
+                },
+                &stop,
+                &tt,
+                &mut std::io::sink(),
+                false,
+            );
+            summed += result.nodes + result.qnodes;
+        }
+        assert_eq!(all, summed, "the bench must search every position once");
+        assert_eq!(POSITIONS.len(), 12);
     }
 }

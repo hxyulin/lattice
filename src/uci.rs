@@ -141,13 +141,18 @@ mod tests {
         limits
     }
 
+    // catches: wtime swapped with btime, winc swapped with binc, and either
+    // increment dropped. The values are all distinct for that reason; equal
+    // ones let a swap through.
     #[test]
     fn parses_tournament_clock() {
         assert_eq!(
-            limits("go wtime 300000 btime 300000 winc 0 binc 0"),
+            limits("go wtime 300000 btime 250000 winc 3000 binc 2000"),
             Limits {
                 wtime: Some(300_000),
-                btime: Some(300_000),
+                btime: Some(250_000),
+                winc: 3_000,
+                binc: 2_000,
                 ..Limits::default()
             }
         );
@@ -165,6 +170,65 @@ mod tests {
     fn ignores_unrecognised_commands() {
         assert!(parse("setoption name Hash value 16").is_none());
         assert!(parse("vendor extension").is_none());
+    }
+
+    // catches: any keyword mapped to the wrong variant or dropped entirely.
+    // Nothing else covers isready, ucinewgame, stop, quit or bench, so
+    // `"bench" => Command::Stop` was silently a passing change.
+    #[test]
+    fn every_keyword_maps_to_its_own_command() {
+        assert!(matches!(parse("uci"), Some(Command::Uci)));
+        assert!(matches!(parse("isready"), Some(Command::IsReady)));
+        assert!(matches!(parse("ucinewgame"), Some(Command::NewGame)));
+        assert!(matches!(parse("stop"), Some(Command::Stop)));
+        assert!(matches!(parse("quit"), Some(Command::Quit)));
+        assert!(matches!(parse("bench"), Some(Command::Bench)));
+        assert!(matches!(parse("perft 3"), Some(Command::Perft(3))));
+        assert!(parse("perft").is_none());
+        assert!(parse("perft xyz").is_none());
+    }
+
+    // catches: `move_text` swapping from with to, swapping file with rank,
+    // omitting the promotion suffix, or collapsing the four promotion pieces
+    // onto one letter; and `find_move` ignoring the origin square or the
+    // promotion suffix, which made underpromotion unreachable over the wire.
+    #[test]
+    fn move_text_and_find_move_roundtrip_including_underpromotion() {
+        for (fen, text) in [
+            ("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", "e2e4"),
+            ("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", "e1d1"),
+            ("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1", "e1g1"),
+            ("4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1", "e1c1"),
+            ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"),
+            ("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q"),
+            ("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8r"),
+            ("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8b"),
+            ("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8n"),
+            ("1q2k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7b8n"),
+        ] {
+            let mut board: Board = fen.parse().unwrap();
+            let mv = find_move(&mut board, text).unwrap_or_else(|| panic!("{text} in {fen}"));
+            assert_eq!(move_text(mv), text, "{fen}");
+        }
+    }
+
+    // catches: the length check widened so a 3-character or 6-character token
+    // is accepted, and `find_move` returning a move that is merely legal
+    // rather than the one named.
+    #[test]
+    fn find_move_rejects_malformed_and_illegal_moves() {
+        let mut board = Board::startpos();
+        for bad in ["e2e", "e2e4e5", "", "z2z4", "e9e4", "e7e5", "e2e5", "e2e4q"] {
+            assert!(
+                find_move(&mut board, bad).is_none(),
+                "accepted {bad:?} from the start position"
+            );
+        }
+        // Only an exact-length check rejects this one: its first five bytes
+        // are a legal promotion, so a `len() < 4` bound accepts the trailing
+        // garbage silently.
+        let mut promo: Board = "4k3/P7/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        assert!(find_move(&mut promo, "a7a8qq").is_none());
     }
 
     #[test]
