@@ -74,6 +74,8 @@ struct Ctx<'a> {
     /// equivalence tests turn it off so their unpruned oracle stays cheap.
     #[cfg(test)]
     quiesce_leaves: bool,
+    #[cfg(test)]
+    pvs: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +121,8 @@ pub(crate) fn search_inner(
         tt,
         #[cfg(test)]
         quiesce_leaves: true,
+        #[cfg(test)]
+        pvs: true,
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
@@ -189,21 +193,35 @@ fn negamax_root(
     order_moves(board, &mut moves, tt_move, ctx.killers_at(0), &ctx.history);
     let mut best_move = None;
     let mut best_score = -INFINITY;
-    for &mv in moves.iter() {
+    for (index, &mv) in moves.iter().enumerate() {
         board.make(mv);
-        // Beta stays at INFINITY so no root move can fail low: a score above
-        // `best_score` is exact, and one below is a safe rejection.
-        let result = negamax(board, depth - 1, 1, -INFINITY, -best_score, ctx);
+        let result = if index == 0 {
+            negamax(board, depth - 1, 1, -INFINITY, INFINITY, ctx).map(|score| -score)
+        } else if !ctx.pvs_enabled() {
+            negamax(board, depth - 1, 1, -INFINITY, -best_score, ctx).map(|score| -score)
+        } else {
+            match negamax(board, depth - 1, 1, -best_score - 1, -best_score, ctx) {
+                Ok(score) => {
+                    let narrow = -score;
+                    if narrow > best_score {
+                        negamax(board, depth - 1, 1, -INFINITY, -best_score, ctx)
+                            .map(|score| -score)
+                    } else {
+                        Ok(narrow)
+                    }
+                }
+                Err(aborted) => Err(aborted),
+            }
+        };
         board.unmake(mv);
-        let score = -result?;
+        let score = result?;
         if score > best_score {
             best_score = score;
             best_move = Some(mv);
         }
     }
-    // Exact: children run with `alpha = -INFINITY`, so none can fail low and
-    // every score that raises `best_score` is a true value rather than a
-    // bound. Stored mainly so the next iteration orders by this move.
+    // Exact: rejected null-window results never replace `best_score`, while
+    // every result that does replace it came from an exact-window search.
     ctx.tt.store(
         key,
         score_to_tt(best_score, 0),
@@ -271,11 +289,25 @@ fn negamax(
     let us = board.state().side_to_move();
     let mut best = -INFINITY;
     let mut best_move = None;
-    for &mv in moves.iter() {
+    for (index, &mv) in moves.iter().enumerate() {
         board.make(mv);
-        let result = negamax(board, depth - 1, ply + 1, -beta, -alpha, ctx);
+        let result = if index == 0 || !ctx.pvs_enabled() {
+            negamax(board, depth - 1, ply + 1, -beta, -alpha, ctx).map(|score| -score)
+        } else {
+            match negamax(board, depth - 1, ply + 1, -alpha - 1, -alpha, ctx) {
+                Ok(score) => {
+                    let narrow = -score;
+                    if narrow > alpha && narrow < beta {
+                        negamax(board, depth - 1, ply + 1, -beta, -alpha, ctx).map(|score| -score)
+                    } else {
+                        Ok(narrow)
+                    }
+                }
+                Err(aborted) => Err(aborted),
+            }
+        };
         board.unmake(mv);
-        let score = -result?;
+        let score = result?;
         if score > best {
             best = score;
             best_move = Some(mv);
@@ -445,6 +477,17 @@ fn victim_square(mv: Move) -> Option<Square> {
 }
 
 impl Ctx<'_> {
+    fn pvs_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.pvs
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     /// Every node visited. Clock and node-limit checks use this rather than
     /// `nodes` alone: quiescence is most of the tree, so counting main nodes
     /// only would leave thousands of nodes between two clock checks.
@@ -590,6 +633,7 @@ mod tests {
             history: [[[0; 64]; 64]; 2],
             tt,
             quiesce_leaves: true,
+            pvs: true,
         }
     }
 
@@ -599,6 +643,35 @@ mod tests {
             quiesce_leaves: false,
             ..test_ctx(iteration_depth)
         }
+    }
+
+    #[test]
+    fn pvs_preserves_scores_and_reduces_nodes() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+        ];
+        let mut alpha_beta_nodes = 0;
+        let mut pvs_nodes = 0;
+        for fen in fens {
+            let mut board: Board = fen.parse().unwrap();
+            let mut alpha_beta_ctx = static_leaf_ctx(3);
+            alpha_beta_ctx.pvs = false;
+            let alpha_beta = negamax_root(&mut board, 3, &mut alpha_beta_ctx).unwrap().1;
+            alpha_beta_nodes += alpha_beta_ctx.nodes;
+
+            let mut pvs_ctx = static_leaf_ctx(3);
+            let pvs = negamax_root(&mut board, 3, &mut pvs_ctx).unwrap().1;
+            pvs_nodes += pvs_ctx.nodes;
+
+            assert_eq!(pvs, alpha_beta, "PVS changed the score for {fen}");
+        }
+        assert!(
+            pvs_nodes < alpha_beta_nodes,
+            "PVS did not reduce nodes: {pvs_nodes} vs {alpha_beta_nodes}"
+        );
     }
 
     /// Unpruned negamax with a static-eval leaf, the oracle for the alpha-beta
@@ -1248,7 +1321,11 @@ mod tests {
             false,
         );
         assert!(result.best_move.is_some());
-        assert_eq!(result.nodes, 20);
+        // 20 root moves plus one re-search each for the four that beat the
+        // running best. Exact rather than a lower bound: this test exists to
+        // pin deterministic behaviour, and the re-search count is the part
+        // most likely to move unnoticed.
+        assert_eq!(result.nodes, 24);
         assert!(result.qnodes > 0, "each leaf runs quiescence");
     }
 }
