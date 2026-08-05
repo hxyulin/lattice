@@ -12,8 +12,8 @@
 # The `Bench:` trailer is stamped automatically (tools/stamp-bench.sh). The
 # `SPRT:` trailer is written by hand from the OpenBench verdict, in one of:
 #
-#   SPRT: STC 8+0.08 [0,5] LLR 2.94 (368g) +37 Elo pass
-#   SPRT: STC 8+0.08 [0,5] LLR 3.32 (38g) +348.7 +- 93.4 Elo pass
+#   SPRT: STC 10+0.1 [0,5] LLR 2.94 (368g) +37 Elo pass
+#   SPRT: STC 10+0.1 [0,5] LLR 3.32 (38g) +348.7 +- 93.4 Elo pass
 #   SPRT: pending (OpenBench rerun)
 #
 # A commit may carry several `SPRT:` trailers (e.g. an STC and an LTC run); each

@@ -80,9 +80,9 @@ SPRT: pending (<note>)
 Example trailers:
 
 ```
-SPRT: STC 8+0.08 [0,5] LLR 2.94 (368g) +37 Elo pass
-SPRT: LTC 40+0.4 [0,5] LLR 3.32 (38g) +348.7 +- 93.4 Elo pass
-SPRT: STC 8+0.08 [-5,0] LLR -2.95 (1204g) -1.2 Elo fail
+SPRT: STC 10+0.1 [0,5] LLR 2.94 (368g) +37 Elo pass
+SPRT: LTC 60+0.6 [0,5] LLR 3.32 (38g) +348.7 +- 93.4 Elo pass
+SPRT: STC 10+0.1 [-5,0] LLR -2.95 (1204g) -1.2 Elo fail
 SPRT: pending (OpenBench rerun)
 ```
 

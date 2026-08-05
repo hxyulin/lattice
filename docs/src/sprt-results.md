@@ -24,7 +24,9 @@ source.
     control.
   - *Non-regression* (behaviour-preserving or pure infrastructure): `[-5, 0]` -
     accept if it is not a real regression.
-- **Time controls:** STC `8.0+0.08`, LTC `40.0+0.40`.
+- **Time controls:** STC `10+0.1`, LTC `60+0.6`. Both hold the increment at
+  1/100 of the base, so LTC changes only the depth reached, not the
+  time-management regime.
 
 Each result is recorded as an `SPRT:` trailer on the feature commit; this table
 is generated from those trailers by `tools/gen-ledgers.sh`. Elo is the logistic
@@ -36,5 +38,5 @@ authoritative result.
 <!-- BEGIN generated: tools/gen-ledgers.sh - do not edit this table by hand -->
 | Feature | TC | Games | Elo | Verdict |
 |---------|----|------:|----:|---------|
-| alpha-beta pruning | 10+0.1 | 128 | +339.5 | pass |
+| alpha-beta pruning | STC | 128 | +339.5 | pass |
 <!-- END generated -->
