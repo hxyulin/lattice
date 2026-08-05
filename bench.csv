@@ -8,3 +8,7 @@ aa32e4c,2026-08-05,"refactor(uci): build attack tables during the uci handshake"
 576e1e8,2026-08-05,"docs: record the alpha-beta SPRT result",
 1dfe9a9,2026-08-05,"docs: move SPRT time controls to STC 10+0.1 and LTC 60+0.6",
 326df70,2026-08-05,"feat(search): MVV-LVA move ordering",59457
+14c595d,2026-08-05,"docs: record the MVV-LVA SPRT result",
+47b1e17,2026-08-05,"feat(search): quiescence search",384975
+e7e86f1,2026-08-05,"feat(search): SEE pruning in quiescence",181256
+db15952,2026-08-05,"feat(bench): report the qnode share",181256

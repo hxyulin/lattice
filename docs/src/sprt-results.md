@@ -40,4 +40,5 @@ authoritative result.
 |---------|----|------:|----:|---------|
 | alpha-beta pruning | STC | 128 | +339.5 | pass |
 | MVV-LVA move ordering | STC | 160 | +186.7 | pass |
+| quiescence search | STC | 216 | +135.4 | pass |
 <!-- END generated -->
