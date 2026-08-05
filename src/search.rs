@@ -22,6 +22,11 @@ const MAX_QPLY: u32 = 8;
 /// Killer ply ceiling. Search depth is bounded by the clock long before this;
 /// past it the killer slots are simply skipped.
 const MAX_PLY: usize = 64;
+/// Half-width of the aspiration window, roughly a quarter of a pawn.
+const ASPIRATION_DELTA: i32 = 25;
+/// Shallower scores are too unstable to aspirate around, and a miss costs a
+/// full re-search.
+const ASPIRATION_MIN_DEPTH: u32 = 4;
 
 /// Cutoff counts per side and from/to square, the ordering score for quiets
 /// that are neither captures nor killers.
@@ -76,6 +81,8 @@ struct Ctx<'a> {
     quiesce_leaves: bool,
     #[cfg(test)]
     pvs: bool,
+    #[cfg(test)]
+    aspiration: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,9 +130,12 @@ pub(crate) fn search_inner(
         quiesce_leaves: true,
         #[cfg(test)]
         pvs: true,
+        #[cfg(test)]
+        aspiration: true,
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
+    let mut prev_score = None;
 
     for depth in 1..=max_depth {
         // An unpruned tree grows about 35x per depth, so starting an iteration
@@ -134,11 +144,12 @@ pub(crate) fn search_inner(
             break;
         }
         ctx.iteration_depth = depth;
-        let result = negamax_root(board, depth, &mut ctx);
+        let result = aspirate(board, depth, prev_score, &mut ctx);
         let Ok((candidate, score)) = result else {
             break;
         };
         best_move = candidate;
+        prev_score = Some(score);
         if emit_info {
             write_info(
                 output,
@@ -176,9 +187,36 @@ fn time_budget(board: &Board, limits: Limits) -> Option<u64> {
     Some(budget.min(remaining.saturating_sub(50)).max(1))
 }
 
+/// Runs one iteration, narrowing the root window around the previous
+/// iteration's score when there is one to trust.
+///
+/// A miss widens straight back to `[-INFINITY, INFINITY]`, so the value
+/// returned is always exact - which is what lets the caller assign `best_move`
+/// unconditionally.
+fn aspirate(
+    board: &mut Board,
+    depth: u32,
+    prev_score: Option<i32>,
+    ctx: &mut Ctx<'_>,
+) -> Result<(Option<Move>, i32), Aborted> {
+    let window = prev_score.filter(|score| {
+        ctx.aspiration_enabled() && depth >= ASPIRATION_MIN_DEPTH && score.abs() <= MATE_BOUND
+    });
+    if let Some(score) = window {
+        let (alpha, beta) = (score - ASPIRATION_DELTA, score + ASPIRATION_DELTA);
+        let (best_move, score) = negamax_root(board, depth, alpha, beta, ctx)?;
+        if score > alpha && score < beta {
+            return Ok((best_move, score));
+        }
+    }
+    negamax_root(board, depth, -INFINITY, INFINITY, ctx)
+}
+
 fn negamax_root(
     board: &mut Board,
     depth: u32,
+    alpha: i32,
+    beta: i32,
     ctx: &mut Ctx<'_>,
 ) -> Result<(Option<Move>, i32), Aborted> {
     let mut moves = MoveList::new();
@@ -195,17 +233,19 @@ fn negamax_root(
     let mut best_score = -INFINITY;
     for (index, &mv) in moves.iter().enumerate() {
         board.make(mv);
+        // `alpha` rather than `best_score` while the root is still failing
+        // low: nothing under `alpha` is worth proving a value for.
+        let cut = best_score.max(alpha);
         let result = if index == 0 {
-            negamax(board, depth - 1, 1, -INFINITY, INFINITY, ctx).map(|score| -score)
+            negamax(board, depth - 1, 1, -beta, -alpha, ctx).map(|score| -score)
         } else if !ctx.pvs_enabled() {
-            negamax(board, depth - 1, 1, -INFINITY, -best_score, ctx).map(|score| -score)
+            negamax(board, depth - 1, 1, -beta, -cut, ctx).map(|score| -score)
         } else {
-            match negamax(board, depth - 1, 1, -best_score - 1, -best_score, ctx) {
+            match negamax(board, depth - 1, 1, -cut - 1, -cut, ctx) {
                 Ok(score) => {
                     let narrow = -score;
-                    if narrow > best_score {
-                        negamax(board, depth - 1, 1, -INFINITY, -best_score, ctx)
-                            .map(|score| -score)
+                    if narrow > cut && narrow < beta {
+                        negamax(board, depth - 1, 1, -beta, -cut, ctx).map(|score| -score)
                     } else {
                         Ok(narrow)
                     }
@@ -220,15 +260,15 @@ fn negamax_root(
             best_move = Some(mv);
         }
     }
-    // Exact: rejected null-window results never replace `best_score`, while
-    // every result that does replace it came from an exact-window search.
-    ctx.tt.store(
-        key,
-        score_to_tt(best_score, 0),
-        best_move,
-        depth,
-        Bound::Exact,
-    );
+    let bound = if best_score <= alpha {
+        Bound::Upper
+    } else if best_score >= beta {
+        Bound::Lower
+    } else {
+        Bound::Exact
+    };
+    ctx.tt
+        .store(key, score_to_tt(best_score, 0), best_move, depth, bound);
     Ok((best_move, best_score))
 }
 
@@ -488,6 +528,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn aspiration_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.aspiration
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     /// Every node visited. Clock and node-limit checks use this rather than
     /// `nodes` alone: quiescence is most of the tree, so counting main nodes
     /// only would leave thousands of nodes between two clock checks.
@@ -634,6 +685,7 @@ mod tests {
             tt,
             quiesce_leaves: true,
             pvs: true,
+            aspiration: true,
         }
     }
 
@@ -643,6 +695,113 @@ mod tests {
             quiesce_leaves: false,
             ..test_ctx(iteration_depth)
         }
+    }
+
+    /// `negamax_root` at full width, the window every iteration used before
+    /// aspiration existed.
+    fn root(
+        board: &mut Board,
+        depth: u32,
+        ctx: &mut Ctx<'_>,
+    ) -> Result<(Option<Move>, i32), Aborted> {
+        negamax_root(board, depth, -INFINITY, INFINITY, ctx)
+    }
+
+    /// Tactical positions the equivalence tests share.
+    const TACTICAL: [&str; 4] = [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+    ];
+
+    /// Iterative deepening to `depth`, the loop in `search_inner` with the
+    /// aspiration toggle exposed. Returns the final score and the node count.
+    fn deepen(fen: &str, depth: u32, aspiration: bool) -> (i32, u64) {
+        crate::movegen::init();
+        let mut board: Board = fen.parse().unwrap();
+        let mut ctx = test_ctx(1);
+        ctx.aspiration = aspiration;
+        let mut prev_score = None;
+        for iteration in 1..=depth {
+            ctx.iteration_depth = iteration;
+            let (_, score) = aspirate(&mut board, iteration, prev_score, &mut ctx).unwrap();
+            prev_score = Some(score);
+        }
+        (prev_score.unwrap(), ctx.total())
+    }
+
+    #[test]
+    fn aspiration_preserves_scores() {
+        // The invariant the design rests on: a window miss widens straight to
+        // infinity, so a narrow search only ever contributes sound Upper/Lower
+        // bounds to the table, and a sound bound cannot move a minimax value.
+        // Exact equality, not a tolerance - a wrong root bound, a wrong
+        // re-search window, or an accepted fail-low all show up here.
+        for fen in TACTICAL {
+            let (narrow, _) = deepen(fen, 6, true);
+            let (wide, _) = deepen(fen, 6, false);
+            assert_eq!(narrow, wide, "aspiration changed the score for {fen}");
+        }
+    }
+
+    #[test]
+    fn aspiration_changes_the_tree() {
+        // `aspiration_preserves_scores` passes for a no-op, which is the trap
+        // PVS hit. Node counts are what proves the narrow window is actually
+        // being searched. Not an inequality in a fixed direction: at a given
+        // depth a miss can cost more than the hits saved, and the SPRT rather
+        // than a node count is what decides whether it pays.
+        let differing = TACTICAL
+            .iter()
+            .filter(|fen| deepen(fen, 6, true).1 != deepen(fen, 6, false).1)
+            .count();
+        assert!(
+            differing > 0,
+            "aspiration never fired: node counts identical"
+        );
+    }
+
+    #[test]
+    fn a_truncated_root_window_stores_a_bound_not_an_exact_score() {
+        // Before aspiration the root always ran `[-INFINITY, INFINITY]` and
+        // stored `Exact` unconditionally, justified by no child being able to
+        // fail low. A real window kills that argument: a root that fails low
+        // never proved its score, and storing it as `Exact` publishes a number
+        // no search established.
+        //
+        // Score equality cannot catch this. The root entry is read for
+        // ordering only, and `negamax` bars a cut at ply 1, so nothing today
+        // consumes the bound - which is exactly why it needs pinning here
+        // rather than being left to the next feature that does consume it.
+        crate::movegen::init();
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let mut board: Board = fen.parse().unwrap();
+        let key = board.state().zobrist();
+
+        let stored = |alpha: i32, beta: i32| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = test_ctx(3);
+            negamax_root(&mut board, 3, alpha, beta, &mut ctx).unwrap();
+            ctx.tt.probe(key).expect("the root always stores").bound
+        };
+
+        let mut ctx = test_ctx(3);
+        let exact = negamax_root(&mut board, 3, -INFINITY, INFINITY, &mut ctx)
+            .unwrap()
+            .1;
+        assert_eq!(ctx.tt.probe(key).unwrap().bound, Bound::Exact);
+        assert_eq!(stored(exact - 200, exact + 200), Bound::Exact);
+        assert_eq!(
+            stored(exact + 100, exact + 200),
+            Bound::Upper,
+            "a root fail-low knows only an upper bound"
+        );
+        assert_eq!(
+            stored(exact - 200, exact - 100),
+            Bound::Lower,
+            "a root fail-high knows only a lower bound"
+        );
     }
 
     #[test]
@@ -659,11 +818,11 @@ mod tests {
             let mut board: Board = fen.parse().unwrap();
             let mut alpha_beta_ctx = static_leaf_ctx(3);
             alpha_beta_ctx.pvs = false;
-            let alpha_beta = negamax_root(&mut board, 3, &mut alpha_beta_ctx).unwrap().1;
+            let alpha_beta = root(&mut board, 3, &mut alpha_beta_ctx).unwrap().1;
             alpha_beta_nodes += alpha_beta_ctx.nodes;
 
             let mut pvs_ctx = static_leaf_ctx(3);
-            let pvs = negamax_root(&mut board, 3, &mut pvs_ctx).unwrap().1;
+            let pvs = root(&mut board, 3, &mut pvs_ctx).unwrap().1;
             pvs_nodes += pvs_ctx.nodes;
 
             assert_eq!(pvs, alpha_beta, "PVS changed the score for {fen}");
@@ -716,7 +875,7 @@ mod tests {
             let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
 
             let mut ctx = static_leaf_ctx(3);
-            let (best_move, score) = negamax_root(&mut board, 3, &mut ctx).unwrap();
+            let (best_move, score) = root(&mut board, 3, &mut ctx).unwrap();
             assert_eq!(score, expected, "score changed for {fen}");
             assert!(best_move.is_some());
             assert!(
@@ -954,7 +1113,7 @@ mod tests {
                 .parse()
                 .unwrap();
         let mut ctx = static_leaf_ctx(4);
-        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        root(&mut board, 4, &mut ctx).unwrap();
         assert!(
             ctx.nodes * 64 < UNPRUNED,
             "ordering should cut the tree hard: {} vs {UNPRUNED}",
@@ -970,7 +1129,7 @@ mod tests {
         crate::movegen::init();
         let mut board: Board = "8/5pk1/6p1/3p4/3P4/6P1/5PK1/8 w - - 0 1".parse().unwrap();
         let mut ctx = test_ctx(5);
-        negamax_root(&mut board, 5, &mut ctx).unwrap();
+        root(&mut board, 5, &mut ctx).unwrap();
 
         let killers = ctx.killers.iter().flatten().filter(|k| k.is_some()).count();
         assert!(killers > 0, "no killer was stored by any cutoff");
@@ -1013,7 +1172,7 @@ mod tests {
         // The main search must inherit that refutation.
         crate::movegen::init();
         let mut ctx = test_ctx(2);
-        let (best, _) = negamax_root(&mut board, 2, &mut ctx).unwrap();
+        let (best, _) = root(&mut board, 2, &mut ctx).unwrap();
         assert_ne!(
             best.map(move_text).as_deref(),
             Some("d4c5"),
@@ -1115,11 +1274,11 @@ mod tests {
             let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
 
             let mut ctx = static_leaf_ctx(3);
-            let cold = negamax_root(&mut board, 3, &mut ctx).unwrap().1;
+            let cold = root(&mut board, 3, &mut ctx).unwrap().1;
             assert_eq!(cold, expected, "cold TT changed the score for {fen}");
 
             // Same table, now populated: every node can hit.
-            let warm = negamax_root(&mut board, 3, &mut ctx).unwrap().1;
+            let warm = root(&mut board, 3, &mut ctx).unwrap().1;
             assert_eq!(warm, expected, "warm TT changed the score for {fen}");
         }
     }
@@ -1134,7 +1293,7 @@ mod tests {
         let mut ctx = test_ctx(1);
         for depth in 1..=5 {
             ctx.iteration_depth = depth;
-            let (best, score) = negamax_root(&mut board, depth, &mut ctx).unwrap();
+            let (best, score) = root(&mut board, depth, &mut ctx).unwrap();
             assert_eq!(mate_in(score), Some(1), "depth {depth} scored {score}");
             assert_eq!(
                 best.map(move_text).as_deref(),
@@ -1232,10 +1391,10 @@ mod tests {
                 .parse()
                 .unwrap();
         let mut ctx = test_ctx(4);
-        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        root(&mut board, 4, &mut ctx).unwrap();
         let cold = ctx.total();
         let before = ctx.total();
-        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        root(&mut board, 4, &mut ctx).unwrap();
         let warm = ctx.total() - before;
         assert!(
             warm < cold,
