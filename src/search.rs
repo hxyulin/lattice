@@ -325,6 +325,22 @@ fn qsearch(
     if qply >= MAX_QPLY {
         return Ok(evaluate(board));
     }
+    let key = board.state().zobrist();
+    let alpha_original = alpha;
+    // Every quiescence node stores at depth 0, so any entry is deep enough:
+    // the main search never asks quiescence for more than it computes.
+    let entry = ctx.tt.probe(key);
+    if let Some(entry) = entry {
+        let score = score_from_tt(entry.score, ply);
+        let usable = match entry.bound {
+            Bound::Exact => true,
+            Bound::Lower => score >= beta,
+            Bound::Upper => score <= alpha,
+        };
+        if usable {
+            return Ok(score);
+        }
+    }
     let us = board.state().side_to_move();
     let in_check = is_attacked(board, board.king_square(us), us.flip());
 
@@ -342,13 +358,19 @@ fn qsearch(
         // eval is a lower bound on this node.
         best = evaluate(board);
         if best >= beta {
+            ctx.tt
+                .store(key, score_to_tt(best, ply), None, 0, Bound::Lower);
             return Ok(best);
         }
         alpha = alpha.max(best);
         generate_captures(board, &mut moves);
     }
-    order_moves(board, &mut moves, None, [None; 2], &ctx.history);
+    // The stored move is a capture from a previous visit; ordering by it is
+    // free, and it is skipped when this node's list does not contain it.
+    let tt_move = entry.and_then(|entry| entry.best_move);
+    order_moves(board, &mut moves, tt_move, [None; 2], &ctx.history);
 
+    let mut best_move = None;
     for &mv in moves.iter() {
         board.make(mv);
         // Captures come back pseudo-legal. Filtering after `make` rather than
@@ -359,12 +381,25 @@ fn qsearch(
         let Some(result) = result else {
             continue;
         };
-        best = best.max(-result?);
+        let score = -result?;
+        if score > best {
+            best = score;
+            best_move = Some(mv);
+        }
         alpha = alpha.max(best);
         if alpha >= beta {
             break;
         }
     }
+    let bound = if best >= beta {
+        Bound::Lower
+    } else if best > alpha_original {
+        Bound::Exact
+    } else {
+        Bound::Upper
+    };
+    ctx.tt
+        .store(key, score_to_tt(best, ply), best_move, 0, bound);
     Ok(best)
 }
 
