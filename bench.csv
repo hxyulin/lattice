@@ -1,0 +1,7 @@
+commit,date,subject,bench_nodes
+463d0f9,2026-08-04,"feat(board): packed Square, Piece, and Move primitives",
+4305a6d,2026-08-04,"feat(board): bitboards, mailbox, FEN, and make/unmake",
+2fdc163,2026-08-05,"feat(movegen): magic bitboards, perft, and minimal UCI",
+b95169d,2026-08-05,"feat(search): iterative deepening, time management, and bench",13191204
+aa32e4c,2026-08-05,"refactor(uci): build attack tables during the uci handshake",13191204
+e9241f3,2026-08-05,"feat(search): alpha-beta pruning",486189

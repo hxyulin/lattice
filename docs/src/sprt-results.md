@@ -36,4 +36,5 @@ authoritative result.
 <!-- BEGIN generated: tools/gen-ledgers.sh - do not edit this table by hand -->
 | Feature | TC | Games | Elo | Verdict |
 |---------|----|------:|----:|---------|
+| alpha-beta pruning | 10+0.1 | 128 | +339.5 | pass |
 <!-- END generated -->
