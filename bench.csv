@@ -18,4 +18,4 @@ f1cc7f3,2026-08-05,"docs: record the PeSTO SPRT result",
 aae31ce,2026-08-05,"feat(search): killer moves",289853
 8e17826,2026-08-05,"feat(search): history heuristic",273736
 6a1df1c,2026-08-05,"feat(search): transposition table",208948
-cf0d474,2026-08-05,"feat(search): transposition table in quiescence",167476
+bb90530,2026-08-05,"docs: record the killer moves and history heuristic SPRT results",
