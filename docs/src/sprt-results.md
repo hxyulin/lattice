@@ -44,4 +44,5 @@ authoritative result.
 | PeSTO tapered piece-square tables | STC | 116 | +251.8 | pass |
 | killer moves | STC | 580 | +54.5 | pass |
 | history heuristic | STC | 2018 | +15.0 | pass |
+| principal variation search | STC | 2752 | +14.0 | pass |
 <!-- END generated -->

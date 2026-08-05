@@ -19,3 +19,10 @@ aae31ce,2026-08-05,"feat(search): killer moves",289853
 8e17826,2026-08-05,"feat(search): history heuristic",273736
 6a1df1c,2026-08-05,"feat(search): transposition table",208948
 bb90530,2026-08-05,"docs: record the killer moves and history heuristic SPRT results",
+9674647,2026-08-05,"docs: refresh bench ledger after moving the quiescence TT to its own branch",
+0d17398,2026-08-05,"test(search): count perft leaves instead of an unpruned search",208948
+d19c5a9,2026-08-05,"feat(search): principal variation search",186523
+ad4b6f6,2026-08-05,"test(search): order promotions from a legal position",186523
+b0165e5,2026-08-05,"feat(board): reject illegal positions when parsing FEN",186523
+ab76d57,2026-08-05,"test(eval): pin evaluation and protocol against mutation",186523
+9014059,2026-08-05,"test(movegen): split deep perft out and pin the masked branches",186523
