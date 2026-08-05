@@ -18,6 +18,9 @@ const INFINITY: i32 = 31_000;
 /// Quiescence ply ceiling. Deep enough for any real exchange sequence, and a
 /// hard bound keeps the bench node count finite and deterministic.
 const MAX_QPLY: u32 = 8;
+/// Killer ply ceiling. Search depth is bounded by the clock long before this;
+/// past it the killer slots are simply skipped.
+const MAX_PLY: usize = 64;
 
 /// Constraints on a single search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,6 +59,8 @@ struct Ctx<'a> {
     nodes: u64,
     qnodes: u64,
     iteration_depth: u32,
+    /// Two quiet moves per ply that last caused a beta cutoff there.
+    killers: [[Option<Move>; 2]; MAX_PLY],
     /// Whether leaves run quiescence. Always true in play; the alpha-beta
     /// equivalence tests turn it off so their unpruned oracle stays cheap.
     #[cfg(test)]
@@ -97,6 +102,7 @@ pub(crate) fn search_inner(
         nodes: 0,
         qnodes: 0,
         iteration_depth: 1,
+        killers: [[None; 2]; MAX_PLY],
         #[cfg(test)]
         quiesce_leaves: true,
     };
@@ -162,7 +168,7 @@ fn negamax_root(
     if moves.is_empty() {
         return Ok((None, terminal_score(board, 0)));
     }
-    order_moves(board, &mut moves);
+    order_moves(board, &mut moves, ctx.killers_at(0));
     let mut best_move = None;
     let mut best_score = -INFINITY;
     for &mv in moves.iter() {
@@ -202,7 +208,7 @@ fn negamax(
     if moves.is_empty() {
         return Ok(terminal_score(board, ply));
     }
-    order_moves(board, &mut moves);
+    order_moves(board, &mut moves, ctx.killers_at(ply));
     let mut best = -INFINITY;
     for &mv in moves.iter() {
         board.make(mv);
@@ -211,6 +217,9 @@ fn negamax(
         best = best.max(-result?);
         alpha = alpha.max(best);
         if alpha >= beta {
+            if !mv.is_capture() && !mv.is_promotion() {
+                ctx.store_killer(ply, mv);
+            }
             break;
         }
     }
@@ -258,7 +267,7 @@ fn qsearch(
         alpha = alpha.max(best);
         generate_captures(board, &mut moves);
     }
-    order_moves(board, &mut moves);
+    order_moves(board, &mut moves, [None; 2]);
 
     for &mv in moves.iter() {
         board.make(mv);
@@ -286,16 +295,19 @@ fn qsearch(
 const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 10_000];
 
 /// Sorts captures and promotions ahead of quiets, captures by MVV-LVA (most
-/// valuable victim, least valuable attacker).
-fn order_moves(board: &Board, moves: &mut MoveList) {
+/// valuable victim, least valuable attacker), and the `killers` for this ply
+/// ahead of the remaining quiets.
+fn order_moves(board: &Board, moves: &mut MoveList, killers: [Option<Move>; 2]) {
     moves
         .as_mut_slice()
-        .sort_unstable_by_key(|&mv| order_key(board, mv));
+        .sort_unstable_by_key(|&mv| order_key(board, mv, killers));
 }
 
 /// Sort key for one move, ascending: gain descending, then attacker ascending
-/// to break ties within a victim. Quiets key to `(0, 0)` and sort last.
-fn order_key(board: &Board, mv: Move) -> (i32, i32) {
+/// to break ties within a victim. Every capture keys at or below `-100`, which
+/// leaves the interval `(-100, 0)` free for the killers. Other quiets key to
+/// `(0, 0)` and sort last.
+fn order_key(board: &Board, mv: Move, killers: [Option<Move>; 2]) -> (i32, i32) {
     let victim = victim_square(mv)
         .and_then(|square| board.piece_on(square))
         .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize]);
@@ -303,6 +315,12 @@ fn order_key(board: &Board, mv: Move) -> (i32, i32) {
         .promoted_piece()
         .map_or(0, |kind| ORDER_VALUES[kind as usize]);
     if victim == 0 && promoted == 0 {
+        if killers[0] == Some(mv) {
+            return (-2, 0);
+        }
+        if killers[1] == Some(mv) {
+            return (-1, 0);
+        }
         return (0, 0);
     }
     let attacker = board
@@ -338,6 +356,22 @@ impl Ctx<'_> {
         } else {
             Ok(())
         }
+    }
+
+    /// The killer slots for `ply`, empty past `MAX_PLY`.
+    fn killers_at(&self, ply: u32) -> [Option<Move>; 2] {
+        *self.killers.get(ply as usize).unwrap_or(&[None; 2])
+    }
+
+    fn store_killer(&mut self, ply: u32, mv: Move) {
+        let Some(slot) = self.killers.get_mut(ply as usize) else {
+            return;
+        };
+        if slot[0] == Some(mv) {
+            return;
+        }
+        slot[1] = slot[0];
+        slot[0] = Some(mv);
     }
 
     fn out_of_time(&self) -> bool {
@@ -419,6 +453,7 @@ mod tests {
             nodes: 0,
             qnodes: 0,
             iteration_depth,
+            killers: [[None; 2]; MAX_PLY],
             quiesce_leaves: true,
         }
     }
@@ -488,8 +523,12 @@ mod tests {
         let mut board: Board = fen.parse().unwrap();
         let mut moves = MoveList::new();
         generate_legal(&mut board, &mut moves);
-        order_moves(&board, &mut moves);
+        order_moves(&board, &mut moves, [None; 2]);
         (board, moves)
+    }
+
+    fn key(board: &Board, mv: Move) -> (i32, i32) {
+        order_key(board, mv, [None; 2])
     }
 
     #[test]
@@ -497,7 +536,7 @@ mod tests {
         // The e4 pawn and the c3 knight both attack the d5 queen; the knight
         // also attacks the cheaper b5 knight.
         let (board, moves) = ordered("4k3/8/8/1n1q4/4P3/2N5/8/4K3 w - - 0 1");
-        let keys: Vec<_> = moves.iter().map(|&mv| order_key(&board, mv)).collect();
+        let keys: Vec<_> = moves.iter().map(|&mv| key(&board, mv)).collect();
         assert!(
             keys.windows(2).all(|w| w[0] <= w[1]),
             "not sorted: {keys:?}"
@@ -516,10 +555,67 @@ mod tests {
             "pawn is the cheaper attacker of the queen"
         );
 
-        let quiets = moves.iter().filter(|mv| order_key(&board, **mv) == (0, 0));
+        let quiets = moves.iter().filter(|mv| key(&board, **mv) == (0, 0));
         let captures = moves.iter().filter(|mv| mv.is_capture()).count();
         assert!(captures >= 2);
         assert!(quiets.count() > 0, "position should have quiet moves too");
+    }
+
+    #[test]
+    fn killers_sort_between_captures_and_other_quiets() {
+        let mut board: Board = "4k3/8/8/1n1q4/4P3/2N5/8/4K3 w - - 0 1".parse().unwrap();
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let killer = *moves
+            .iter()
+            .find(|mv| !mv.is_capture() && !mv.is_promotion())
+            .unwrap();
+        let killers = [Some(killer), None];
+        order_moves(&board, &mut moves, killers);
+
+        let keys: Vec<_> = moves
+            .iter()
+            .map(|&mv| order_key(&board, mv, killers))
+            .collect();
+        assert!(
+            keys.windows(2).all(|w| w[0] <= w[1]),
+            "not sorted: {keys:?}"
+        );
+
+        let capture = *moves.iter().find(|mv| mv.is_capture()).unwrap();
+        let quiet = *moves
+            .iter()
+            .find(|mv| !mv.is_capture() && **mv != killer)
+            .unwrap();
+        assert!(order_key(&board, capture, killers) < order_key(&board, killer, killers));
+        assert!(order_key(&board, killer, killers) < order_key(&board, quiet, killers));
+    }
+
+    #[test]
+    fn killer_slots_rotate_and_dedupe() {
+        let mut board = Board::startpos();
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let a = *moves.iter().next().unwrap();
+        let b = *moves.iter().nth(1).unwrap();
+
+        let mut ctx = test_ctx(1);
+        ctx.store_killer(3, a);
+        assert_eq!(ctx.killers_at(3), [Some(a), None]);
+        ctx.store_killer(3, a);
+        assert_eq!(
+            ctx.killers_at(3),
+            [Some(a), None],
+            "duplicate should not shift"
+        );
+        ctx.store_killer(3, b);
+        assert_eq!(ctx.killers_at(3), [Some(b), Some(a)]);
+
+        // Out of range: no panic, no write, and reads come back empty.
+        ctx.store_killer(MAX_PLY as u32, a);
+        ctx.store_killer(u32::MAX, a);
+        assert_eq!(ctx.killers_at(MAX_PLY as u32), [None; 2]);
+        assert_eq!(ctx.killers_at(u32::MAX), [None; 2]);
     }
 
     #[test]
@@ -531,11 +627,8 @@ mod tests {
             .iter()
             .find(|mv| mv.move_type() == MoveType::EnPassant)
             .expect("d6 en passant should be legal");
-        assert_ne!(order_key(&board, ep), (0, 0), "ep scored as a quiet");
-        assert_eq!(
-            order_key(&board, ep).0,
-            -ORDER_VALUES[PieceType::Pawn as usize]
-        );
+        assert_ne!(key(&board, ep), (0, 0), "ep scored as a quiet");
+        assert_eq!(key(&board, ep).0, -ORDER_VALUES[PieceType::Pawn as usize]);
     }
 
     #[test]
@@ -559,9 +652,9 @@ mod tests {
             .unwrap();
         let king_move = *moves.iter().find(|mv| !mv.is_promotion()).unwrap();
 
-        assert!(order_key(&board, promo_capture) < order_key(&board, quiet_promo));
-        assert!(order_key(&board, quiet_promo) < order_key(&board, king_move));
-        assert_eq!(order_key(&board, king_move), (0, 0));
+        assert!(key(&board, promo_capture) < key(&board, quiet_promo));
+        assert!(key(&board, quiet_promo) < key(&board, king_move));
+        assert_eq!(key(&board, king_move), (0, 0));
     }
 
     #[test]
@@ -579,7 +672,7 @@ mod tests {
         let expected = plain_negamax(&mut board, 4, 0, &mut plain_nodes);
         assert_eq!(ordered_score, expected);
         assert!(
-            ctx.nodes * 4 < plain_nodes,
+            ctx.nodes * 64 < plain_nodes,
             "ordering should cut the tree hard: {} vs {plain_nodes}",
             ctx.nodes
         );
