@@ -6,13 +6,14 @@ use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
 use crate::movegen::{
-    MoveList, generate_captures, generate_legal, generate_pseudo, generate_quiets, is_attacked,
+    MoveList, attackers_to, generate_captures, generate_legal, generate_pseudo, generate_quiets,
+    is_attacked,
 };
 #[cfg(feature = "profiling")]
 use crate::tt::Miss;
 use crate::tt::{Bound, TranspositionTable};
 use crate::uci::move_text;
-use crate::{Board, Color, Move, MoveType, PieceType, Square};
+use crate::{Bitboard, Board, Color, Move, MoveType, PieceType, Square};
 
 /// Nodes between clock checks. Low enough that a small tree still checks
 /// several times: depth 2 from the start position is only 440 nodes, and at
@@ -785,6 +786,12 @@ fn qsearch(
     #[cfg(feature = "profiling")]
     let mut legal_moves = 0;
     for &mv in moves.iter() {
+        // Losing captures cannot raise alpha once the recapture lands, so
+        // searching them only grows the tree. Promotions are exempt: the
+        // swap loop values the pawn, not the piece it becomes.
+        if !in_check && !mv.is_promotion() && see(board, mv) < 0 {
+            continue;
+        }
         board.make(mv);
         // Captures come back pseudo-legal. Filtering after `make` rather than
         // up front means a beta cutoff skips the checks it never needed.
@@ -942,6 +949,84 @@ fn victim_square(mv: Move) -> Option<Square> {
         _ if mv.is_capture() => Some(mv.to()),
         _ => None,
     }
+}
+
+/// Returns the material a capture wins or loses once both sides have finished
+/// recapturing on the destination square, in centipawns.
+///
+/// Static exchange evaluation: it plays out the capture sequence with the
+/// cheapest available attacker each time, which is what makes it static - no
+/// search, no move generation, just the attacker sets.
+fn see(board: &Board, mv: Move) -> i32 {
+    let target = mv.to();
+    let Some(victim) = victim_square(mv).and_then(|square| board.piece_on(square)) else {
+        return 0;
+    };
+    let Some(attacker) = board.piece_on(mv.from()) else {
+        return 0;
+    };
+
+    let mut occ = board.occupied();
+    occ.clear(mv.from());
+    if let Some(square) = victim_square(mv) {
+        occ.clear(square);
+    }
+
+    // gain[i] is the material the side to move at depth i stands to win if
+    // every capture from here on is played.
+    let mut gain = [0i32; 32];
+    gain[0] = ORDER_VALUES[victim.piece_type() as usize];
+    let mut on_square = ORDER_VALUES[attacker.piece_type() as usize];
+    let mut side = board.state().side_to_move().flip();
+    let mut depth = 1;
+
+    loop {
+        // Recomputed each iteration against the shrinking occupancy: that is
+        // what uncovers x-ray attackers standing behind a piece just captured.
+        let attackers = attackers_to(board, target, occ) & occ;
+        let Some((from, piece)) = cheapest_attacker(board, attackers, side) else {
+            break;
+        };
+        gain[depth] = on_square - gain[depth - 1];
+        on_square = ORDER_VALUES[piece as usize];
+        occ.clear(from);
+        side = side.flip();
+        depth += 1;
+        if depth >= gain.len() {
+            break;
+        }
+    }
+
+    // Walk back down: at every point a side may stop capturing rather than
+    // continue into a losing exchange, so a gain is only realised if it beats
+    // declining.
+    while depth > 1 {
+        depth -= 1;
+        gain[depth - 1] = -(-gain[depth - 1]).max(gain[depth]);
+    }
+    gain[0]
+}
+
+/// The least valuable of `attackers` belonging to `side`, with its square.
+fn cheapest_attacker(
+    board: &Board,
+    attackers: Bitboard,
+    side: Color,
+) -> Option<(Square, PieceType)> {
+    let ours = attackers & board.color(side);
+    for kind in [
+        PieceType::Pawn,
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+        PieceType::King,
+    ] {
+        if let Some(square) = (ours & board.pieces(kind)).lsb() {
+            return Some((square, kind));
+        }
+    }
+    None
 }
 
 impl Ctx<'_> {
@@ -1162,17 +1247,21 @@ mod tests {
         assert_eq!(enabled.nodes, disabled.nodes);
     }
 
+    /// Depth 6, not 5: at depth 5 from this position the saving is under 1% of
+    /// the tree (9418 vs 9505 nodes), small enough that any change to the shape
+    /// of quiescence flips its sign. Depth 6 saves thousands and tests the
+    /// property rather than the noise.
     #[test]
     fn null_move_pruning_reduces_nodes() {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let mut enabled_board: Board = fen.parse().unwrap();
-        let mut enabled = test_ctx(5);
-        negamax_root(&mut enabled_board, 5, &mut enabled).unwrap();
+        let mut enabled = test_ctx(6);
+        negamax_root(&mut enabled_board, 6, &mut enabled).unwrap();
 
         let mut disabled_board: Board = fen.parse().unwrap();
-        let mut disabled = test_ctx(5);
+        let mut disabled = test_ctx(6);
         disabled.nmp = false;
-        negamax_root(&mut disabled_board, 5, &mut disabled).unwrap();
+        negamax_root(&mut disabled_board, 6, &mut disabled).unwrap();
 
         assert!(
             enabled.nodes < disabled.nodes,
@@ -1751,6 +1840,69 @@ mod tests {
         // Same check, but h7 is open: the king walks out, so this is no mate.
         let (score, _) = quiesce("R5k1/5pp1/8/8/8/8/8/6K1 b - - 0 1");
         assert!(score > -MATE + 1000, "king has an escape, got {score}");
+    }
+
+    /// SEE of the capture from `from` to `to` in `fen`.
+    fn see_of(fen: &str, from: &str, to: &str) -> i32 {
+        crate::movegen::init();
+        let mut board: Board = fen.parse().unwrap();
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let mv = *moves
+            .iter()
+            .find(|mv| move_text(**mv) == format!("{from}{to}"))
+            .unwrap_or_else(|| panic!("{from}{to} should be legal in {fen}"));
+        see(&board, mv)
+    }
+
+    #[test]
+    fn see_values_a_simple_exchange() {
+        // Rook takes an undefended pawn: wins the pawn outright.
+        assert_eq!(see_of("4k3/8/8/3p4/8/8/8/3RK3 w - - 0 1", "d1", "d5"), 100);
+
+        // Rook takes a pawn defended by a pawn: wins 100, loses the rook.
+        assert_eq!(
+            see_of("4k3/8/2p5/3p4/8/8/8/3RK3 w - - 0 1", "d1", "d5"),
+            100 - ORDER_VALUES[PieceType::Rook as usize]
+        );
+
+        // Pawn takes a pawn defended by a pawn: even trade.
+        assert_eq!(see_of("4k3/8/2p5/3p4/4P3/8/8/4K3 w - - 0 1", "e4", "d5"), 0);
+    }
+
+    #[test]
+    fn see_stops_a_losing_exchange_early() {
+        // Two white attackers (pawn, rook) against two black defenders on d5.
+        // White should not run the full sequence: the pawn trade is where it
+        // stops, so this is a clean pawn win, not a rook-for-pawn loss.
+        let value = see_of("3rk3/8/2p5/3p4/4P3/8/8/3RK3 w - - 0 1", "e4", "d5");
+        assert_eq!(value, 0, "pxp then rxp is a trade, not a loss: {value}");
+    }
+
+    #[test]
+    fn see_sees_through_an_x_ray_battery() {
+        // Rooks stacked on d1/d2 behind each other. Taking the defended d5
+        // pawn is only sound because the second rook backs the first up, and
+        // that is invisible until the front rook clears the file.
+        let doubled = see_of("3rk3/8/8/3p4/8/8/3R4/3RK3 w - - 0 1", "d2", "d5");
+        // Single rook against the same defence loses material.
+        let single = see_of("3rk3/8/8/3p4/8/8/8/3RK3 w - - 0 1", "d1", "d5");
+        assert!(
+            doubled > single,
+            "the backup rook must count: doubled {doubled} vs single {single}"
+        );
+        assert_eq!(doubled, 100, "RxP, RxR, RxR wins the pawn");
+    }
+
+    #[test]
+    fn see_prunes_a_losing_capture_from_quiescence() {
+        // Queen can take a pawn defended by a pawn. SEE rejects it, so
+        // quiescence never searches it and returns the stand-pat.
+        let fen = "4k3/8/1p6/2p5/3Q4/8/8/4K3 w - - 0 1";
+        assert!(see_of(fen, "d4", "c5") < 0, "QxP is a losing capture");
+        let (score, qnodes) = quiesce(fen);
+        assert_eq!(score, evaluate(&fen.parse::<Board>().unwrap()));
+        assert_eq!(qnodes, 1, "the losing capture should never be searched");
     }
 
     #[test]
