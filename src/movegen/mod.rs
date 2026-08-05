@@ -179,6 +179,26 @@ fn generate_castling(board: &Board, list: &mut MoveList, us: Color) {
     }
 }
 
+/// Returns every piece of either color attacking a square, as seen through the
+/// supplied occupancy.
+///
+/// Passing an occupancy with already-captured pieces removed is what exposes
+/// x-ray attackers behind them, which is how SEE resolves batteries.
+pub fn attackers_to(board: &Board, sq: Square, occ: Bitboard) -> Bitboard {
+    let index = sq.index() as usize;
+    let by_type = |kind| board.pieces(kind);
+    (KNIGHT[index] & by_type(PieceType::Knight))
+        | (KING[index] & by_type(PieceType::King))
+        | (PAWN[Color::White as usize][index]
+            & by_type(PieceType::Pawn)
+            & board.color(Color::Black))
+        | (PAWN[Color::Black as usize][index]
+            & by_type(PieceType::Pawn)
+            & board.color(Color::White))
+        | (rook_attacks(sq, occ) & (by_type(PieceType::Rook) | by_type(PieceType::Queen)))
+        | (bishop_attacks(sq, occ) & (by_type(PieceType::Bishop) | by_type(PieceType::Queen)))
+}
+
 /// Returns whether a square is attacked by a given side.
 pub fn is_attacked(board: &Board, sq: Square, by: Color) -> bool {
     let their = board.color(by);
