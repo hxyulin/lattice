@@ -9,6 +9,7 @@ use lattice::Board;
 use lattice::bench;
 use lattice::movegen::perft::perft_divide;
 use lattice::search::search;
+use lattice::tt::TranspositionTable;
 use lattice::uci::{Command, move_text, parse};
 
 fn main() {
@@ -20,6 +21,8 @@ fn main() {
     let stdin = io::stdin();
     let mut board = Board::startpos();
     let stop = Arc::new(AtomicBool::new(false));
+    // Outlives each `go` so one move's tree seeds the next.
+    let tt = Arc::new(TranspositionTable::new());
     let mut search_thread: Option<JoinHandle<()>> = None;
     for line in stdin.lock().lines().map_while(Result::ok) {
         reap_finished(&mut search_thread);
@@ -35,16 +38,28 @@ fn main() {
                 write_protocol("id name Lattice\nid author hxyulin\nuciok");
             }
             Command::IsReady => write_protocol("readyok"),
-            Command::NewGame => board = Board::startpos(),
+            Command::NewGame => {
+                board = Board::startpos();
+                // Scores from the previous game describe positions this one
+                // may reach by another path; carrying them over is wrong.
+                tt.clear();
+            }
             Command::Position(position) => board = position,
             Command::Go(limits) if search_thread.is_none() => {
                 stop.store(false, Ordering::Relaxed);
                 let mut search_board = board.clone();
                 let search_stop = Arc::clone(&stop);
+                let search_tt = Arc::clone(&tt);
                 search_thread = Some(thread::spawn(move || {
                     let stdout = io::stdout();
                     let mut output = stdout.lock();
-                    search(&mut search_board, limits, &search_stop, &mut output);
+                    search(
+                        &mut search_board,
+                        limits,
+                        &search_stop,
+                        &search_tt,
+                        &mut output,
+                    );
                     let _ = output.flush();
                 }));
             }
