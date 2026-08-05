@@ -52,6 +52,10 @@ impl MoveList {
     pub fn iter(&self) -> core::slice::Iter<'_, Move> {
         self.moves[..self.len].iter()
     }
+    /// Returns the moves as a mutable slice, for reordering in place.
+    pub fn as_mut_slice(&mut self) -> &mut [Move] {
+        &mut self.moves[..self.len]
+    }
 }
 
 impl Default for MoveList {

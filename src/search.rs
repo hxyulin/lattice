@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::eval::evaluate;
 use crate::movegen::{MoveList, generate_legal, is_attacked};
 use crate::uci::move_text;
-use crate::{Board, Move};
+use crate::{Board, Move, MoveType, Square};
 
 /// Nodes between clock checks. Low enough that a small tree still checks
 /// several times: depth 2 from the start position is only 440 nodes, and at
@@ -140,6 +140,7 @@ fn negamax_root(
     if moves.is_empty() {
         return Ok((None, terminal_score(board, 0)));
     }
+    order_moves(board, &mut moves);
     let mut best_move = None;
     let mut best_score = -INFINITY;
     for &mv in moves.iter() {
@@ -175,6 +176,7 @@ fn negamax(
     if moves.is_empty() {
         return Ok(terminal_score(board, ply));
     }
+    order_moves(board, &mut moves);
     let mut best = -INFINITY;
     for &mv in moves.iter() {
         board.make(mv);
@@ -187,6 +189,47 @@ fn negamax(
         }
     }
     Ok(best)
+}
+
+/// Ordering values, deliberately separate from `eval::VALUES`: retuning the
+/// evaluation should not silently reshape the search tree. The king is a victim
+/// value only, for pseudo-legal safety; it is never actually captured.
+const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 10_000];
+
+/// Sorts captures and promotions ahead of quiets, captures by MVV-LVA (most
+/// valuable victim, least valuable attacker).
+fn order_moves(board: &Board, moves: &mut MoveList) {
+    moves
+        .as_mut_slice()
+        .sort_unstable_by_key(|&mv| order_key(board, mv));
+}
+
+/// Sort key for one move, ascending: gain descending, then attacker ascending
+/// to break ties within a victim. Quiets key to `(0, 0)` and sort last.
+fn order_key(board: &Board, mv: Move) -> (i32, i32) {
+    let victim = victim_square(mv)
+        .and_then(|square| board.piece_on(square))
+        .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize]);
+    let promoted = mv
+        .promoted_piece()
+        .map_or(0, |kind| ORDER_VALUES[kind as usize]);
+    if victim == 0 && promoted == 0 {
+        return (0, 0);
+    }
+    let attacker = board
+        .piece_on(mv.from())
+        .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize]);
+    (-(victim + promoted), attacker)
+}
+
+/// The square the captured piece stands on: `to` for every capture except en
+/// passant, where the victim sits beside the mover rather than on `to`.
+fn victim_square(mv: Move) -> Option<Square> {
+    match mv.move_type() {
+        MoveType::EnPassant => Square::new(mv.to().file(), mv.from().rank()),
+        _ if mv.is_capture() => Some(mv.to()),
+        _ => None,
+    }
 }
 
 impl Ctx<'_> {
@@ -250,6 +293,7 @@ fn write_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PieceType;
     use crate::movegen::{MoveList, generate_legal};
 
     fn run(fen: &str, depth: u32) -> (SearchResult, String) {
@@ -318,6 +362,112 @@ mod tests {
                 ctx.nodes
             );
         }
+    }
+
+    fn ordered(fen: &str) -> (Board, MoveList) {
+        let mut board: Board = fen.parse().unwrap();
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        order_moves(&board, &mut moves);
+        (board, moves)
+    }
+
+    #[test]
+    fn captures_sort_before_quiets_by_mvv_lva() {
+        // The e4 pawn and the c3 knight both attack the d5 queen; the knight
+        // also attacks the cheaper b5 knight.
+        let (board, moves) = ordered("4k3/8/8/1n1q4/4P3/2N5/8/4K3 w - - 0 1");
+        let keys: Vec<_> = moves.iter().map(|&mv| order_key(&board, mv)).collect();
+        assert!(
+            keys.windows(2).all(|w| w[0] <= w[1]),
+            "not sorted: {keys:?}"
+        );
+
+        let first = *moves.iter().next().unwrap();
+        assert!(first.is_capture());
+        assert!(
+            move_text(first).ends_with("d5"),
+            "should take the queen, got {}",
+            move_text(first)
+        );
+        assert_eq!(
+            board.piece_on(first.from()).unwrap().piece_type(),
+            PieceType::Pawn,
+            "pawn is the cheaper attacker of the queen"
+        );
+
+        let quiets = moves.iter().filter(|mv| order_key(&board, **mv) == (0, 0));
+        let captures = moves.iter().filter(|mv| mv.is_capture()).count();
+        assert!(captures >= 2);
+        assert!(quiets.count() > 0, "position should have quiet moves too");
+    }
+
+    #[test]
+    fn en_passant_is_scored_as_a_capture() {
+        // The ep victim is not on `to`, so a naive piece_on(to) lookup scores
+        // this as a quiet and sorts it last.
+        let (board, moves) = ordered("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        let ep = *moves
+            .iter()
+            .find(|mv| mv.move_type() == MoveType::EnPassant)
+            .expect("d6 en passant should be legal");
+        assert_ne!(order_key(&board, ep), (0, 0), "ep scored as a quiet");
+        assert_eq!(
+            order_key(&board, ep).0,
+            -ORDER_VALUES[PieceType::Pawn as usize]
+        );
+    }
+
+    #[test]
+    fn promotions_outrank_quiets_and_stack_with_capture_value() {
+        let (board, moves) = ordered("3r1k2/4P3/8/8/8/8/8/4K3 w - - 0 1");
+        let quiet_promo = *moves
+            .iter()
+            .find(|mv| {
+                mv.is_promotion()
+                    && !mv.is_capture()
+                    && mv.promoted_piece() == Some(PieceType::Queen)
+            })
+            .unwrap();
+        let promo_capture = *moves
+            .iter()
+            .find(|mv| {
+                mv.is_promotion()
+                    && mv.is_capture()
+                    && mv.promoted_piece() == Some(PieceType::Queen)
+            })
+            .unwrap();
+        let king_move = *moves.iter().find(|mv| !mv.is_promotion()).unwrap();
+
+        assert!(order_key(&board, promo_capture) < order_key(&board, quiet_promo));
+        assert!(order_key(&board, quiet_promo) < order_key(&board, king_move));
+        assert_eq!(order_key(&board, king_move), (0, 0));
+    }
+
+    #[test]
+    fn ordering_reduces_the_tree() {
+        // Ordering must pay for itself in nodes; the score equality that
+        // guards correctness is covered by `pruning_preserves_scores`.
+        let mut board: Board =
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
+                .parse()
+                .unwrap();
+        let mut ctx = Ctx {
+            limits: Limits::default(),
+            stop: &AtomicBool::new(false),
+            deadline: None,
+            nodes: 0,
+            iteration_depth: 4,
+        };
+        let (_, ordered_score) = negamax_root(&mut board, 4, &mut ctx).unwrap();
+        let mut plain_nodes = 0;
+        let expected = plain_negamax(&mut board, 4, 0, &mut plain_nodes);
+        assert_eq!(ordered_score, expected);
+        assert!(
+            ctx.nodes * 4 < plain_nodes,
+            "ordering should cut the tree hard: {} vs {plain_nodes}",
+            ctx.nodes
+        );
     }
 
     #[test]
