@@ -1,13 +1,24 @@
 # Configuration for the typos spell checker (https://github.com/crate-ci/typos).
 # Run with `typos` (install: `cargo install typos-cli`).
+#
+# The pre-commit hook runs in report-only mode (`--no-check-filenames` aside,
+# the upstream hook's default `--write-changes` is overridden in
+# .pre-commit-config.yaml). Corrections are applied by hand: this repo is full
+# of FENs, UCI move lists, and hex constants that a silent rewrite would
+# corrupt, and a mangled FEN fails as a wrong position rather than a parse
+# error.
 
 [files]
-# bench.csv is generated from commit trailers: its first column is abbreviated
-# hashes, and hex digits spell words often enough that a regenerated ledger can
-# fail the hook on a SHA nobody chose.
-extend-exclude = ["Cargo.lock", "bench.csv"]
+extend-exclude = ["Cargo.lock"]
 
 [default]
+# Git hashes are hex, and hex spells words: `ba` reads as `by`/`be`, `ede` as
+# `edge`, `daa` as `data`. bench.csv is generated from commit trailers, so a
+# regeneration can fail the hook on a SHA nobody chose. Ignoring the shape
+# rather than excluding the file keeps the commit subjects in bench.csv spell
+# checked.
+extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b"]
+
 # Add false positives here when typos flags a chess term it should not, e.g.
 # a FEN fragment or an identifier:
 #   extend-ignore-identifiers-re = ["..."]

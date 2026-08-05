@@ -6,7 +6,11 @@ repos:
   - repo: https://github.com/crate-ci/typos
     rev: v1.47.2
     hooks:
+      # Report only. The upstream hook passes --write-changes, which would
+      # silently rewrite FENs, UCI move lists, and hex constants; a corrupted
+      # FEN still parses and fails later as a wrong position.
       - id: typos
+        args: [--force-exclude]
 
   - repo: local
     hooks:
