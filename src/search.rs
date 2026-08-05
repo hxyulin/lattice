@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
 use crate::movegen::{MoveList, generate_captures, generate_legal, is_attacked};
+use crate::tt::{Bound, TranspositionTable};
 use crate::uci::move_text;
 use crate::{Board, Move, MoveType, Square};
 
@@ -67,6 +68,8 @@ struct Ctx<'a> {
     killers: [[Option<Move>; 2]; MAX_PLY],
     /// Cutoff counts per side and from/to square.
     history: History,
+    /// Shared across searches, so one move's tree seeds the next.
+    tt: &'a TranspositionTable,
     /// Whether leaves run quiescence. Always true in play; the alpha-beta
     /// equivalence tests turn it off so their unpruned oracle stays cheap.
     #[cfg(test)]
@@ -81,9 +84,10 @@ pub fn search(
     board: &mut Board,
     limits: Limits,
     stop: &AtomicBool,
+    tt: &TranspositionTable,
     output: &mut dyn Write,
 ) -> Option<Move> {
-    let result = search_inner(board, limits, stop, output, true);
+    let result = search_inner(board, limits, stop, tt, output, true);
     let best = result
         .best_move
         .map_or_else(|| "0000".to_owned(), move_text);
@@ -95,12 +99,14 @@ pub(crate) fn search_inner(
     board: &mut Board,
     limits: Limits,
     stop: &AtomicBool,
+    tt: &TranspositionTable,
     output: &mut dyn Write,
     emit_info: bool,
 ) -> SearchResult {
     let start = Instant::now();
     let deadline =
         time_budget(board, limits).and_then(|ms| start.checked_add(Duration::from_millis(ms)));
+    tt.new_search();
     let mut ctx = Ctx {
         limits,
         stop,
@@ -110,6 +116,7 @@ pub(crate) fn search_inner(
         iteration_depth: 1,
         killers: [[None; 2]; MAX_PLY],
         history: [[[0; 64]; 64]; 2],
+        tt,
         #[cfg(test)]
         quiesce_leaves: true,
     };
@@ -175,7 +182,11 @@ fn negamax_root(
     if moves.is_empty() {
         return Ok((None, terminal_score(board, 0)));
     }
-    order_moves(board, &mut moves, ctx.killers_at(0), &ctx.history);
+    let key = board.state().zobrist();
+    // Ordering only: the root must return a move, so it never cuts on a
+    // stored score however deep that score was searched.
+    let tt_move = ctx.tt.probe(key).and_then(|entry| entry.best_move);
+    order_moves(board, &mut moves, tt_move, ctx.killers_at(0), &ctx.history);
     let mut best_move = None;
     let mut best_score = -INFINITY;
     for &mv in moves.iter() {
@@ -190,6 +201,16 @@ fn negamax_root(
             best_move = Some(mv);
         }
     }
+    // Exact: children run with `alpha = -INFINITY`, so none can fail low and
+    // every score that raises `best_score` is a true value rather than a
+    // bound. Stored mainly so the next iteration orders by this move.
+    ctx.tt.store(
+        key,
+        score_to_tt(best_score, 0),
+        best_move,
+        depth,
+        Bound::Exact,
+    );
     Ok((best_move, best_score))
 }
 
@@ -210,19 +231,55 @@ fn negamax(
         }
         return qsearch(board, ply, 0, alpha, beta, ctx);
     }
+    let key = board.state().zobrist();
+    let alpha_original = alpha;
+    let entry = ctx.tt.probe(key);
+    // A cut at ply 1 would return the previous search's score for the root's
+    // own move without searching, so the iteration reports a depth it never
+    // reached and the score freezes until the iteration passes the stored
+    // depth. Deeper plies have a real parent to return to and may cut freely.
+    if let Some(entry) = entry
+        && entry.depth >= depth
+        && ply > 1
+    {
+        let score = score_from_tt(entry.score, ply);
+        let usable = match entry.bound {
+            Bound::Exact => true,
+            Bound::Lower => score >= beta,
+            Bound::Upper => score <= alpha,
+        };
+        if usable {
+            return Ok(score);
+        }
+    }
     let mut moves = MoveList::new();
     generate_legal(board, &mut moves);
     if moves.is_empty() {
         return Ok(terminal_score(board, ply));
     }
-    order_moves(board, &mut moves, ctx.killers_at(ply), &ctx.history);
+    // The stored move is only a hint: a key collision or an entry from an
+    // earlier game can decode to a move that is illegal here, so it orders the
+    // list rather than being searched directly.
+    let tt_move = entry.and_then(|entry| entry.best_move);
+    order_moves(
+        board,
+        &mut moves,
+        tt_move,
+        ctx.killers_at(ply),
+        &ctx.history,
+    );
     let us = board.state().side_to_move();
     let mut best = -INFINITY;
+    let mut best_move = None;
     for &mv in moves.iter() {
         board.make(mv);
         let result = negamax(board, depth - 1, ply + 1, -beta, -alpha, ctx);
         board.unmake(mv);
-        best = best.max(-result?);
+        let score = -result?;
+        if score > best {
+            best = score;
+            best_move = Some(mv);
+        }
         alpha = alpha.max(best);
         if alpha >= beta {
             if !mv.is_capture() && !mv.is_promotion() {
@@ -237,6 +294,15 @@ fn negamax(
             break;
         }
     }
+    let bound = if best >= beta {
+        Bound::Lower
+    } else if best > alpha_original {
+        Bound::Exact
+    } else {
+        Bound::Upper
+    };
+    ctx.tt
+        .store(key, score_to_tt(best, ply), best_move, depth, bound);
     Ok(best)
 }
 
@@ -281,7 +347,7 @@ fn qsearch(
         alpha = alpha.max(best);
         generate_captures(board, &mut moves);
     }
-    order_moves(board, &mut moves, [None; 2], &ctx.history);
+    order_moves(board, &mut moves, None, [None; 2], &ctx.history);
 
     for &mv in moves.iter() {
         board.make(mv);
@@ -308,20 +374,41 @@ fn qsearch(
 /// captured.
 const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 10_000];
 
+/// Below every capture key, the largest of which is a queen-capture-promotion
+/// at `-(900 + 900)`.
+const TT_MOVE_KEY: i32 = -100_000;
+
 /// Sorts captures and promotions ahead of quiets, captures by MVV-LVA (most
 /// valuable victim, least valuable attacker), and the `killers` for this ply
-/// ahead of the remaining quiets, which sort by `history`.
-fn order_moves(board: &Board, moves: &mut MoveList, killers: [Option<Move>; 2], history: &History) {
+/// ahead of the remaining quiets, which sort by `history`. `tt_move`, when it
+/// is present in the list at all, sorts ahead of everything.
+fn order_moves(
+    board: &Board,
+    moves: &mut MoveList,
+    tt_move: Option<Move>,
+    killers: [Option<Move>; 2],
+    history: &History,
+) {
     moves
         .as_mut_slice()
-        .sort_unstable_by_key(|&mv| order_key(board, mv, killers, history));
+        .sort_unstable_by_key(|&mv| order_key(board, mv, tt_move, killers, history));
 }
 
 /// Sort key for one move, ascending: gain descending, then attacker ascending
 /// to break ties within a victim. Every capture keys at or below `-100`, which
 /// leaves the interval `(-100, 0)` free for the killers. Other quiets key to
 /// `(0, -history)` and sort last, an unseen quiet at `(0, 0)` behind them all.
-fn order_key(board: &Board, mv: Move, killers: [Option<Move>; 2], history: &History) -> (i32, i32) {
+/// The TT move keys below every capture.
+fn order_key(
+    board: &Board,
+    mv: Move,
+    tt_move: Option<Move>,
+    killers: [Option<Move>; 2],
+    history: &History,
+) -> (i32, i32) {
+    if tt_move == Some(mv) {
+        return (TT_MOVE_KEY, 0);
+    }
     let victim = victim_square(mv)
         .and_then(|square| board.piece_on(square))
         .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize]);
@@ -401,6 +488,32 @@ impl Ctx<'_> {
     }
 }
 
+/// Scores above this in absolute value encode a distance to mate.
+const MATE_BOUND: i32 = MATE - 1000;
+
+/// Rewrites a mate score to be relative to the node it is stored at rather
+/// than the root, so probing it at another ply reports the right distance.
+fn score_to_tt(score: i32, ply: u32) -> i32 {
+    if score > MATE_BOUND {
+        score + ply as i32
+    } else if score < -MATE_BOUND {
+        score - ply as i32
+    } else {
+        score
+    }
+}
+
+/// Inverse of `score_to_tt`.
+fn score_from_tt(score: i32, ply: u32) -> i32 {
+    if score > MATE_BOUND {
+        score - ply as i32
+    } else if score < -MATE_BOUND {
+        score + ply as i32
+    } else {
+        score
+    }
+}
+
 fn terminal_score(board: &Board, ply: u32) -> i32 {
     let side = board.state().side_to_move();
     if is_attacked(board, board.king_square(side), side.flip()) {
@@ -454,6 +567,7 @@ mod tests {
                 ..Limits::default()
             },
             &AtomicBool::new(false),
+            &TranspositionTable::new(),
             &mut output,
             true,
         );
@@ -464,6 +578,7 @@ mod tests {
         // Leaked so the oracle and the real search can share a `Ctx` shape
         // without threading a lifetime through every test helper.
         let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let tt: &'static TranspositionTable = Box::leak(Box::new(TranspositionTable::new()));
         Ctx {
             limits: Limits::default(),
             stop,
@@ -473,6 +588,7 @@ mod tests {
             iteration_depth,
             killers: [[None; 2]; MAX_PLY],
             history: [[[0; 64]; 64]; 2],
+            tt,
             quiesce_leaves: true,
         }
     }
@@ -542,14 +658,14 @@ mod tests {
         let mut board: Board = fen.parse().unwrap();
         let mut moves = MoveList::new();
         generate_legal(&mut board, &mut moves);
-        order_moves(&board, &mut moves, [None; 2], &NO_HISTORY);
+        order_moves(&board, &mut moves, None, [None; 2], &NO_HISTORY);
         (board, moves)
     }
 
     static NO_HISTORY: History = [[[0; 64]; 64]; 2];
 
     fn key(board: &Board, mv: Move) -> (i32, i32) {
-        order_key(board, mv, [None; 2], &NO_HISTORY)
+        order_key(board, mv, None, [None; 2], &NO_HISTORY)
     }
 
     #[test]
@@ -592,11 +708,11 @@ mod tests {
             .find(|mv| !mv.is_capture() && !mv.is_promotion())
             .unwrap();
         let killers = [Some(killer), None];
-        order_moves(&board, &mut moves, killers, &NO_HISTORY);
+        order_moves(&board, &mut moves, None, killers, &NO_HISTORY);
 
         let keys: Vec<_> = moves
             .iter()
-            .map(|&mv| order_key(&board, mv, killers, &NO_HISTORY))
+            .map(|&mv| order_key(&board, mv, None, killers, &NO_HISTORY))
             .collect();
         assert!(
             keys.windows(2).all(|w| w[0] <= w[1]),
@@ -609,12 +725,12 @@ mod tests {
             .find(|mv| !mv.is_capture() && **mv != killer)
             .unwrap();
         assert!(
-            order_key(&board, capture, killers, &NO_HISTORY)
-                < order_key(&board, killer, killers, &NO_HISTORY)
+            order_key(&board, capture, None, killers, &NO_HISTORY)
+                < order_key(&board, killer, None, killers, &NO_HISTORY)
         );
         assert!(
-            order_key(&board, killer, killers, &NO_HISTORY)
-                < order_key(&board, quiet, killers, &NO_HISTORY)
+            order_key(&board, killer, None, killers, &NO_HISTORY)
+                < order_key(&board, quiet, None, killers, &NO_HISTORY)
         );
     }
 
@@ -663,18 +779,18 @@ mod tests {
 
         let capture = *moves.iter().find(|mv| mv.is_capture()).unwrap();
         assert!(
-            order_key(&board, capture, killers, &history)
-                < order_key(&board, killer, killers, &history)
+            order_key(&board, capture, None, killers, &history)
+                < order_key(&board, killer, None, killers, &history)
         );
         assert!(
-            order_key(&board, killer, killers, &history)
-                < order_key(&board, scored, killers, &history)
+            order_key(&board, killer, None, killers, &history)
+                < order_key(&board, scored, None, killers, &history)
         );
         assert!(
-            order_key(&board, scored, killers, &history)
-                < order_key(&board, unseen, killers, &history)
+            order_key(&board, scored, None, killers, &history)
+                < order_key(&board, unseen, None, killers, &history)
         );
-        assert_eq!(order_key(&board, unseen, killers, &history), (0, 0));
+        assert_eq!(order_key(&board, unseen, None, killers, &history), (0, 0));
     }
 
     #[test]
@@ -882,6 +998,172 @@ mod tests {
     }
 
     #[test]
+    fn tt_scores_survive_a_ply_shift() {
+        // A mate score is stored relative to its own node, so writing it at
+        // one ply and reading it at another must not move the mate nearer or
+        // further. Ordinary scores must pass through untouched.
+        for ply in [0, 1, 5, 30] {
+            for score in [-MATE + 3, -MATE + 40, 0, 250, -700, MATE - 40, MATE - 3] {
+                assert_eq!(
+                    score_from_tt(score_to_tt(score, ply), ply),
+                    score,
+                    "score {score} at ply {ply}"
+                );
+            }
+        }
+        // Only mate scores shift.
+        assert_eq!(score_to_tt(250, 7), 250);
+        assert_eq!(score_to_tt(MATE - 3, 7), MATE + 4);
+        assert_eq!(score_to_tt(-MATE + 3, 7), -MATE - 4);
+    }
+
+    #[test]
+    fn tt_does_not_change_scores() {
+        // The strongest correctness check available: a TT may reshape the tree
+        // and must not reshape the result. Compares against the unpruned
+        // oracle with the table warmed by a prior identical search, which is
+        // when a wrongly signed bound or an unadjusted mate score shows up.
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+        ];
+        for fen in fens {
+            let mut board: Board = fen.parse().unwrap();
+            let mut plain_nodes = 0;
+            let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
+
+            let mut ctx = static_leaf_ctx(3);
+            let cold = negamax_root(&mut board, 3, &mut ctx).unwrap().1;
+            assert_eq!(cold, expected, "cold TT changed the score for {fen}");
+
+            // Same table, now populated: every node can hit.
+            let warm = negamax_root(&mut board, 3, &mut ctx).unwrap().1;
+            assert_eq!(warm, expected, "warm TT changed the score for {fen}");
+        }
+    }
+
+    #[test]
+    fn tt_reports_a_stable_mate_distance_across_depths() {
+        // Ra8 is mate: f7, g7 and h7 are blocked by Black's own pawns. A mate
+        // score stored at one depth and re-read at another must report the
+        // same distance - an unadjusted score drifts by the ply it is probed
+        // at, which is exactly what iterative deepening does here.
+        let mut board: Board = "6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1".parse().unwrap();
+        let mut ctx = test_ctx(1);
+        for depth in 1..=5 {
+            ctx.iteration_depth = depth;
+            let (best, score) = negamax_root(&mut board, depth, &mut ctx).unwrap();
+            assert_eq!(mate_in(score), Some(1), "depth {depth} scored {score}");
+            assert_eq!(
+                best.map(move_text).as_deref(),
+                Some("a1a8"),
+                "depth {depth} missed the mate"
+            );
+        }
+    }
+
+    #[test]
+    fn tt_move_sorts_first() {
+        let (board, mut moves) =
+            ordered("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1");
+        // A quiet move, which without the TT would sort behind every capture.
+        let quiet = *moves
+            .iter()
+            .find(|mv| !mv.is_capture() && !mv.is_promotion())
+            .expect("position has a quiet move");
+        order_moves(&board, &mut moves, Some(quiet), [None; 2], &NO_HISTORY);
+        assert_eq!(
+            moves.iter().next(),
+            Some(&quiet),
+            "the TT move must sort ahead of captures"
+        );
+        assert!(
+            order_key(&board, quiet, Some(quiet), [None; 2], &NO_HISTORY)
+                < order_key(&board, quiet, None, [None; 2], &NO_HISTORY)
+        );
+    }
+
+    #[test]
+    fn a_warm_table_still_searches_every_iteration() {
+        // Regression: a table warmed by a previous `go` used to let the root's
+        // own children cut, so every iteration returned the stored score after
+        // ~1 node per root move and the reported depth was fiction. Each
+        // iteration must do work that grows with depth.
+        crate::movegen::init();
+        let tt = TranspositionTable::new();
+        let stop = AtomicBool::new(false);
+        let mut first = Board::startpos();
+        search_inner(
+            &mut first,
+            Limits {
+                depth: Some(7),
+                ..Limits::default()
+            },
+            &stop,
+            &tt,
+            &mut std::io::sink(),
+            false,
+        );
+
+        // Search the same position again: the root store left a deep entry for
+        // it, which is exactly the case that used to freeze the score.
+        let mut second = Board::startpos();
+        let warm = tt.probe(second.state().zobrist());
+        assert!(
+            warm.is_some_and(|entry| entry.depth >= 5),
+            "test needs a deep stored entry to be meaningful, got {warm:?}"
+        );
+
+        let mut counts = Vec::new();
+        for depth in 1..=5 {
+            let result = search_inner(
+                &mut second,
+                Limits {
+                    depth: Some(depth),
+                    ..Limits::default()
+                },
+                &stop,
+                &tt,
+                &mut std::io::sink(),
+                false,
+            );
+            counts.push(result.nodes + result.qnodes);
+        }
+        // The bug signature was a flat count: every iteration returned after
+        // roughly one node per root move, so depth 5 cost no more than depth
+        // 1. A TT that is working still prunes hard, so the growth is not
+        // monotonic - but the deepest iteration must clearly outwork the
+        // shallowest.
+        let (first_count, last_count) = (counts[0], counts[counts.len() - 1]);
+        assert!(
+            last_count > first_count * 4,
+            "depth 5 did not outwork depth 1, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn tt_reduces_the_tree_across_iterations() {
+        // The point of the table: a second search of the same position reuses
+        // the first one's work.
+        let mut board: Board =
+            "r1bq1rk1/ppp2ppp/2np1n2/4p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8"
+                .parse()
+                .unwrap();
+        let mut ctx = test_ctx(4);
+        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        let cold = ctx.total();
+        let before = ctx.total();
+        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        let warm = ctx.total() - before;
+        assert!(
+            warm < cold,
+            "warm search {warm} was not cheaper than {cold}"
+        );
+    }
+
+    #[test]
     fn depth_search_is_legal_and_deterministic() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
         let (first, _) = run(fen, 2);
@@ -934,6 +1216,7 @@ mod tests {
                 ..Limits::default()
             },
             &AtomicBool::new(false),
+            &TranspositionTable::new(),
             &mut std::io::sink(),
             false,
         );
@@ -956,6 +1239,7 @@ mod tests {
                 ..Limits::default()
             },
             &AtomicBool::new(true),
+            &TranspositionTable::new(),
             &mut output,
             false,
         );

@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::Board;
 use crate::search::{Limits, search_inner};
+use crate::tt::TranspositionTable;
 
 const DEPTH: u32 = 4;
 const POSITIONS: [&str; 12] = [
@@ -31,6 +32,9 @@ pub fn run(output: &mut dyn Write) -> u64 {
 fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
     let start = Instant::now();
     let stop = AtomicBool::new(false);
+    // One table for the run, built fresh: shared across positions the way a
+    // game shares it, and empty at the start so the count stays reproducible.
+    let tt = TranspositionTable::new();
     let mut nodes = 0;
     let mut qnodes = 0;
     for fen in POSITIONS {
@@ -43,6 +47,7 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
                 ..Limits::default()
             },
             &stop,
+            &tt,
             &mut std::io::sink(),
             false,
         );

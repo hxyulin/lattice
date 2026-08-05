@@ -103,6 +103,20 @@ impl Move {
         Self(NonZeroU16::new(value).expect("from != to guarantees a nonzero move"))
     }
 
+    /// Returns the packed representation, which is never zero.
+    pub fn to_bits(self) -> u16 {
+        self.0.get()
+    }
+
+    /// Rebuilds a move from `to_bits`, or `None` for zero.
+    ///
+    /// Every nonzero value decodes, including the reserved move types, so a
+    /// caller reading from storage that may be stale must still check the move
+    /// against the position rather than trusting it.
+    pub fn from_bits(bits: u16) -> Option<Self> {
+        NonZeroU16::new(bits).map(Self)
+    }
+
     /// Returns the origin square.
     pub fn from(self) -> Square {
         Square::new_unchecked(((self.0.get() >> 6) & 0x3f) as u8)
