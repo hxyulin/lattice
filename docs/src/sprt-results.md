@@ -42,4 +42,6 @@ authoritative result.
 | MVV-LVA move ordering | STC | 160 | +186.7 | pass |
 | quiescence search | STC | 216 | +135.4 | pass |
 | PeSTO tapered piece-square tables | STC | 116 | +251.8 | pass |
+| killer moves | STC | 580 | +54.5 | pass |
+| history heuristic | STC | 2018 | +15.0 | pass |
 <!-- END generated -->

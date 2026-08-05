@@ -14,3 +14,8 @@ b2b9107,2026-08-05,"feat(bench): report the qnode share",384975
 307d744,2026-08-05,"docs: record the quiescence search SPRT result",
 fc01883,2026-08-05,"docs: refresh bench ledger after moving SEE to its own branch",
 24e3884,2026-08-05,"feat(eval): PeSTO tapered piece-square tables",428564
+f1cc7f3,2026-08-05,"docs: record the PeSTO SPRT result",
+aae31ce,2026-08-05,"feat(search): killer moves",289853
+8e17826,2026-08-05,"feat(search): history heuristic",273736
+6a1df1c,2026-08-05,"feat(search): transposition table",208948
+cf0d474,2026-08-05,"feat(search): transposition table in quiescence",167476
