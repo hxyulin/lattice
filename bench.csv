@@ -6,3 +6,5 @@ b95169d,2026-08-05,"feat(search): iterative deepening, time management, and benc
 aa32e4c,2026-08-05,"refactor(uci): build attack tables during the uci handshake",13191204
 90fc5e2,2026-08-05,"feat(search): alpha-beta pruning",486189
 576e1e8,2026-08-05,"docs: record the alpha-beta SPRT result",
+1dfe9a9,2026-08-05,"docs: move SPRT time controls to STC 10+0.1 and LTC 60+0.6",
+326df70,2026-08-05,"feat(search): MVV-LVA move ordering",59457

@@ -39,4 +39,5 @@ authoritative result.
 | Feature | TC | Games | Elo | Verdict |
 |---------|----|------:|----:|---------|
 | alpha-beta pruning | STC | 128 | +339.5 | pass |
+| MVV-LVA move ordering | STC | 160 | +186.7 | pass |
 <!-- END generated -->
