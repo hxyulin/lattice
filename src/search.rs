@@ -866,18 +866,22 @@ mod tests {
         // guards correctness is covered by `pruning_preserves_scores`. Every
         // cutoff here is a capture, so this measures MVV-LVA only; the killer
         // and history tables are exercised by `cutoffs_populate_the_tables`.
+        //
+        // The baseline is this position's known perft(4), asserted by
+        // `movegen::tests::perft_reference_positions`. Leaves alone are a lower
+        // bound on the unpruned node count, so the comparison is if anything
+        // stricter than searching an unpruned tree here would be - and it costs
+        // nothing to state a number another test already verifies.
+        const UNPRUNED: u64 = 4_085_603;
         let mut board: Board =
             "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
                 .parse()
                 .unwrap();
         let mut ctx = static_leaf_ctx(4);
-        let (_, ordered_score) = negamax_root(&mut board, 4, &mut ctx).unwrap();
-        let mut plain_nodes = 0;
-        let expected = plain_negamax(&mut board, 4, 0, &mut plain_nodes);
-        assert_eq!(ordered_score, expected);
+        negamax_root(&mut board, 4, &mut ctx).unwrap();
         assert!(
-            ctx.nodes * 64 < plain_nodes,
-            "ordering should cut the tree hard: {} vs {plain_nodes}",
+            ctx.nodes * 64 < UNPRUNED,
+            "ordering should cut the tree hard: {} vs {UNPRUNED}",
             ctx.nodes
         );
     }
