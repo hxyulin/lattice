@@ -909,7 +909,10 @@ mod tests {
 
     #[test]
     fn promotions_outrank_quiets_and_stack_with_capture_value() {
-        let (board, moves) = ordered("3r1k2/4P3/8/8/8/8/8/4K3 w - - 0 1");
+        // The black king stays off f8: an e7 pawn attacks it there, so a
+        // position with White to move would have Black already in check and
+        // `generate_legal` would offer e7xf8 capturing the king.
+        let (board, moves) = ordered("3r3k/4P3/8/8/8/8/8/4K3 w - - 0 1");
         let quiet_promo = *moves
             .iter()
             .find(|mv| {
