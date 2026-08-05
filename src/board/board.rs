@@ -271,7 +271,7 @@ mod tests {
         let mut fens: Vec<String> = vec![
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
             "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            "4k3/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
             "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
             "rnbq1k1r/pp1Pbppp/2p2n2/8/8/6B1/PPP1NPPP/RN1QK2R w KQ - 1 8",
             "r4rk1/1pp1qppp/p1np1n2/8/2B1P3/2N1Q3/PPP2PPP/2KR3R w - - 0 10",
@@ -409,6 +409,9 @@ mod invariants {
     fn sq(s: &str) -> Square {
         Square::new_unchecked((s.as_bytes()[1] - b'1') * 8 + s.as_bytes()[0] - b'a')
     }
+    // catches: the rank count check weakened to accept fewer than eight ranks,
+    // a repeated castling letter accepted, and fullmove 0 accepted. The three
+    // trailing cases are the ones no other test covers.
     #[test]
     fn fen_rejects_malformed_input() {
         for bad in [
@@ -417,6 +420,9 @@ mod invariants {
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0",
             "9/8/8/8/8/8/8/8 w - - 0 1",
             "4k3/8/8/8/8/8/8/4K3 x - - 0 1",
+            "4k3/8/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w KK - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 0",
         ] {
             assert!(Board::from_str(bad).is_err(), "accepted {bad:?}");
         }
@@ -442,6 +448,90 @@ mod invariants {
         }
         assert_eq!(b, before, "multi-ply unwind mismatch");
     }
+    // catches: the halfmove clock not incrementing, not resetting on a pawn
+    // move or on a capture, the fullmove number not advancing after Black or
+    // advancing after White, a double push leaving no en passant square or
+    // setting the wrong one, and a king move revoking only one of its two
+    // castling rights. Asserting the whole FEN rather than one field is what
+    // makes a single case cover all of them.
+    #[test]
+    fn make_updates_every_state_field() {
+        let cases = [
+            (
+                "4k3/8/8/8/8/8/8/4K1N1 w - - 5 9",
+                ("g1", "f3", MoveType::Quiet),
+                "4k3/8/8/8/8/5N2/8/4K3 b - - 6 9",
+            ),
+            (
+                "4k1n1/8/8/8/8/8/8/4K3 b - - 5 9",
+                ("g8", "f6", MoveType::Quiet),
+                "4k3/8/5n2/8/8/8/8/4K3 w - - 6 10",
+            ),
+            (
+                "4k3/8/8/8/8/8/4P3/4K3 w - - 7 9",
+                ("e2", "e3", MoveType::Quiet),
+                "4k3/8/8/8/8/4P3/8/4K3 b - - 0 9",
+            ),
+            (
+                "4k3/8/8/8/8/8/4P3/4K3 w - - 7 9",
+                ("e2", "e4", MoveType::DoublePawnPush),
+                "4k3/8/8/8/4P3/8/8/4K3 b - e3 0 9",
+            ),
+            (
+                "4k3/8/8/8/8/5n2/8/4K1N1 w - - 7 9",
+                ("g1", "f3", MoveType::Capture),
+                "4k3/8/8/8/8/5N2/8/4K3 b - - 0 9",
+            ),
+            (
+                "4k3/8/8/8/8/8/8/R3K2R w KQ - 3 9",
+                ("e1", "f1", MoveType::Quiet),
+                "4k3/8/8/8/8/8/8/R4K1R b - - 4 9",
+            ),
+            (
+                "4k3/8/8/8/8/8/8/R3K2R w KQ - 3 9",
+                ("e1", "g1", MoveType::KingCastle),
+                "4k3/8/8/8/8/8/8/R4RK1 b - - 4 9",
+            ),
+        ];
+        for (fen, (from, to, kind), after) in cases {
+            let mut b = Board::from_str(fen).unwrap();
+            let m = Move::new(sq(from), sq(to), kind);
+            b.make(m);
+            assert_eq!(b.to_string(), after, "make {from}{to} from {fen}");
+            b.unmake(m);
+            assert_eq!(b.to_string(), fen, "unmake {from}{to} from {fen}");
+        }
+    }
+
+    // catches: en passant removing the pawn on the destination square instead
+    // of the one beside the capturer, for either color. `all_move_types_
+    // roundtrip` only unwinds the move, so it passes as long as make and
+    // unmake agree on the same wrong square.
+    #[test]
+    fn en_passant_captures_the_pawn_beside_the_capturer() {
+        for (fen, from, to, after) in [
+            (
+                "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2",
+                "e5",
+                "d6",
+                "4k3/8/3P4/8/8/8/8/4K3 b - - 0 2",
+            ),
+            (
+                "4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 2",
+                "e4",
+                "d3",
+                "4k3/8/8/8/8/3p4/8/4K3 w - - 0 3",
+            ),
+        ] {
+            let mut b = Board::from_str(fen).unwrap();
+            let m = Move::new(sq(from), sq(to), MoveType::EnPassant);
+            b.make(m);
+            assert_eq!(b.to_string(), after, "ep {from}{to}");
+            b.unmake(m);
+            assert_eq!(b.to_string(), fen, "ep unmake {from}{to}");
+        }
+    }
+
     #[test]
     fn ep_right_is_restored_after_unrelated_move() {
         let fen = "4k3/8/8/3pP3/8/8/6P1/4K3 w - d6 0 2";

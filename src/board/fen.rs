@@ -86,7 +86,19 @@ impl FromStr for Board {
                 return Err(FenError);
             }
         }
+        for color in [Color::White, Color::Black] {
+            if (board.pieces(PieceType::King) & board.color(color)).count() != 1 {
+                return Err(FenError);
+            }
+        }
         board.finish_setup();
+        // The side that just moved must not still be attacked: such a position
+        // cannot arise from a legal move, and move generation would answer it
+        // with a king capture rather than a real move.
+        let waiting = board.state().side_to_move.flip();
+        if crate::movegen::is_attacked(&board, board.king_square(waiting), waiting.flip()) {
+            return Err(FenError);
+        }
         Ok(board)
     }
 }
