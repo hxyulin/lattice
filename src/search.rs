@@ -279,9 +279,10 @@ fn qsearch(
     Ok(best)
 }
 
-/// Ordering values, deliberately separate from `eval::VALUES`: retuning the
-/// evaluation should not silently reshape the search tree. The king is a victim
-/// value only, for pseudo-legal safety; it is never actually captured.
+/// Ordering values, deliberately separate from the eval's material values:
+/// retuning the evaluation should not silently reshape the search tree. The
+/// king is a victim value only, for pseudo-legal safety; it is never actually
+/// captured.
 const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 10_000];
 
 /// Sorts captures and promotions ahead of quiets, captures by MVV-LVA (most
@@ -600,7 +601,7 @@ mod tests {
         let fen = "4k3/8/1p6/2p5/3Q4/8/8/4K3 w - - 0 1";
         let mut board: Board = fen.parse().unwrap();
         let stand_pat = evaluate(&board);
-        assert_eq!(stand_pat, 900 - 200);
+        assert!(stand_pat > 0, "white is up a queen for two pawns");
 
         let (score, _) = quiesce(fen);
         assert_eq!(
@@ -624,8 +625,14 @@ mod tests {
     #[test]
     fn stands_pat_in_a_quiet_position() {
         // No captures available: qsearch is just the static eval, one node.
-        let (score, qnodes) = quiesce("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1");
-        assert_eq!(score, 100);
+        let fen = "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1";
+        let board: Board = fen.parse().unwrap();
+        let (score, qnodes) = quiesce(fen);
+        assert_eq!(
+            score,
+            evaluate(&board),
+            "no captures, so score is stand-pat"
+        );
         assert_eq!(qnodes, 1);
     }
 
