@@ -10,5 +10,5 @@ aa32e4c,2026-08-05,"refactor(uci): build attack tables during the uci handshake"
 326df70,2026-08-05,"feat(search): MVV-LVA move ordering",59457
 14c595d,2026-08-05,"docs: record the MVV-LVA SPRT result",
 47b1e17,2026-08-05,"feat(search): quiescence search",384975
-e7e86f1,2026-08-05,"feat(search): SEE pruning in quiescence",181256
-db15952,2026-08-05,"feat(bench): report the qnode share",181256
+b2b9107,2026-08-05,"feat(bench): report the qnode share",384975
+307d744,2026-08-05,"docs: record the quiescence search SPRT result",
