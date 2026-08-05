@@ -41,4 +41,5 @@ authoritative result.
 | alpha-beta pruning | STC | 128 | +339.5 | pass |
 | MVV-LVA move ordering | STC | 160 | +186.7 | pass |
 | quiescence search | STC | 216 | +135.4 | pass |
+| PeSTO tapered piece-square tables | STC | 116 | +251.8 | pass |
 <!-- END generated -->

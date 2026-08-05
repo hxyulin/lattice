@@ -12,3 +12,5 @@ aa32e4c,2026-08-05,"refactor(uci): build attack tables during the uci handshake"
 47b1e17,2026-08-05,"feat(search): quiescence search",384975
 b2b9107,2026-08-05,"feat(bench): report the qnode share",384975
 307d744,2026-08-05,"docs: record the quiescence search SPRT result",
+fc01883,2026-08-05,"docs: refresh bench ledger after moving SEE to its own branch",
+24e3884,2026-08-05,"feat(eval): PeSTO tapered piece-square tables",428564
