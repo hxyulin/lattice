@@ -149,6 +149,10 @@ pub(crate) fn queen_attacks(sq: Square, occ: Bitboard) -> Bitboard {
 mod tests {
     use super::*;
 
+    /// catches: a magic index that collides two distinct blocker sets onto one
+    /// slot, and rook/bishop tables swapped. It covers every blocker subset of
+    /// every square, so it localises the defect to the magic layer instead of
+    /// waiting for a position that happens to expose it.
     #[test]
     fn magic_matches_ray_walker_exhaustively() {
         for i in 0..64 {

@@ -212,17 +212,7 @@ pub fn generate_legal(board: &mut Board, list: &mut MoveList) {
 mod tests {
     use super::perft::perft;
     use super::{MoveList, generate_captures, generate_legal, is_attacked};
-    use crate::{Board, Move};
-
-    const POSITIONS: [&str; 7] = [
-        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
-        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
-        "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
-        "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 0 1",
-        "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
-    ];
+    use crate::{Board, Color, Move, MoveType, Square};
 
     fn sorted(list: &MoveList) -> Vec<Move> {
         let mut moves: Vec<_> = list.iter().copied().collect();
@@ -232,87 +222,295 @@ mod tests {
         moves
     }
 
-    /// Walks every position to `depth`, checking the capture generator against
-    /// the full generator at each node.
-    fn check_captures(board: &mut Board, depth: u32) {
-        let mut legal = MoveList::new();
-        generate_legal(board, &mut legal);
+    fn legal(fen: &str) -> Vec<Move> {
+        super::init();
+        let mut board: Board = fen.parse().unwrap();
+        let mut list = MoveList::new();
+        generate_legal(&mut board, &mut list);
+        sorted(&list)
+    }
 
+    fn has(fen: &str, from: &str, to: &str, kind: MoveType) -> bool {
+        let sq = |s: &str| {
+            let b = s.as_bytes();
+            Square::new(b[0] - b'a', b[1] - b'1').unwrap()
+        };
+        legal(fen)
+            .iter()
+            .any(|mv| mv.from() == sq(from) && mv.to() == sq(to) && mv.move_type() == kind)
+    }
+
+    /// catches: pawn direction and blocker defects - a single push that ignores
+    /// occupancy, a double push that ignores a blocker on either the transit or
+    /// the destination square, and a double push offered from the wrong rank.
+    #[test]
+    fn pawn_pushes_respect_blockers() {
+        assert!(has(
+            "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1",
+            "e2",
+            "e4",
+            MoveType::DoublePawnPush
+        ));
+        assert!(!has(
+            "4k3/8/8/8/4n3/8/4P3/4K3 w - - 0 1",
+            "e2",
+            "e4",
+            MoveType::DoublePawnPush
+        ));
+        assert!(!has(
+            "4k3/8/8/8/8/4n3/4P3/4K3 w - - 0 1",
+            "e2",
+            "e3",
+            MoveType::Quiet
+        ));
+        assert!(!has(
+            "4k3/8/8/8/8/4n3/4P3/4K3 w - - 0 1",
+            "e2",
+            "e4",
+            MoveType::DoublePawnPush
+        ));
+        assert!(!has(
+            "4k3/8/8/8/8/4P3/8/4K3 w - - 0 1",
+            "e3",
+            "e5",
+            MoveType::DoublePawnPush
+        ));
+    }
+
+    /// catches: en passant dropped from the capture target set, or emitted as an
+    /// ordinary capture rather than `MoveType::EnPassant`.
+    #[test]
+    fn en_passant_is_generated_with_its_own_move_type() {
+        assert!(has(
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "e5",
+            "d6",
+            MoveType::EnPassant
+        ));
+        assert!(!has(
+            "4k3/8/8/3pP3/8/8/8/4K3 w - - 0 1",
+            "e5",
+            "d6",
+            MoveType::EnPassant
+        ));
+        assert!(has(
+            "4k3/8/8/8/3pP3/8/8/4K3 b - e3 0 1",
+            "d4",
+            "e3",
+            MoveType::EnPassant
+        ));
+    }
+
+    /// catches: a pawn capture generator missing either file wrap guard. An
+    /// unguarded a-file pawn shifts left onto the h-file of the same rank, and
+    /// an unguarded h-file pawn shifts right onto the a-file of the next.
+    #[test]
+    fn pawn_captures_do_not_wrap_around_the_board() {
+        assert!(
+            !legal("4k3/8/8/8/8/8/P6n/4K3 w - - 0 1")
+                .iter()
+                .any(|mv| mv.is_capture())
+        );
+        assert!(
+            !legal("4k3/8/8/8/8/n7/7P/4K3 w - - 0 1")
+                .iter()
+                .any(|mv| mv.is_capture())
+        );
+        assert!(
+            !legal("4k3/8/8/8/8/8/n6p/4K3 b - - 0 1")
+                .iter()
+                .any(|mv| mv.is_capture())
+        );
+        assert!(has(
+            "4k3/8/8/8/8/1n6/P7/4K3 w - - 0 1",
+            "a2",
+            "b3",
+            MoveType::Capture
+        ));
+    }
+
+    /// catches: promotion rank detection that only handles rank 7 (white) and
+    /// not rank 0, and under-promotion omitted from either the quiet or the
+    /// capture path.
+    #[test]
+    fn promotions_generate_all_four_pieces_on_both_ranks() {
+        let kinds = |fen: &str, from: &str, to: &str| {
+            let sq = |s: &str| {
+                let b = s.as_bytes();
+                Square::new(b[0] - b'a', b[1] - b'1').unwrap()
+            };
+            let mut k: Vec<_> = legal(fen)
+                .iter()
+                .filter(|mv| mv.from() == sq(from) && mv.to() == sq(to))
+                .map(|mv| mv.move_type())
+                .collect();
+            k.sort_unstable_by_key(|t| *t as u8);
+            k
+        };
+        assert_eq!(
+            kinds("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7", "a8"),
+            [
+                MoveType::KnightPromo,
+                MoveType::BishopPromo,
+                MoveType::RookPromo,
+                MoveType::QueenPromo
+            ]
+        );
+        assert_eq!(
+            kinds("4k3/8/8/8/8/8/p7/4K3 b - - 0 1", "a2", "a1"),
+            [
+                MoveType::KnightPromo,
+                MoveType::BishopPromo,
+                MoveType::RookPromo,
+                MoveType::QueenPromo
+            ]
+        );
+        assert_eq!(
+            kinds("1n2k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7", "b8"),
+            [
+                MoveType::KnightPromoCap,
+                MoveType::BishopPromoCap,
+                MoveType::RookPromoCap,
+                MoveType::QueenPromoCap
+            ]
+        );
+    }
+
+    /// catches: every castling legality guard - occupancy on the king transit or
+    /// destination square, the queen-side b-file rook gap, and castling out of,
+    /// through, or into check.
+    #[test]
+    fn castling_legality_guards() {
+        let ok = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
+        assert!(has(ok, "e1", "g1", MoveType::KingCastle));
+        assert!(has(ok, "e1", "c1", MoveType::QueenCastle));
+        assert!(!has(
+            "r3k2r/8/8/8/8/8/8/R3K1NR w KQkq - 0 1",
+            "e1",
+            "g1",
+            MoveType::KingCastle
+        ));
+        assert!(!has(
+            "r3k2r/8/8/8/8/8/8/RN2K2R w KQkq - 0 1",
+            "e1",
+            "c1",
+            MoveType::QueenCastle
+        ));
+        assert!(!has(
+            "r3k2r/8/8/8/8/8/4r3/R3K2R w KQkq - 0 1",
+            "e1",
+            "g1",
+            MoveType::KingCastle
+        ));
+        assert!(!has(
+            "r3k2r/8/8/8/8/8/5r2/R3K2R w KQkq - 0 1",
+            "e1",
+            "g1",
+            MoveType::KingCastle
+        ));
+        assert!(!has(
+            "r3k2r/8/8/8/8/8/6r1/R3K2R w KQkq - 0 1",
+            "e1",
+            "g1",
+            MoveType::KingCastle
+        ));
+        assert!(!has(ok, "e1", "g1", MoveType::Quiet));
+        assert!(!has(
+            "r3k2r/8/8/8/8/8/8/R3K2R w kq - 0 1",
+            "e1",
+            "g1",
+            MoveType::KingCastle
+        ));
+    }
+
+    /// catches: a missing attacker class in `is_attacked`. Deleting the king
+    /// branch fails no other test in the crate: perft only consults it for
+    /// squares that a slider or knight already covers.
+    #[test]
+    fn is_attacked_covers_every_piece_type() {
+        super::init();
+        let sq = |s: &str| {
+            let b = s.as_bytes();
+            Square::new(b[0] - b'a', b[1] - b'1').unwrap()
+        };
+        for (fen, square, by) in [
+            ("4k3/8/8/8/8/5n2/8/4K3 w - - 0 1", "e1", Color::Black),
+            ("4k3/8/8/8/8/8/3p4/4K3 w - - 0 1", "e1", Color::Black),
+            ("4k3/8/8/8/8/8/8/r3K3 w - - 0 1", "e1", Color::Black),
+            ("4k3/8/8/8/1b6/8/8/4K3 w - - 0 1", "e1", Color::Black),
+            ("4k3/8/8/8/8/8/8/q3K3 w - - 0 1", "e1", Color::Black),
+            ("4k3/8/8/8/1q6/8/8/4K3 w - - 0 1", "e1", Color::Black),
+            // A king guards its neighbours; d2 is empty, so the position stays
+            // legal while still exercising the king branch.
+            ("8/8/8/8/8/8/4k3/K7 w - - 0 1", "d2", Color::Black),
+        ] {
+            let board: Board = fen.parse().unwrap();
+            assert!(is_attacked(&board, sq(square), by), "{fen}");
+        }
+        let quiet: Board = "4k3/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        assert!(!is_attacked(&quiet, sq("e1"), Color::Black));
+        assert!(!is_attacked(&quiet, sq("a1"), Color::Black));
+    }
+
+    /// catches: a capture generator that omits non-pawn captures or leaks quiet
+    /// moves into the quiescence set. `tests/movegen.rs` walks a tree for the
+    /// same property; this pins it in one position.
+    #[test]
+    fn captures_are_exactly_the_capturing_legal_moves() {
+        super::init();
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let mut board: Board = fen.parse().unwrap();
         let us = board.state().side_to_move();
-        let mut pseudo_captures = MoveList::new();
-        generate_captures(board, &mut pseudo_captures);
-        let mut legal_captures = MoveList::new();
-        for &mv in pseudo_captures.iter() {
+
+        let mut pseudo = MoveList::new();
+        generate_captures(&board, &mut pseudo);
+        let mut got = MoveList::new();
+        for &mv in pseudo.iter() {
             board.make(mv);
-            let ok = !is_attacked(board, board.king_square(us), us.flip());
+            let ok = !is_attacked(&board, board.king_square(us), us.flip());
             board.unmake(mv);
             if ok {
-                legal_captures.push(mv);
+                got.push(mv);
             }
         }
 
+        let mut all = MoveList::new();
+        generate_legal(&mut board, &mut all);
         let mut expected = MoveList::new();
-        for &mv in legal.iter().filter(|mv| mv.is_capture()) {
+        for &mv in all.iter().filter(|mv| mv.is_capture()) {
             expected.push(mv);
         }
-        assert_eq!(
-            sorted(&legal_captures),
-            sorted(&expected),
-            "capture generator disagrees at {board}"
-        );
-
-        if depth > 1 {
-            for &mv in legal.iter() {
-                board.make(mv);
-                check_captures(board, depth - 1);
-                board.unmake(mv);
-            }
-        }
+        assert!(!expected.is_empty());
+        assert_eq!(sorted(&got), sorted(&expected));
     }
 
+    /// catches: move-set defects in general. Shallow counts over the same
+    /// positions that `tests/movegen.rs` searches deeply, so a broken generator
+    /// fails here in a fraction of a second.
     #[test]
-    fn captures_match_the_full_generator() {
+    fn shallow_perft_reference_positions() {
         super::init();
-        for fen in POSITIONS {
-            let mut board: Board = fen.parse().unwrap();
-            check_captures(&mut board, 3);
-        }
-    }
-
-    #[test]
-    fn perft_reference_positions() {
-        // Manual deep counts: 4865609, 4085603, 674624, 422333, 422333, 2103487, 3894594.
         let cases = [
             (
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                4,
-                197_281,
+                3,
+                8_902,
             ),
             (
                 "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-                3,
-                97_862,
+                2,
+                2_039,
             ),
             ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 3, 2_812),
             (
                 "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
-                3,
-                9_467,
-            ),
-            (
-                "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
-                3,
-                9_467,
+                2,
+                264,
             ),
             (
                 "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 0 1",
-                3,
-                62_379,
-            ),
-            (
-                "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 1",
-                3,
-                89_890,
+                2,
+                1_486,
             ),
         ];
         for (fen, depth, expected) in cases {
