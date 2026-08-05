@@ -71,45 +71,64 @@ impl Index<usize> for MoveList {
     }
 }
 
-fn add_targets(
-    list: &mut MoveList,
-    from: Square,
-    attacks: Bitboard,
-    them: Bitboard,
+/// Calls `f` with every non-pawn piece of `us` and the squares it attacks.
+fn for_each_attack(
+    board: &Board,
+    us: Bitboard,
     occ: Bitboard,
+    mut f: impl FnMut(Square, Bitboard),
 ) {
-    for to in attacks & them {
-        list.push(Move::new(from, to, MoveType::Capture));
+    for from in board.pieces(PieceType::Knight) & us {
+        f(from, KNIGHT[from.index() as usize]);
     }
-    for to in attacks & !occ {
-        list.push(Move::new(from, to, MoveType::Quiet));
+    for from in board.pieces(PieceType::Bishop) & us {
+        f(from, bishop_attacks(from, occ));
+    }
+    for from in board.pieces(PieceType::Rook) & us {
+        f(from, rook_attacks(from, occ));
+    }
+    for from in board.pieces(PieceType::Queen) & us {
+        f(from, queen_attacks(from, occ));
+    }
+    for from in board.pieces(PieceType::King) & us {
+        f(from, KING[from.index() as usize]);
     }
 }
 
 /// Generates pseudo-legal moves for the side to move.
 pub fn generate_pseudo(board: &Board, list: &mut MoveList) {
     let us_color = board.state().side_to_move();
-    let them_color = us_color.flip();
     let us = board.color(us_color);
-    let them = board.color(them_color);
+    let them = board.color(us_color.flip());
     let occ = board.occupied();
     pawn::generate(board, list, board.pieces(PieceType::Pawn) & us, them);
-    for from in board.pieces(PieceType::Knight) & us {
-        add_targets(list, from, KNIGHT[from.index() as usize], them, occ);
-    }
-    for from in board.pieces(PieceType::Bishop) & us {
-        add_targets(list, from, bishop_attacks(from, occ), them, occ);
-    }
-    for from in board.pieces(PieceType::Rook) & us {
-        add_targets(list, from, rook_attacks(from, occ), them, occ);
-    }
-    for from in board.pieces(PieceType::Queen) & us {
-        add_targets(list, from, queen_attacks(from, occ), them, occ);
-    }
-    for from in board.pieces(PieceType::King) & us {
-        add_targets(list, from, KING[from.index() as usize], them, occ);
-    }
+    for_each_attack(board, us, occ, |from, attacks| {
+        for to in attacks & them {
+            list.push(Move::new(from, to, MoveType::Capture));
+        }
+        for to in attacks & !occ {
+            list.push(Move::new(from, to, MoveType::Quiet));
+        }
+    });
     generate_castling(board, list, us_color);
+}
+
+/// Generates pseudo-legal captures and promotion captures for the side to move.
+///
+/// This is the quiescence-search move set. Quiet promotions are deliberately
+/// excluded.
+// ponytail: captures only. Add quiet promotions if they SPRT positive.
+pub fn generate_captures(board: &Board, list: &mut MoveList) {
+    let us_color = board.state().side_to_move();
+    let us = board.color(us_color);
+    let them = board.color(us_color.flip());
+    let occ = board.occupied();
+    pawn::generate_captures(board, list, board.pieces(PieceType::Pawn) & us, them);
+    for_each_attack(board, us, occ, |from, attacks| {
+        for to in attacks & them {
+            list.push(Move::new(from, to, MoveType::Capture));
+        }
+    });
 }
 
 fn generate_castling(board: &Board, list: &mut MoveList, us: Color) {
@@ -192,7 +211,73 @@ pub fn generate_legal(board: &mut Board, list: &mut MoveList) {
 #[cfg(test)]
 mod tests {
     use super::perft::perft;
-    use crate::Board;
+    use super::{MoveList, generate_captures, generate_legal, is_attacked};
+    use crate::{Board, Move};
+
+    const POSITIONS: [&str; 7] = [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+        "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+        "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 0 1",
+        "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+    ];
+
+    fn sorted(list: &MoveList) -> Vec<Move> {
+        let mut moves: Vec<_> = list.iter().copied().collect();
+        moves.sort_unstable_by_key(|mv| {
+            (mv.move_type() as u16) << 12 | (mv.from().index() as u16) << 6 | mv.to().index() as u16
+        });
+        moves
+    }
+
+    /// Walks every position to `depth`, checking the capture generator against
+    /// the full generator at each node.
+    fn check_captures(board: &mut Board, depth: u32) {
+        let mut legal = MoveList::new();
+        generate_legal(board, &mut legal);
+
+        let us = board.state().side_to_move();
+        let mut pseudo_captures = MoveList::new();
+        generate_captures(board, &mut pseudo_captures);
+        let mut legal_captures = MoveList::new();
+        for &mv in pseudo_captures.iter() {
+            board.make(mv);
+            let ok = !is_attacked(board, board.king_square(us), us.flip());
+            board.unmake(mv);
+            if ok {
+                legal_captures.push(mv);
+            }
+        }
+
+        let mut expected = MoveList::new();
+        for &mv in legal.iter().filter(|mv| mv.is_capture()) {
+            expected.push(mv);
+        }
+        assert_eq!(
+            sorted(&legal_captures),
+            sorted(&expected),
+            "capture generator disagrees at {board}"
+        );
+
+        if depth > 1 {
+            for &mv in legal.iter() {
+                board.make(mv);
+                check_captures(board, depth - 1);
+                board.unmake(mv);
+            }
+        }
+    }
+
+    #[test]
+    fn captures_match_the_full_generator() {
+        super::init();
+        for fen in POSITIONS {
+            let mut board: Board = fen.parse().unwrap();
+            check_captures(&mut board, 3);
+        }
+    }
 
     #[test]
     fn perft_reference_positions() {

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
-use crate::movegen::{MoveList, generate_legal, is_attacked};
+use crate::movegen::{MoveList, generate_captures, generate_legal, is_attacked};
 use crate::uci::move_text;
 use crate::{Board, Move, MoveType, Square};
 
@@ -15,6 +15,9 @@ use crate::{Board, Move, MoveType, Square};
 const CHECK_INTERVAL: u64 = 256;
 const MATE: i32 = 30_000;
 const INFINITY: i32 = 31_000;
+/// Quiescence ply ceiling. Deep enough for any real exchange sequence, and a
+/// hard bound keeps the bench node count finite and deterministic.
+const MAX_QPLY: u32 = 8;
 
 /// Constraints on a single search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,7 +43,18 @@ pub struct Limits {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SearchResult {
     pub(crate) best_move: Option<Move>,
+    /// Main-search nodes, excluding quiescence.
     pub(crate) nodes: u64,
+    /// Quiescence nodes.
+    pub(crate) qnodes: u64,
+}
+
+impl SearchResult {
+    /// Every node visited, main search plus quiescence. This is what `info
+    /// nodes` and the bench signature report.
+    pub(crate) fn total(&self) -> u64 {
+        self.nodes + self.qnodes
+    }
 }
 
 struct Ctx<'a> {
@@ -48,7 +62,12 @@ struct Ctx<'a> {
     stop: &'a AtomicBool,
     deadline: Option<Instant>,
     nodes: u64,
+    qnodes: u64,
     iteration_depth: u32,
+    /// Whether leaves run quiescence. Always true in play; the alpha-beta
+    /// equivalence tests turn it off so their unpruned oracle stays cheap.
+    #[cfg(test)]
+    quiesce_leaves: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,7 +103,10 @@ pub(crate) fn search_inner(
         stop,
         deadline,
         nodes: 0,
+        qnodes: 0,
         iteration_depth: 1,
+        #[cfg(test)]
+        quiesce_leaves: true,
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
@@ -102,7 +124,14 @@ pub(crate) fn search_inner(
         };
         best_move = candidate;
         if emit_info {
-            write_info(output, depth, score, ctx.nodes, start.elapsed(), candidate);
+            write_info(
+                output,
+                depth,
+                score,
+                ctx.total(),
+                start.elapsed(),
+                candidate,
+            );
         }
         if candidate.is_none() {
             break;
@@ -112,6 +141,7 @@ pub(crate) fn search_inner(
     SearchResult {
         best_move,
         nodes: ctx.nodes,
+        qnodes: ctx.qnodes,
     }
 }
 
@@ -169,7 +199,11 @@ fn negamax(
     ctx.nodes += 1;
     ctx.check_abort()?;
     if depth == 0 {
-        return Ok(evaluate(board));
+        #[cfg(test)]
+        if !ctx.quiesce_leaves {
+            return Ok(evaluate(board));
+        }
+        return qsearch(board, ply, 0, alpha, beta, ctx);
     }
     let mut moves = MoveList::new();
     generate_legal(board, &mut moves);
@@ -182,6 +216,68 @@ fn negamax(
         board.make(mv);
         let result = negamax(board, depth - 1, ply + 1, -beta, -alpha, ctx);
         board.unmake(mv);
+        best = best.max(-result?);
+        alpha = alpha.max(best);
+        if alpha >= beta {
+            break;
+        }
+    }
+    Ok(best)
+}
+
+/// Searches the capture sequences leaving a leaf position until it is quiet,
+/// so the score reflects settled material rather than a position caught
+/// mid-exchange.
+///
+/// `qply` counts plies since the leaf and is bounded by `MAX_QPLY`; `ply`
+/// continues from the main search so mate scores keep their distance.
+fn qsearch(
+    board: &mut Board,
+    ply: u32,
+    qply: u32,
+    mut alpha: i32,
+    beta: i32,
+    ctx: &mut Ctx<'_>,
+) -> Result<i32, Aborted> {
+    ctx.qnodes += 1;
+    ctx.check_abort()?;
+    if qply >= MAX_QPLY {
+        return Ok(evaluate(board));
+    }
+    let us = board.state().side_to_move();
+    let in_check = is_attacked(board, board.king_square(us), us.flip());
+
+    let mut moves = MoveList::new();
+    let mut best = -INFINITY;
+    if in_check {
+        // No stand-pat in check: the side to move must answer it, and a quiet
+        // king move may be the only answer, so this needs every legal move.
+        generate_legal(board, &mut moves);
+        if moves.is_empty() {
+            return Ok(terminal_score(board, ply));
+        }
+    } else {
+        // Stand-pat: declining to capture is always an option, so the static
+        // eval is a lower bound on this node.
+        best = evaluate(board);
+        if best >= beta {
+            return Ok(best);
+        }
+        alpha = alpha.max(best);
+        generate_captures(board, &mut moves);
+    }
+    order_moves(board, &mut moves);
+
+    for &mv in moves.iter() {
+        board.make(mv);
+        // Captures come back pseudo-legal. Filtering after `make` rather than
+        // up front means a beta cutoff skips the checks it never needed.
+        let legal = in_check || !is_attacked(board, board.king_square(us), us.flip());
+        let result = legal.then(|| qsearch(board, ply + 1, qply + 1, -beta, -alpha, ctx));
+        board.unmake(mv);
+        let Some(result) = result else {
+            continue;
+        };
         best = best.max(-result?);
         alpha = alpha.max(best);
         if alpha >= beta {
@@ -233,8 +329,15 @@ fn victim_square(mv: Move) -> Option<Square> {
 }
 
 impl Ctx<'_> {
+    /// Every node visited. Clock and node-limit checks use this rather than
+    /// `nodes` alone: quiescence is most of the tree, so counting main nodes
+    /// only would leave thousands of nodes between two clock checks.
+    fn total(&self) -> u64 {
+        self.nodes + self.qnodes
+    }
+
     fn check_abort(&self) -> Result<(), Aborted> {
-        if self.iteration_depth == 1 || !self.nodes.is_multiple_of(CHECK_INTERVAL) {
+        if self.iteration_depth == 1 || !self.total().is_multiple_of(CHECK_INTERVAL) {
             return Ok(());
         }
         if self.out_of_time() {
@@ -246,7 +349,7 @@ impl Ctx<'_> {
 
     fn out_of_time(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
-            || self.limits.nodes.is_some_and(|limit| self.nodes >= limit)
+            || self.limits.nodes.is_some_and(|limit| self.total() >= limit)
             || self
                 .deadline
                 .is_some_and(|deadline| Instant::now() >= deadline)
@@ -312,7 +415,37 @@ mod tests {
         (result, String::from_utf8(output).unwrap())
     }
 
-    /// Unpruned negamax, kept as the oracle for `pruning_preserves_scores`.
+    fn test_ctx(iteration_depth: u32) -> Ctx<'static> {
+        // Leaked so the oracle and the real search can share a `Ctx` shape
+        // without threading a lifetime through every test helper.
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        Ctx {
+            limits: Limits::default(),
+            stop,
+            deadline: None,
+            nodes: 0,
+            qnodes: 0,
+            iteration_depth,
+            quiesce_leaves: true,
+        }
+    }
+
+    /// A `Ctx` whose leaves are the static eval, matching `plain_negamax`.
+    fn static_leaf_ctx(iteration_depth: u32) -> Ctx<'static> {
+        Ctx {
+            quiesce_leaves: false,
+            ..test_ctx(iteration_depth)
+        }
+    }
+
+    /// Unpruned negamax with a static-eval leaf, the oracle for the alpha-beta
+    /// equivalence tests.
+    ///
+    /// Deliberately does not run quiescence: pruning equivalence is a property
+    /// of the main search, and quiescence is a subroutine both sides would call
+    /// identically. Running it here would multiply an already-unpruned tree by
+    /// the whole quiescence subtree for no extra coverage - the qsearch tests
+    /// below check that directly.
     fn plain_negamax(board: &mut Board, depth: u32, ply: u32, nodes: &mut u64) -> i32 {
         *nodes += 1;
         if depth == 0 {
@@ -346,13 +479,7 @@ mod tests {
             let mut plain_nodes = 0;
             let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
 
-            let mut ctx = Ctx {
-                limits: Limits::default(),
-                stop: &AtomicBool::new(false),
-                deadline: None,
-                nodes: 0,
-                iteration_depth: 3,
-            };
+            let mut ctx = static_leaf_ctx(3);
             let (best_move, score) = negamax_root(&mut board, 3, &mut ctx).unwrap();
             assert_eq!(score, expected, "score changed for {fen}");
             assert!(best_move.is_some());
@@ -448,17 +575,12 @@ mod tests {
     fn ordering_reduces_the_tree() {
         // Ordering must pay for itself in nodes; the score equality that
         // guards correctness is covered by `pruning_preserves_scores`.
+        //
         let mut board: Board =
             "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
                 .parse()
                 .unwrap();
-        let mut ctx = Ctx {
-            limits: Limits::default(),
-            stop: &AtomicBool::new(false),
-            deadline: None,
-            nodes: 0,
-            iteration_depth: 4,
-        };
+        let mut ctx = static_leaf_ctx(4);
         let (_, ordered_score) = negamax_root(&mut board, 4, &mut ctx).unwrap();
         let mut plain_nodes = 0;
         let expected = plain_negamax(&mut board, 4, 0, &mut plain_nodes);
@@ -468,6 +590,73 @@ mod tests {
             "ordering should cut the tree hard: {} vs {plain_nodes}",
             ctx.nodes
         );
+    }
+
+    fn quiesce(fen: &str) -> (i32, u64) {
+        crate::movegen::init();
+        let mut board: Board = fen.parse().unwrap();
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut board, 0, 0, -INFINITY, INFINITY, &mut ctx).unwrap();
+        (score, ctx.qnodes)
+    }
+
+    #[test]
+    fn resolves_a_hanging_capture_that_static_eval_misreads() {
+        // The white queen can take a pawn on c5 that the b6 pawn defends.
+        // A leaf evaluated right after Qxc5 reads +800; quiescence plays the
+        // recapture out, sees the queen lost, and keeps the stand-pat instead.
+        let fen = "4k3/8/1p6/2p5/3Q4/8/8/4K3 w - - 0 1";
+        let mut board: Board = fen.parse().unwrap();
+        let stand_pat = evaluate(&board);
+        assert_eq!(stand_pat, 900 - 200);
+
+        let (score, _) = quiesce(fen);
+        assert_eq!(
+            score,
+            stand_pat,
+            "qsearch should decline the capture, not score it at {}",
+            stand_pat + 100
+        );
+
+        // The main search must inherit that refutation.
+        crate::movegen::init();
+        let mut ctx = test_ctx(2);
+        let (best, _) = negamax_root(&mut board, 2, &mut ctx).unwrap();
+        assert_ne!(
+            best.map(move_text).as_deref(),
+            Some("d4c5"),
+            "should not grab a defended pawn with the queen"
+        );
+    }
+
+    #[test]
+    fn stands_pat_in_a_quiet_position() {
+        // No captures available: qsearch is just the static eval, one node.
+        let (score, qnodes) = quiesce("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1");
+        assert_eq!(score, 100);
+        assert_eq!(qnodes, 1);
+    }
+
+    #[test]
+    fn qply_bound_terminates_a_long_exchange() {
+        // A stack of mutual captures deeper than MAX_QPLY: the bound is what
+        // stops this, so it must return rather than run away.
+        let (_, qnodes) = quiesce("3rr1k1/8/8/3pp3/3PP3/8/8/3RR1K1 w - - 0 1");
+        assert!(qnodes > 1, "position has captures to search");
+        assert!(qnodes < 100_000, "qply bound should contain it: {qnodes}");
+    }
+
+    #[test]
+    fn searches_evasions_and_finds_mate_in_check() {
+        // Back-rank mate: king boxed in by its own pawns. In check with no
+        // legal move, qsearch must return a mate score - it cannot find the
+        // escape from captures alone, and cannot stand pat in check.
+        let (score, _) = quiesce("R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1");
+        assert_eq!(score, -MATE, "checkmate should score as mate at ply 0");
+
+        // Same check, but h7 is open: the king walks out, so this is no mate.
+        let (score, _) = quiesce("R5k1/5pp1/8/8/8/8/8/6K1 b - - 0 1");
+        assert!(score > -MATE + 1000, "king has an escape, got {score}");
     }
 
     #[test]
@@ -496,6 +685,7 @@ mod tests {
         let (first, _) = run(fen, 2);
         let (second, _) = run(fen, 2);
         assert_eq!(first.nodes, second.nodes);
+        assert_eq!(first.qnodes, second.qnodes);
         assert_eq!(first.best_move, second.best_move);
         let mut board: Board = fen.parse().unwrap();
         let mut legal = MoveList::new();
@@ -569,5 +759,6 @@ mod tests {
         );
         assert!(result.best_move.is_some());
         assert_eq!(result.nodes, 20);
+        assert!(result.qnodes > 0, "each leaf runs quiescence");
     }
 }

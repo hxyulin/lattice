@@ -45,7 +45,7 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
             &mut std::io::sink(),
             false,
         )
-        .nodes;
+        .total();
     }
     let millis = start.elapsed().as_millis().max(1);
     let nps = u128::from(nodes) * 1000 / millis;

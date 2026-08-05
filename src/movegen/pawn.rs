@@ -47,10 +47,6 @@ fn push_moves(list: &mut MoveList, targets: Bitboard, delta: i8, capture: bool) 
 
 pub(crate) fn generate(board: &Board, list: &mut MoveList, pawns: Bitboard, them: Bitboard) {
     let occ = board.occupied().bits();
-    let ep = board
-        .state()
-        .en_passant()
-        .map_or(0, |square| 1u64 << square.index());
     match board.state().side_to_move() {
         Color::White => {
             let single = (pawns.bits() << 8) & !occ;
@@ -63,10 +59,6 @@ pub(crate) fn generate(board: &Board, list: &mut MoveList, pawns: Bitboard, them
                     MoveType::DoublePawnPush,
                 ));
             }
-            let left = ((pawns.bits() & !FILE_A) << 7) & (them.bits() | ep);
-            let right = ((pawns.bits() & !FILE_H) << 9) & (them.bits() | ep);
-            push_captures(list, Bitboard::new(left), 7, ep);
-            push_captures(list, Bitboard::new(right), 9, ep);
         }
         Color::Black => {
             let single = (pawns.bits() >> 8) & !occ;
@@ -79,12 +71,38 @@ pub(crate) fn generate(board: &Board, list: &mut MoveList, pawns: Bitboard, them
                     MoveType::DoublePawnPush,
                 ));
             }
-            let left = ((pawns.bits() & !FILE_A) >> 9) & (them.bits() | ep);
-            let right = ((pawns.bits() & !FILE_H) >> 7) & (them.bits() | ep);
-            push_captures(list, Bitboard::new(left), -9, ep);
-            push_captures(list, Bitboard::new(right), -7, ep);
         }
     }
+    generate_captures(board, list, pawns, them);
+}
+
+pub(crate) fn generate_captures(
+    board: &Board,
+    list: &mut MoveList,
+    pawns: Bitboard,
+    them: Bitboard,
+) {
+    let ep = board
+        .state()
+        .en_passant()
+        .map_or(0, |square| 1u64 << square.index());
+    let targets = them.bits() | ep;
+    let (left, right, left_delta, right_delta) = match board.state().side_to_move() {
+        Color::White => (
+            (pawns.bits() & !FILE_A) << 7,
+            (pawns.bits() & !FILE_H) << 9,
+            7,
+            9,
+        ),
+        Color::Black => (
+            (pawns.bits() & !FILE_A) >> 9,
+            (pawns.bits() & !FILE_H) >> 7,
+            -9,
+            -7,
+        ),
+    };
+    push_captures(list, Bitboard::new(left & targets), left_delta, ep);
+    push_captures(list, Bitboard::new(right & targets), right_delta, ep);
 }
 
 fn push_captures(list: &mut MoveList, targets: Bitboard, delta: i8, ep: u64) {
