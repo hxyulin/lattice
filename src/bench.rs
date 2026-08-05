@@ -32,9 +32,10 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
     let start = Instant::now();
     let stop = AtomicBool::new(false);
     let mut nodes = 0;
+    let mut qnodes = 0;
     for fen in POSITIONS {
         let mut board: Board = fen.parse().expect("bench FEN must be valid");
-        nodes += search_inner(
+        let result = search_inner(
             &mut board,
             Limits {
                 depth: Some(depth),
@@ -44,14 +45,23 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
             &stop,
             &mut std::io::sink(),
             false,
-        )
-        .total();
+        );
+        nodes += result.nodes;
+        qnodes += result.qnodes;
     }
+    let total = nodes + qnodes;
     let millis = start.elapsed().as_millis().max(1);
-    let nps = u128::from(nodes) * 1000 / millis;
-    let _ = writeln!(output, "Nodes searched: {nodes}");
+    let nps = u128::from(total) * 1000 / millis;
+    // `Nodes searched:` stays the total on its own line: ChessEval parses it
+    // as the bench signature, so the split goes on a separate line.
+    let _ = writeln!(output, "Nodes searched: {total}");
     let _ = writeln!(output, "Nodes/second: {nps}");
-    nodes
+    let _ = writeln!(
+        output,
+        "Qnodes: {qnodes} ({}% of total), main nodes: {nodes}",
+        qnodes * 100 / total.max(1)
+    );
+    total
 }
 
 #[cfg(test)]
@@ -75,6 +85,26 @@ mod tests {
             text.lines()
                 .any(|line| line == format!("Nodes searched: {first_nodes}"))
         );
+        // Every line but the nps one, which is a speed reading and varies.
+        let counts = |text: &str| {
+            text.lines()
+                .filter(|line| !line.starts_with("Nodes/second:"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            counts(&String::from_utf8(second).unwrap()),
+            counts(&text),
+            "the qnode split must be deterministic too"
+        );
+        let qnodes = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Qnodes: "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .expect("bench should report a qnode count");
+        assert!(qnodes > 0, "every leaf runs quiescence");
+        assert!(qnodes < first_nodes, "qnodes are part of the total");
     }
 
     #[test]

@@ -49,14 +49,6 @@ pub(crate) struct SearchResult {
     pub(crate) qnodes: u64,
 }
 
-impl SearchResult {
-    /// Every node visited, main search plus quiescence. This is what `info
-    /// nodes` and the bench signature report.
-    pub(crate) fn total(&self) -> u64 {
-        self.nodes + self.qnodes
-    }
-}
-
 struct Ctx<'a> {
     limits: Limits,
     stop: &'a AtomicBool,
