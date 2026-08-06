@@ -5,7 +5,9 @@
 //! code in `src/movegen`.
 
 use lattice::movegen::perft::{perft, perft_divide};
-use lattice::movegen::{MoveList, generate_captures, generate_legal, is_attacked};
+use lattice::movegen::{
+    MoveList, generate_captures, generate_legal, generate_pseudo, generate_quiets, is_attacked,
+};
 use lattice::{Board, Move};
 
 const POSITIONS: [&str; 7] = [
@@ -72,6 +74,56 @@ fn captures_match_the_full_generator() {
     for fen in POSITIONS {
         let mut board: Board = fen.parse().unwrap();
         check_captures(&mut board, 3);
+    }
+}
+
+/// catches: the staged generator dropping or duplicating a move - a quiet
+/// promotion counted as a capture, castling emitted in both halves, a pawn push
+/// lost when the two halves were split apart. The staged search relies on
+/// `Captures` and `Quiets` partitioning `All` exactly; if they do not, the
+/// search silently never considers some moves.
+#[test]
+fn captures_and_quiets_partition_the_full_move_set() {
+    lattice::movegen::init();
+    for fen in POSITIONS {
+        let mut board: Board = fen.parse().unwrap();
+        check_partition(&mut board, 3);
+    }
+}
+
+fn check_partition(board: &mut Board, depth: u32) {
+    let mut full = MoveList::new();
+    generate_pseudo(board, &mut full);
+
+    let mut split = MoveList::new();
+    generate_captures(board, &mut split);
+    let captures = split.len();
+    generate_quiets(board, &mut split);
+
+    assert_eq!(
+        sorted(&full),
+        sorted(&split),
+        "staged generation disagrees with generate_pseudo at {board}"
+    );
+    // A move landing in both halves would still pass the set comparison above
+    // if another were missing, and would be searched twice.
+    assert!(
+        split.iter().take(captures).all(|mv| mv.is_capture()),
+        "non-capture in the capture half at {board}"
+    );
+    assert!(
+        split.iter().skip(captures).all(|mv| !mv.is_capture()),
+        "capture in the quiet half at {board}"
+    );
+
+    if depth > 1 {
+        let mut legal = MoveList::new();
+        generate_legal(board, &mut legal);
+        for &mv in legal.iter() {
+            board.make(mv);
+            check_partition(board, depth - 1);
+            board.unmake(mv);
+        }
     }
 }
 
