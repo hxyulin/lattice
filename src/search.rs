@@ -83,6 +83,12 @@ struct Ctx<'a> {
     pvs: bool,
     #[cfg(test)]
     aspiration: bool,
+    /// Whether a stored score may cut the search. Always true in play; the
+    /// aspiration equivalence test turns it off, because a table that returns
+    /// an entry deeper than the one asked for makes a depth mean "at least
+    /// this deep", leaving no fixed-depth value to compare against.
+    #[cfg(test)]
+    tt_cuts: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +138,8 @@ pub(crate) fn search_inner(
         pvs: true,
         #[cfg(test)]
         aspiration: true,
+        #[cfg(test)]
+        tt_cuts: true,
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
@@ -297,6 +305,7 @@ fn negamax(
     // reached and the score freezes until the iteration passes the stored
     // depth. Deeper plies have a real parent to return to and may cut freely.
     if let Some(entry) = entry
+        && ctx.tt_cuts_enabled()
         && entry.depth >= depth
         && ply > 1
     {
@@ -539,6 +548,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn tt_cuts_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.tt_cuts
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     /// Every node visited. Clock and node-limit checks use this rather than
     /// `nodes` alone: quiescence is most of the tree, so counting main nodes
     /// only would leave thousands of nodes between two clock checks.
@@ -686,6 +706,7 @@ mod tests {
             quiesce_leaves: true,
             pvs: true,
             aspiration: true,
+            tt_cuts: true,
         }
     }
 
@@ -718,10 +739,17 @@ mod tests {
     /// Iterative deepening to `depth`, the loop in `search_inner` with the
     /// aspiration toggle exposed. Returns the final score and the node count.
     fn deepen(fen: &str, depth: u32, aspiration: bool) -> (i32, u64) {
+        deepen_with(fen, depth, aspiration, true)
+    }
+
+    /// `tt_cuts` off makes the returned score the true value for `depth`, which
+    /// is what the equivalence test needs; see `aspiration_preserves_scores`.
+    fn deepen_with(fen: &str, depth: u32, aspiration: bool, tt_cuts: bool) -> (i32, u64) {
         crate::movegen::init();
         let mut board: Board = fen.parse().unwrap();
         let mut ctx = test_ctx(1);
         ctx.aspiration = aspiration;
+        ctx.tt_cuts = tt_cuts;
         let mut prev_score = None;
         for iteration in 1..=depth {
             ctx.iteration_depth = iteration;
@@ -738,10 +766,26 @@ mod tests {
         // bounds to the table, and a sound bound cannot move a minimax value.
         // Exact equality, not a tolerance - a wrong root bound, a wrong
         // re-search window, or an accepted fail-low all show up here.
+        //
+        // TT cuts are off, and that is load-bearing rather than incidental.
+        // `store` prefers depth, so a warm table answers a depth-N probe with
+        // a deeper entry whenever it has one: a depth-N search is really "at
+        // least N, deeper where the table knows more", and two runs that
+        // populate the table differently have no common value to be equal to.
+        // That is the table working, not aspiration failing - with cuts on,
+        // plain iterative deepening already disagrees with a one-shot search
+        // of the same depth. Turning cuts off restores a fixed depth to
+        // meaning one number, which is the only setting where this asserts
+        // anything about aspiration.
         for fen in TACTICAL {
-            let (narrow, _) = deepen(fen, 6, true);
-            let (wide, _) = deepen(fen, 6, false);
-            assert_eq!(narrow, wide, "aspiration changed the score for {fen}");
+            for depth in 4..=8 {
+                let (narrow, _) = deepen_with(fen, depth, true, false);
+                let (wide, _) = deepen_with(fen, depth, false, false);
+                assert_eq!(
+                    narrow, wide,
+                    "aspiration changed the score for {fen} at depth {depth}"
+                );
+            }
         }
     }
 
@@ -760,6 +804,41 @@ mod tests {
             differing > 0,
             "aspiration never fired: node counts identical"
         );
+    }
+
+    #[test]
+    fn a_warm_table_makes_a_depth_a_floor_not_an_exact_depth() {
+        // Pins the property that makes `aspiration_preserves_scores` disable
+        // TT cuts, and that cost an investigation once already: a shared table
+        // returns entries deeper than the probe asked for, so two searches of
+        // the same nominal depth need not agree - with no bug anywhere.
+        //
+        // Asserted as a divergence rather than an equality, because the claim
+        // being pinned is that fixed-depth equality is FALSE here. If a future
+        // change makes this pass, the invariant became real and the cuts in
+        // that test can come back on.
+        crate::movegen::init();
+        let fen = "8/8/8/8/8/8/6k1/4K2R w K - 0 1";
+        let iterative = deepen(fen, 8, false).0;
+        let mut board: Board = fen.parse().unwrap();
+        let mut ctx = test_ctx(8);
+        let one_shot = negamax_root(&mut board, 8, -INFINITY, INFINITY, &mut ctx)
+            .unwrap()
+            .1;
+        assert_ne!(
+            iterative, one_shot,
+            "a fixed depth is expected to mean 'at least this deep' with a warm table"
+        );
+        // Same two searches with cuts off do agree, which is what isolates the
+        // cause to entry reuse rather than to ordering or the killer tables.
+        let iterative = deepen_with(fen, 8, false, false).0;
+        let mut board: Board = fen.parse().unwrap();
+        let mut ctx = test_ctx(8);
+        ctx.tt_cuts = false;
+        let one_shot = negamax_root(&mut board, 8, -INFINITY, INFINITY, &mut ctx)
+            .unwrap()
+            .1;
+        assert_eq!(iterative, one_shot, "without cuts a depth is exact");
     }
 
     #[test]
