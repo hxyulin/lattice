@@ -33,3 +33,5 @@ d4652f5,2026-08-06,"docs: refresh bench ledger after moving aspiration to its ow
 51d7c4b,2026-08-06,"perf(search): compute each ordering key once per move",186403
 35ae6d2,2026-08-06,"docs: record the move ordering SPRT result",
 3ad26fd,2026-08-06,"perf(search): filter legality in the search loop, not up front",186403
+444a51f,2026-08-06,"docs: refresh bench ledger after lazy legality",
+5ebe61d,2026-08-06,"feat(search): search shape counters behind a profiling feature",186403
