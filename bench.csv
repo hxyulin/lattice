@@ -35,3 +35,5 @@ d4652f5,2026-08-06,"docs: refresh bench ledger after moving aspiration to its ow
 3ad26fd,2026-08-06,"perf(search): filter legality in the search loop, not up front",186403
 444a51f,2026-08-06,"docs: refresh bench ledger after lazy legality",
 5ebe61d,2026-08-06,"feat(search): search shape counters behind a profiling feature",186403
+5a25dc1,2026-08-06,"docs: refresh bench ledger after the profiling counters",
+4f24497,2026-08-06,"feat(tt): report whether a probe missed on an empty slot or a collision",186403
