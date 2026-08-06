@@ -97,10 +97,17 @@ fn write_profile(output: &mut dyn Write, profile: SearchProfile, qnodes: u64) {
     write_distribution(output, "qsearch bounds high/low/exact", &profile.q_bounds);
     let _ = writeln!(
         output,
-        "info string profile TT probes {} hits {} ({:.2}%) usable cutoffs {} ({:.2}% of hits) stores {} ({:.2}% of probes)",
+        "info string profile TT probes {} hits {} ({:.2}%) collisions {} ({:.2}%) empty {} ({:.2}%) usable cutoffs {} ({:.2}% of hits) stores {} ({:.2}% of probes)",
         profile.tt_probes,
         profile.tt_hits,
         percent(profile.tt_hits, profile.tt_probes),
+        profile.tt_collisions,
+        percent(profile.tt_collisions, profile.tt_probes),
+        profile.tt_probes - profile.tt_hits - profile.tt_collisions,
+        percent(
+            profile.tt_probes - profile.tt_hits - profile.tt_collisions,
+            profile.tt_probes
+        ),
         profile.tt_cutoffs,
         percent(profile.tt_cutoffs, profile.tt_hits),
         profile.tt_stores,

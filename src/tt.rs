@@ -30,6 +30,17 @@ impl Bound {
     }
 }
 
+/// Why a probe found what it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Miss {
+    /// The slot held this position.
+    Hit,
+    /// The slot was never written, so nothing was displaced.
+    Empty,
+    /// The slot held a different position, which this one would evict.
+    Collision,
+}
+
 /// A probed entry.
 #[derive(Debug, Clone, Copy)]
 pub struct Entry {
@@ -95,18 +106,32 @@ impl TranspositionTable {
 
     /// Returns the entry stored for `key`, if the slot still holds it.
     pub fn probe(&self, key: u64) -> Option<Entry> {
+        self.probe_kind(key).0
+    }
+
+    /// `probe`, plus why a miss missed.
+    ///
+    /// An empty slot means the table has room; an occupied slot holding
+    /// another position means it does not, and that entries are evicting each
+    /// other. The two want opposite responses, so a bare hit rate cannot tell
+    /// whether the table is too small.
+    pub fn probe_kind(&self, key: u64) -> (Option<Entry>, Miss) {
         let slot = &self.slots[self.index(key)];
         let stored_key = slot.0.load(Ordering::Relaxed);
         let data = slot.1.load(Ordering::Relaxed);
-        if stored_key ^ data != key || data == 0 {
-            return None;
+        if data == 0 {
+            return (None, Miss::Empty);
         }
-        Some(Entry {
+        if stored_key ^ data != key {
+            return (None, Miss::Collision);
+        }
+        let entry = Entry {
             score: (data & 0xffff) as u16 as i16 as i32,
             best_move: Move::from_bits(((data >> 16) & 0xffff) as u16),
             depth: ((data >> 32) & 0xff) as u32,
             bound: Bound::from_bits(data >> 40),
-        })
+        };
+        (Some(entry), Miss::Hit)
     }
 
     /// Records a search result for `key`.
@@ -175,6 +200,27 @@ mod tests {
         assert_eq!(tt.index(key), tt.index(other));
         assert!(tt.probe(other).is_none(), "key check must reject");
         assert!(tt.probe(key).is_some());
+    }
+
+    // catches: a miss reason that cannot tell an unused slot from an evicting
+    // one. Both return None, so only the reason distinguishes "the table has
+    // room" from "the table is thrashing", which want opposite responses.
+    #[test]
+    fn a_miss_reports_whether_the_slot_was_empty_or_taken() {
+        let tt = TranspositionTable::new();
+        let key = 0xffff_0000_0000_0000;
+        let other = key | 1;
+        assert_eq!(tt.index(key), tt.index(other));
+        assert_eq!(tt.probe_kind(key).1, Miss::Empty);
+        tt.store(key, 42, Some(mv(1, 2)), 4, Bound::Exact);
+        assert_eq!(tt.probe_kind(key).1, Miss::Hit);
+        assert_eq!(
+            tt.probe_kind(other).1,
+            Miss::Collision,
+            "an occupied slot holding another position is not an empty one"
+        );
+        tt.clear();
+        assert_eq!(tt.probe_kind(key).1, Miss::Empty);
     }
 
     #[test]

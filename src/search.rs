@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
 use crate::movegen::{MoveList, generate_captures, generate_legal, generate_pseudo, is_attacked};
+#[cfg(feature = "profiling")]
+use crate::tt::Miss;
 use crate::tt::{Bound, TranspositionTable};
 use crate::uci::move_text;
 use crate::{Board, Color, Move, MoveType, Square};
@@ -70,6 +72,9 @@ pub(crate) struct SearchProfile {
     pub(crate) q_bounds: [u64; 3],
     pub(crate) tt_probes: u64,
     pub(crate) tt_hits: u64,
+    /// Misses where the slot held a different position, so this one evicts it.
+    /// The rest of the misses found an empty slot.
+    pub(crate) tt_collisions: u64,
     pub(crate) tt_cutoffs: u64,
     pub(crate) tt_stores: u64,
     pub(crate) qply: [u64; MAX_QPLY as usize + 1],
@@ -100,6 +105,7 @@ impl std::ops::AddAssign for SearchProfile {
         }
         self.tt_probes += rhs.tt_probes;
         self.tt_hits += rhs.tt_hits;
+        self.tt_collisions += rhs.tt_collisions;
         self.tt_cutoffs += rhs.tt_cutoffs;
         self.tt_stores += rhs.tt_stores;
         self.q_in_check += rhs.q_in_check;
@@ -156,9 +162,13 @@ impl SearchProfile {
         self.record_bound(true, Bound::Exact);
     }
 
-    fn record_tt_probe(&mut self, hit: bool) {
+    fn record_tt_probe(&mut self, miss: Miss) {
         self.tt_probes += 1;
-        self.tt_hits += u64::from(hit);
+        match miss {
+            Miss::Hit => self.tt_hits += 1,
+            Miss::Collision => self.tt_collisions += 1,
+            Miss::Empty => {}
+        }
     }
 
     fn record_tt_cutoff(&mut self, bound: Bound) {
@@ -342,9 +352,14 @@ fn negamax_root(
     let key = board.state().zobrist();
     // Ordering only: the root must return a move, so it never cuts on a
     // stored score however deep that score was searched.
+    #[cfg(not(feature = "profiling"))]
     let entry = ctx.tt.probe(key);
     #[cfg(feature = "profiling")]
-    ctx.profile.record_tt_probe(entry.is_some());
+    let entry = {
+        let (entry, miss) = ctx.tt.probe_kind(key);
+        ctx.profile.record_tt_probe(miss);
+        entry
+    };
     let tt_move = entry.and_then(|entry| entry.best_move);
     order_moves(board, &mut moves, tt_move, ctx.killers_at(0), &ctx.history);
     let us = board.state().side_to_move();
@@ -439,9 +454,14 @@ fn negamax(
     }
     let key = board.state().zobrist();
     let alpha_original = alpha;
+    #[cfg(not(feature = "profiling"))]
     let entry = ctx.tt.probe(key);
     #[cfg(feature = "profiling")]
-    ctx.profile.record_tt_probe(entry.is_some());
+    let entry = {
+        let (entry, miss) = ctx.tt.probe_kind(key);
+        ctx.profile.record_tt_probe(miss);
+        entry
+    };
     // A cut at ply 1 would return the previous search's score for the root's
     // own move without searching, so the iteration reports a depth it never
     // reached and the score freezes until the iteration passes the stored
