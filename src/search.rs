@@ -23,9 +23,12 @@ const MATE: i32 = 30_000;
 const INFINITY: i32 = 31_000;
 /// Scores above this in absolute value encode a distance to mate.
 const MATE_BOUND: i32 = MATE - 1000;
-/// Quiescence ply ceiling. Deep enough for any real exchange sequence, and a
-/// hard bound keeps the bench node count finite and deterministic.
-const MAX_QPLY: u32 = 8;
+/// Quiescence ply ceiling. A hard bound keeps the bench node count finite and
+/// deterministic; 16 is past where real capture sequences run dry. At 8 the
+/// qply histogram showed 3.43% of quiescence nodes terminating on the cap
+/// rather than running out of captures, and truncating an exchange returns a
+/// static eval on a position where material is still hanging.
+const MAX_QPLY: u32 = 16;
 /// Null-move floor. Below this the null search reduces to a bare quiescence
 /// verdict on a position that cannot legally arise, which is too thin to trust.
 /// Also the depth at which `depth - 1 - R` bottoms out at exactly 0.
