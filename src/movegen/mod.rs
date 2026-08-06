@@ -96,9 +96,30 @@ fn for_each_attack(
     }
 }
 
+/// Which half of the move set to generate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenMode {
+    /// Captures and promotion captures only.
+    Captures,
+    /// Everything that is not a capture: quiet moves, quiet promotions, and
+    /// castling. The complement of `Captures`, so the two partition `All`.
+    Quiets,
+    /// The full pseudo-legal move set.
+    All,
+}
+
+impl GenMode {
+    fn captures(self) -> bool {
+        self != Self::Quiets
+    }
+    fn quiets(self) -> bool {
+        self != Self::Captures
+    }
+}
+
 /// Generates pseudo-legal moves for the side to move.
 pub fn generate_pseudo(board: &Board, list: &mut MoveList) {
-    generate(board, list, true);
+    generate(board, list, GenMode::All);
 }
 
 /// Generates pseudo-legal captures and promotion captures for the side to move.
@@ -107,34 +128,38 @@ pub fn generate_pseudo(board: &Board, list: &mut MoveList) {
 /// excluded.
 // ponytail: captures only. Add quiet promotions if they SPRT positive.
 pub fn generate_captures(board: &Board, list: &mut MoveList) {
-    generate(board, list, false);
+    generate(board, list, GenMode::Captures);
 }
 
-/// The body both generators share: captures always, quiets and castling only
-/// when `quiets` is set. Kept as one function so the capture set cannot drift
-/// out of agreement with the full set.
-fn generate(board: &Board, list: &mut MoveList, quiets: bool) {
+/// Generates everything `generate_captures` does not, so appending this to a
+/// capture list yields exactly `generate_pseudo`.
+pub fn generate_quiets(board: &Board, list: &mut MoveList) {
+    generate(board, list, GenMode::Quiets);
+}
+
+/// The body every generator shares. Kept as one function so the capture set
+/// cannot drift out of agreement with the full set, and so `Captures` and
+/// `Quiets` stay an exact partition of `All`.
+fn generate(board: &Board, list: &mut MoveList, mode: GenMode) {
     let us_color = board.state().side_to_move();
     let us = board.color(us_color);
     let them = board.color(us_color.flip());
     let occ = board.occupied();
     let pawns = board.pieces(PieceType::Pawn) & us;
-    if quiets {
-        pawn::generate(board, list, pawns, them);
-    } else {
-        pawn::generate_captures(board, list, pawns, them);
-    }
+    pawn::generate(board, list, pawns, them, mode);
     for_each_attack(board, us, occ, |from, attacks| {
-        for to in attacks & them {
-            list.push(Move::new(from, to, MoveType::Capture));
+        if mode.captures() {
+            for to in attacks & them {
+                list.push(Move::new(from, to, MoveType::Capture));
+            }
         }
-        if quiets {
+        if mode.quiets() {
             for to in attacks & !occ {
                 list.push(Move::new(from, to, MoveType::Quiet));
             }
         }
     });
-    if quiets {
+    if mode.quiets() {
         generate_castling(board, list, us_color);
     }
 }

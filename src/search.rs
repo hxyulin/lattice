@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
-use crate::movegen::{MoveList, generate_captures, generate_legal, generate_pseudo, is_attacked};
+use crate::movegen::{
+    MoveList, generate_captures, generate_legal, generate_pseudo, generate_quiets, is_attacked,
+};
 #[cfg(feature = "profiling")]
 use crate::tt::Miss;
 use crate::tt::{Bound, TranspositionTable};
@@ -361,7 +363,13 @@ fn negamax_root(
         entry
     };
     let tt_move = entry.and_then(|entry| entry.best_move);
-    order_moves(board, &mut moves, tt_move, ctx.killers_at(0), &ctx.history);
+    order_moves(
+        board,
+        moves.as_mut_slice(),
+        tt_move,
+        ctx.killers_at(0),
+        &ctx.history,
+    );
     let us = board.state().side_to_move();
     let mut best_move = None;
     let mut best_score = -INFINITY;
@@ -482,51 +490,89 @@ fn negamax(
             return Ok(score);
         }
     }
-    let mut moves = MoveList::new();
-    generate_pseudo(board, &mut moves);
     // The stored move is only a hint: a key collision or an entry from an
-    // earlier game can decode to a move that is illegal here, so it orders the
-    // list rather than being searched directly.
-    let tt_move = entry.and_then(|entry| entry.best_move);
-    order_moves(
-        board,
-        &mut moves,
-        tt_move,
-        ctx.killers_at(ply),
-        &ctx.history,
-    );
+    // earlier game can decode to a move that is nonsense here, so it is
+    // screened by `is_pseudo_legal` before being played.
+    let tt_move = entry
+        .and_then(|entry| entry.best_move)
+        .filter(|&mv| is_pseudo_legal(board, mv));
     let us = board.state().side_to_move();
+    let mut moves = MoveList::new();
     let mut best = -INFINITY;
     let mut best_move = None;
     let mut legal = 0;
-    for &mv in moves.iter() {
-        board.make(mv);
-        if !is_legal(board, us) {
-            board.unmake(mv);
-            continue;
-        }
-        let result = search_move(board, depth, ply + 1, alpha, beta, legal, ctx);
-        board.unmake(mv);
-        legal += 1;
-        let score = result?;
-        if score > best {
-            best = score;
-            best_move = Some(mv);
-        }
-        alpha = alpha.max(best);
-        if alpha >= beta {
-            #[cfg(feature = "profiling")]
-            ctx.profile.record_cutoff(false, legal);
-            if !mv.is_capture() && !mv.is_promotion() {
-                ctx.store_killer(ply, mv);
-                // ponytail: no decay - history is per-`go` and dies with Ctx.
-                // Add halve-on-cap or the gravity update if it goes stale
-                // within one search.
-                let slot = &mut ctx.history[us as usize][mv.from().index() as usize]
-                    [mv.to().index() as usize];
-                *slot = slot.saturating_add((depth * depth) as i32);
+    let mut cutoff = None;
+    // Staged: the TT move alone, then captures, then quiets. Ordering is
+    // unchanged - the TT move already sorted ahead of everything and captures
+    // ahead of the killers - but a cutoff in an earlier stage means the later
+    // stages are never generated, and 89.73% of cutoffs land on move one.
+    'stages: for stage in [Stage::TtMove, Stage::Captures, Stage::Quiets] {
+        let start = moves.len();
+        match stage {
+            Stage::TtMove => match tt_move {
+                Some(mv) => {
+                    // `is_pseudo_legal` is a screen, not a re-derivation, so
+                    // this is what catches a structurally impossible move that
+                    // it admits before such a move can reach a release build.
+                    debug_assert!(
+                        {
+                            let mut all = MoveList::new();
+                            generate_pseudo(board, &mut all);
+                            all.iter().any(|&generated| generated == mv)
+                        },
+                        "TT move {mv:?} passed is_pseudo_legal but is not generated at {board}"
+                    );
+                    moves.push(mv);
+                }
+                None => continue,
+            },
+            Stage::Captures => {
+                generate_captures(board, &mut moves);
+                order_range(board, &mut moves, start, ply, ctx);
             }
-            break;
+            Stage::Quiets => {
+                generate_quiets(board, &mut moves);
+                order_range(board, &mut moves, start, ply, ctx);
+            }
+        }
+        for index in start..moves.len() {
+            let mv = moves[index];
+            // The TT move was searched in its own stage; it is regenerated here
+            // as an ordinary capture or quiet.
+            if stage != Stage::TtMove && Some(mv) == tt_move {
+                continue;
+            }
+            board.make(mv);
+            if !is_legal(board, us) {
+                board.unmake(mv);
+                continue;
+            }
+            let result = search_move(board, depth, ply + 1, alpha, beta, legal, ctx);
+            board.unmake(mv);
+            legal += 1;
+            let score = result?;
+            if score > best {
+                best = score;
+                best_move = Some(mv);
+            }
+            alpha = alpha.max(best);
+            if alpha >= beta {
+                cutoff = Some(mv);
+                break 'stages;
+            }
+        }
+    }
+    if let Some(mv) = cutoff {
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_cutoff(false, legal);
+        if !mv.is_capture() && !mv.is_promotion() {
+            ctx.store_killer(ply, mv);
+            // ponytail: no decay - history is per-`go` and dies with Ctx.
+            // Add halve-on-cap or the gravity update if it goes stale
+            // within one search.
+            let slot =
+                &mut ctx.history[us as usize][mv.from().index() as usize][mv.to().index() as usize];
+            *slot = slot.saturating_add((depth * depth) as i32);
         }
     }
     // Checkmate or stalemate. Known only after the loop now that legality is
@@ -614,7 +660,7 @@ fn qsearch(
         alpha = alpha.max(best);
         generate_captures(board, &mut moves);
     }
-    order_moves(board, &mut moves, None, [None; 2], &ctx.history);
+    order_moves(board, moves.as_mut_slice(), None, [None; 2], &ctx.history);
 
     #[cfg(feature = "profiling")]
     let mut legal_moves = 0;
@@ -655,13 +701,66 @@ const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 10_000];
 /// at `-(900 + 900)`.
 const TT_MOVE_KEY: i32 = -100_000;
 
+/// One step of staged generation, searched in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The transposition table's move, alone and generated by nothing.
+    TtMove,
+    /// Captures and promotion captures.
+    Captures,
+    /// Everything else, generated only if the captures did not cut off.
+    Quiets,
+}
+
+/// Whether `mv` is safe to play on this position.
+///
+/// A move from the transposition table survived a 48-bit key check, not a full
+/// one, so it can decode to something impossible here - and `Board::make`
+/// panics when the origin square is empty. This screens for that: the mover
+/// must be ours, and a capture must have something of theirs to take.
+///
+/// Deliberately cheap rather than a full re-derivation of the generator. A
+/// structurally impossible move that slips through (a knight moving like a
+/// rook) corrupts one subtree's score rather than crashing, and the debug
+/// assertion in `negamax` is what stops that reaching a release build.
+fn is_pseudo_legal(board: &Board, mv: Move) -> bool {
+    let us = board.state().side_to_move();
+    if board.piece_on(mv.from()).is_none_or(|p| p.color() != us) {
+        return false;
+    }
+    match mv.move_type() {
+        // The victim stands beside the capturer, and only if the state's en
+        // passant square agrees; anything else is a stale entry.
+        MoveType::EnPassant => board.state().en_passant() == Some(mv.to()),
+        // Castling encodes its rook implicitly, so a stale one would index
+        // `castle_rook_squares` for a rook that is not there.
+        MoveType::KingCastle | MoveType::QueenCastle => false,
+        _ if mv.is_capture() => board
+            .piece_on(mv.to())
+            .is_some_and(|piece| piece.color() != us),
+        _ => board.piece_on(mv.to()).is_none(),
+    }
+}
+
+/// Sorts the moves added by the current stage, leaving earlier stages alone.
+fn order_range(board: &Board, moves: &mut MoveList, start: usize, ply: u32, ctx: &Ctx<'_>) {
+    // No `tt_move`: it has its own stage, so it never needs to sort first.
+    order_moves(
+        board,
+        &mut moves.as_mut_slice()[start..],
+        None,
+        ctx.killers_at(ply),
+        &ctx.history,
+    );
+}
+
 /// Sorts captures and promotions ahead of quiets, captures by MVV-LVA (most
 /// valuable victim, least valuable attacker), and the `killers` for this ply
 /// ahead of the remaining quiets, which sort by `history`. `tt_move`, when it
 /// is present in the list at all, sorts ahead of everything.
 fn order_moves(
     board: &Board,
-    moves: &mut MoveList,
+    moves: &mut [Move],
     tt_move: Option<Move>,
     killers: [Option<Move>; 2],
     history: &History,
@@ -672,9 +771,7 @@ fn order_moves(
     // O(n) made move ordering the hottest thing in the whole search - this one
     // word is worth roughly 1.9x throughput. Measured against an
     // allocation-free array sort, which came out both slower and longer.
-    moves
-        .as_mut_slice()
-        .sort_by_cached_key(|&mv| order_key(board, mv, tt_move, killers, history));
+    moves.sort_by_cached_key(|&mv| order_key(board, mv, tt_move, killers, history));
 }
 
 /// Sort key for one move, ascending: gain descending, then attacker ascending
@@ -1068,7 +1165,7 @@ mod tests {
         let mut board: Board = fen.parse().unwrap();
         let mut moves = MoveList::new();
         generate_legal(&mut board, &mut moves);
-        order_moves(&board, &mut moves, None, [None; 2], &NO_HISTORY);
+        order_moves(&board, moves.as_mut_slice(), None, [None; 2], &NO_HISTORY);
         (board, moves)
     }
 
@@ -1118,7 +1215,7 @@ mod tests {
             .find(|mv| !mv.is_capture() && !mv.is_promotion())
             .unwrap();
         let killers = [Some(killer), None];
-        order_moves(&board, &mut moves, None, killers, &NO_HISTORY);
+        order_moves(&board, moves.as_mut_slice(), None, killers, &NO_HISTORY);
 
         let keys: Vec<_> = moves
             .iter()
@@ -1490,7 +1587,13 @@ mod tests {
             .iter()
             .find(|mv| !mv.is_capture() && !mv.is_promotion())
             .expect("position has a quiet move");
-        order_moves(&board, &mut moves, Some(quiet), [None; 2], &NO_HISTORY);
+        order_moves(
+            &board,
+            moves.as_mut_slice(),
+            Some(quiet),
+            [None; 2],
+            &NO_HISTORY,
+        );
         assert_eq!(
             moves.iter().next(),
             Some(&quiet),

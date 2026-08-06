@@ -1,6 +1,6 @@
 use crate::{Bitboard, Board, Color, Move, MoveType, Square};
 
-use super::MoveList;
+use super::{GenMode, MoveList};
 
 const FILE_A: u64 = 0x0101_0101_0101_0101;
 const FILE_H: u64 = FILE_A << 7;
@@ -50,7 +50,22 @@ fn push_moves(list: &mut MoveList, targets: Bitboard, delta: i8, capture: bool) 
     }
 }
 
-pub(crate) fn generate(board: &Board, list: &mut MoveList, pawns: Bitboard, them: Bitboard) {
+pub(crate) fn generate(
+    board: &Board,
+    list: &mut MoveList,
+    pawns: Bitboard,
+    them: Bitboard,
+    mode: GenMode,
+) {
+    if mode.quiets() {
+        generate_pushes(board, list, pawns);
+    }
+    if mode.captures() {
+        generate_captures(board, list, pawns, them);
+    }
+}
+
+fn generate_pushes(board: &Board, list: &mut MoveList, pawns: Bitboard) {
     let occ = board.occupied().bits();
     match board.state().side_to_move() {
         Color::White => {
@@ -78,7 +93,6 @@ pub(crate) fn generate(board: &Board, list: &mut MoveList, pawns: Bitboard, them
             }
         }
     }
-    generate_captures(board, list, pawns, them);
 }
 
 pub(crate) fn generate_captures(
