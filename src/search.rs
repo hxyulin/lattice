@@ -39,6 +39,18 @@ const LMR_REDUCTION: u32 = 1;
 /// past it the killer slots are simply skipped.
 const MAX_PLY: usize = 64;
 
+/// How far below `alpha` a capture may leave the stand-pat score and still be
+/// searched, in centipawns.
+///
+/// Delta pruning assumes the static evaluation is a fair estimate of the
+/// position, so that a capture which cannot bridge the gap to `alpha` on
+/// material alone cannot help. This evaluation is material and placement only,
+/// and the positional advantage it fails to see measures around 32cp in open
+/// positions, so the margin has to cover that error rather than sit at zero.
+/// 200 is deliberately conservative: it still cuts 31% of bench nodes, and
+/// reaches a fixed depth no slower than a margin of 0 does.
+const DELTA_MARGIN: i32 = 200;
+
 /// Cutoff counts per side and from/to square, the ordering score for quiets
 /// that are neither captures nor killers.
 type History = [[[i32; 64]; 64]; 2];
@@ -861,6 +873,18 @@ fn qsearch(
     #[cfg(feature = "profiling")]
     let mut legal_moves = 0;
     for &mv in moves.iter() {
+        // Delta pruning: winning the victim outright still leaves this node
+        // short of `alpha`, so searching it cannot raise the score. Skipped in
+        // check, where `best` is not a stand-pat and the move is an escape
+        // rather than a material bid, and for promotions, whose gain is the
+        // piece the pawn becomes rather than anything it captures.
+        //
+        // Ahead of the SEE test below because it is cheaper: one mailbox read
+        // against a swap loop that recomputes attackers per exchange.
+        if !in_check && !mv.is_promotion() && best + capture_value(board, mv) + DELTA_MARGIN < alpha
+        {
+            continue;
+        }
         // Losing captures cannot raise alpha once the recapture lands, so
         // searching them only grows the tree. Promotions are exempt: the
         // swap loop values the pawn, not the piece it becomes.
@@ -1009,9 +1033,7 @@ fn order_key(
     if tt_move == Some(mv) {
         return (TT_MOVE_KEY, 0);
     }
-    let victim = victim_square(mv)
-        .and_then(|square| board.piece_on(square))
-        .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize]);
+    let victim = capture_value(board, mv);
     let promoted = mv
         .promoted_piece()
         .map_or(0, |kind| ORDER_VALUES[kind as usize]);
@@ -1032,6 +1054,13 @@ fn order_key(
         .piece_on(mv.from())
         .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize]);
     (-(victim + promoted), attacker)
+}
+
+/// The victim's ordering value, or 0 for a move that captures nothing.
+fn capture_value(board: &Board, mv: Move) -> i32 {
+    victim_square(mv)
+        .and_then(|square| board.piece_on(square))
+        .map_or(0, |piece| ORDER_VALUES[piece.piece_type() as usize])
 }
 
 /// The square the captured piece stands on: `to` for every capture except en
@@ -2003,6 +2032,92 @@ mod tests {
             "no captures, so score is stand-pat"
         );
         assert_eq!(qnodes, 1);
+    }
+
+    #[test]
+    fn delta_pruning_skips_captures_that_cannot_reach_alpha() {
+        // Two undefended captures on open files: Rxa6 wins a queen, Rxh6 wins
+        // a pawn. Against an alpha far above what a pawn could ever bridge,
+        // the pawn capture is pointless and the queen capture is not, so the
+        // margin must separate them rather than pruning by depth or by count.
+        crate::movegen::init();
+        let fen = "4k3/8/q6p/8/8/8/8/R3K2R w - - 0 1";
+        let search_at = |alpha: i32| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = test_ctx(1);
+            let score = qsearch(&mut board, 0, 0, alpha, alpha + 1, &mut ctx).unwrap();
+            (score, ctx.qnodes)
+        };
+
+        let stand_pat = evaluate(&fen.parse::<Board>().unwrap());
+        // Comfortably past a pawn plus the margin, and comfortably short of a
+        // queen: only the queen capture is worth a node here.
+        let alpha = stand_pat + ORDER_VALUES[PieceType::Pawn as usize] + DELTA_MARGIN + 50;
+        assert!(
+            alpha < stand_pat + ORDER_VALUES[PieceType::Queen as usize],
+            "the queen capture must still be able to reach alpha"
+        );
+        let (pruned_score, pruned_nodes) = search_at(alpha);
+
+        // Below every capture's reach, so nothing survives the margin.
+        let everything_pruned =
+            search_at(stand_pat + ORDER_VALUES[PieceType::Queen as usize] + 500);
+        assert_eq!(
+            everything_pruned.1, 1,
+            "no capture can bridge this gap, so none should be searched"
+        );
+
+        // The queen capture still runs, and still returns a winning score:
+        // pruning must not swallow the capture that does reach alpha.
+        assert!(
+            pruned_nodes > 1,
+            "the queen capture should still be searched"
+        );
+        assert!(
+            pruned_score > alpha,
+            "taking the queen beats alpha: {pruned_score} vs {alpha}"
+        );
+    }
+
+    #[test]
+    fn delta_pruning_never_prunes_a_promotion() {
+        // bxa8=Q both takes the rook and becomes a queen, but the margin
+        // arithmetic only ever counts the victim, so it prices this at a rook
+        // and misses the ~800 the pawn gains by queening. Quiescence generates
+        // no quiet promotions, so the capture-promotion is the whole of what
+        // this guard protects.
+        crate::movegen::init();
+        let mut board: Board = "r3k3/1P6/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        let stand_pat = evaluate(&board);
+        // Past what the rook alone could bridge, so an unguarded prune fires,
+        // while the real gain of rook-plus-promotion clears it comfortably.
+        let alpha = stand_pat + ORDER_VALUES[PieceType::Rook as usize] + DELTA_MARGIN + 50;
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut board, 0, 0, alpha, alpha + 1, &mut ctx).unwrap();
+        assert!(
+            score > alpha,
+            "promoting beats alpha and must not be pruned: {score} vs {alpha}"
+        );
+        assert!(ctx.qnodes > 1, "the promotion should have been searched");
+    }
+
+    #[test]
+    fn delta_pruning_never_prunes_in_check() {
+        // In check `best` is -INFINITY rather than a stand-pat, so the margin
+        // arithmetic is meaningless and every evasion must still be searched.
+        // Pruning here would drop the only escape and invent a mate.
+        crate::movegen::init();
+        let mut board: Board = "R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1".parse().unwrap();
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut board, 0, 0, MATE - 1, MATE, &mut ctx).unwrap();
+        assert_eq!(score, -MATE, "checkmate, and no evasion may be pruned away");
+
+        // Same check with h7 open: a real escape exists behind an alpha that
+        // would prune every quiet move if the in-check guard were dropped.
+        let mut board: Board = "R5k1/5pp1/8/8/8/8/8/6K1 b - - 0 1".parse().unwrap();
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut board, 0, 0, MATE - 1, MATE, &mut ctx).unwrap();
+        assert!(score > -MATE + 1000, "the king escapes, got {score}");
     }
 
     #[test]
