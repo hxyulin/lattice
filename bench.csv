@@ -29,3 +29,5 @@ bb06dbd,2026-08-05,"test(eval): pin evaluation and protocol against mutation",18
 db78427,2026-08-05,"docs: record the principal variation search SPRT result",
 ad22843,2026-08-06,"docs: record the transposition table SPRT result",
 85b001c,2026-08-06,"chore(dev): report typos instead of rewriting them",
+d4652f5,2026-08-06,"docs: refresh bench ledger after moving aspiration to its own branch",
+51d7c4b,2026-08-06,"perf(search): compute each ordering key once per move",186403
