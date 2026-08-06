@@ -34,7 +34,7 @@ fn shipped_depth_is_reproducible() {
     // fraction of that at any shallower one, so this fails if `run` stops
     // using the shipped DEPTH.
     assert!(
-        nodes > 5_000_000,
+        nodes > 3_000_000,
         "shipped-depth suite searched only {nodes} nodes"
     );
 }

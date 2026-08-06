@@ -133,6 +133,13 @@ fn write_profile(output: &mut dyn Write, profile: SearchProfile, qnodes: u64) {
         profile.pvs_probes,
         percent(profile.pvs_researches, profile.pvs_probes),
     );
+    let _ = writeln!(
+        output,
+        "info string profile null cutoffs {} / {} ({:.2}%)",
+        profile.null_cutoffs,
+        profile.null_attempts,
+        percent(profile.null_cutoffs, profile.null_attempts),
+    );
     let qply_total = profile.qply.iter().sum();
     let values = profile
         .qply
