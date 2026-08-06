@@ -1,6 +1,7 @@
 //! Static position evaluation.
 
-use crate::{Board, Color};
+use crate::board::Piece;
+use crate::{Board, Color, Square};
 
 /// Midgame material values. The king is 0 by construction: it is never
 /// captured, and a nonzero value would push scores into the mate range that
@@ -172,38 +173,70 @@ const fn fold(mut tables: [[i32; 64]; 6], values: [i32; 6]) -> [[i32; 64]; 6] {
     tables
 }
 
-/// Scans the board once, returning the midgame score, the endgame score, and
-/// the raw game phase. One pass rather than three: every caller wants all of
-/// them, and the scan is a cache miss per occupied square.
-fn scan(board: &Board) -> (i32, i32, i32) {
-    let mut mg = 0;
-    let mut eg = 0;
-    let mut phase = 0;
-    // ponytail: full scan per call; incremental PSQT in Board::make when bench
-    // nps says eval is hot.
-    for square in board.occupied() {
-        let Some(piece) = board.piece_on(square) else {
-            continue;
-        };
-        let kind = piece.piece_type() as usize;
-        phase += PHASE_WEIGHT[kind];
-        // Tables are in reading order (index 0 is a8) while the board is
-        // little-endian (a1 is 0), so White is the side that flips.
-        let (index, sign) = match piece.color() {
-            Color::White => (square.flip_rank().index() as usize, 1),
-            Color::Black => (square.index() as usize, -1),
-        };
-        mg += sign * MG_TABLE[kind][index];
-        eg += sign * EG_TABLE[kind][index];
+/// Running midgame score, endgame score, and raw game phase, maintained by the
+/// board as pieces are added and removed.
+///
+/// Scoring is a sum over pieces, so each term can be applied when its piece
+/// appears and withdrawn when it leaves. `Board::unmake` reverses exactly the
+/// piece placements `make` performed, which undoes the accumulation with it -
+/// no saved copy to restore.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Accumulator {
+    mg: i32,
+    eg: i32,
+    phase: i32,
+}
+
+impl Accumulator {
+    /// Applies the terms for a piece standing on a square.
+    pub(crate) fn add(&mut self, piece: Piece, square: Square) {
+        let (kind, index, sign) = terms(piece, square);
+        self.mg += sign * MG_TABLE[kind][index];
+        self.eg += sign * EG_TABLE[kind][index];
+        self.phase += PHASE_WEIGHT[kind];
     }
-    (mg, eg, phase)
+
+    /// Withdraws the terms for a piece leaving a square.
+    pub(crate) fn remove(&mut self, piece: Piece, square: Square) {
+        let (kind, index, sign) = terms(piece, square);
+        self.mg -= sign * MG_TABLE[kind][index];
+        self.eg -= sign * EG_TABLE[kind][index];
+        self.phase -= PHASE_WEIGHT[kind];
+    }
+}
+
+/// Table index and score sign for a piece on a square.
+fn terms(piece: Piece, square: Square) -> (usize, usize, i32) {
+    // Tables are in reading order (index 0 is a8) while the board is
+    // little-endian (a1 is 0), so White is the side that flips.
+    let (index, sign) = match piece.color() {
+        Color::White => (square.flip_rank().index() as usize, 1),
+        Color::Black => (square.index() as usize, -1),
+    };
+    (piece.piece_type() as usize, index, sign)
+}
+
+/// Scans the board once, returning the midgame score, the endgame score, and
+/// the raw game phase.
+///
+/// The accumulator makes this redundant on the hot path; it stays as the
+/// independent definition the incremental update is checked against.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn scan(board: &Board) -> Accumulator {
+    let mut accumulator = Accumulator::default();
+    for square in board.occupied() {
+        if let Some(piece) = board.piece_on(square) {
+            accumulator.add(piece, square);
+        }
+    }
+    accumulator
 }
 
 /// Returns the game phase, 24 at the start position falling to 0 in a bare
 /// king endgame. Promotions can push the raw sum past 24, so callers clamp.
 #[cfg(test)]
 fn phase(board: &Board) -> i32 {
-    scan(board).2
+    board.accumulator().phase
 }
 
 /// Returns the static evaluation in centipawns, relative to the side to move.
@@ -211,7 +244,7 @@ fn phase(board: &Board) -> i32 {
 /// Material and piece placement are scored from separate midgame and endgame
 /// tables, interpolated by how much material remains.
 pub fn evaluate(board: &Board) -> i32 {
-    let (mg, eg, phase) = scan(board);
+    let Accumulator { mg, eg, phase } = *board.accumulator();
     let mg_phase = phase.min(TOTAL_PHASE);
     let eg_phase = TOTAL_PHASE - mg_phase;
     let score = (mg * mg_phase + eg * eg_phase) / TOTAL_PHASE;
@@ -385,6 +418,44 @@ mod tests {
             .unwrap();
         assert!(evaluate(&white) < 0, "white is a queen down");
         assert_eq!(evaluate(&white), -evaluate(&black));
+    }
+
+    // catches: any make/unmake path that moves a piece without routing through
+    // add_piece/remove_piece, and a promotion or en passant applying the wrong
+    // piece to the accumulator. `debug_check` asserts this too, but compiles
+    // out in release, which is the build that plays games.
+    #[test]
+    fn incremental_accumulator_tracks_a_full_scan_through_a_search() {
+        use crate::movegen::{MoveList, generate_legal};
+
+        fn walk(board: &mut Board, depth: u32) {
+            assert_eq!(*board.accumulator(), scan(board), "{board}");
+            if depth == 0 {
+                return;
+            }
+            let mut moves = MoveList::new();
+            generate_legal(board, &mut moves);
+            for &mv in moves.iter() {
+                board.make(mv);
+                walk(board, depth - 1);
+                board.unmake(mv);
+                // The unwind must restore it exactly, not merely stay valid.
+                assert_eq!(*board.accumulator(), scan(board), "after unmake {mv:?}");
+            }
+        }
+
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            // Castling, en passant and captures all reachable within depth 3.
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            // Promotions, including capture-promotions onto a defended rank.
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+        ];
+        for fen in fens {
+            let mut board: Board = fen.parse().unwrap();
+            walk(&mut board, 3);
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use super::{
     Bitboard, CastlingRights, Color, Move, MoveType, Piece, PieceType, Square, State, Undo,
 };
+use crate::eval::Accumulator;
 
 const CASTLE_MASK: [u8; 64] = castle_masks();
 const fn castle_masks() -> [u8; 64] {
@@ -59,6 +60,7 @@ pub struct Board {
     mailbox: [Option<Piece>; 64],
     state: State,
     history: Vec<Undo>,
+    accumulator: Accumulator,
 }
 
 impl Board {
@@ -82,7 +84,11 @@ impl Board {
             mailbox: [None; 64],
             state,
             history: Vec::with_capacity(256),
+            accumulator: Accumulator::default(),
         }
+    }
+    pub(crate) fn accumulator(&self) -> &Accumulator {
+        &self.accumulator
     }
     /// Returns the piece occupying a square.
     pub fn piece_on(&self, square: Square) -> Option<Piece> {
@@ -208,6 +214,7 @@ impl Board {
         self.colors[piece.color() as usize].set(square);
         self.occupied.set(square);
         self.state.zobrist ^= piece_key(piece, square);
+        self.accumulator.add(piece, square);
     }
     fn remove_piece(&mut self, piece: Piece, square: Square) {
         self.mailbox[square.index() as usize] = None;
@@ -215,6 +222,7 @@ impl Board {
         self.colors[piece.color() as usize].clear(square);
         self.occupied.clear(square);
         self.state.zobrist ^= piece_key(piece, square);
+        self.accumulator.remove(piece, square);
     }
     fn set_ep(&mut self, ep: Option<Square>) {
         if let Some(s) = self.state.ep {
@@ -262,6 +270,7 @@ impl Board {
             }
         }
         assert_eq!(self.state.zobrist, self.recompute_zobrist());
+        assert_eq!(self.accumulator, crate::eval::scan(self));
     }
     #[cfg(not(debug_assertions))]
     fn debug_check(&self) {}
