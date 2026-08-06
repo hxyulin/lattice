@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
-use crate::movegen::{MoveList, generate_captures, generate_legal, is_attacked};
+use crate::movegen::{MoveList, generate_captures, generate_legal, generate_pseudo, is_attacked};
 use crate::tt::{Bound, TranspositionTable};
 use crate::uci::move_text;
-use crate::{Board, Move, MoveType, Square};
+use crate::{Board, Color, Move, MoveType, Square};
 
 /// Nodes between clock checks. Low enough that a small tree still checks
 /// several times: depth 2 from the start position is only 440 nodes, and at
@@ -184,28 +184,35 @@ fn negamax_root(
     ctx: &mut Ctx<'_>,
 ) -> Result<(Option<Move>, i32), Aborted> {
     let mut moves = MoveList::new();
-    generate_legal(board, &mut moves);
-    if moves.is_empty() {
-        return Ok((None, terminal_score(board, 0)));
-    }
+    generate_pseudo(board, &mut moves);
     let key = board.state().zobrist();
     // Ordering only: the root must return a move, so it never cuts on a
     // stored score however deep that score was searched.
     let tt_move = ctx.tt.probe(key).and_then(|entry| entry.best_move);
     order_moves(board, &mut moves, tt_move, ctx.killers_at(0), &ctx.history);
+    let us = board.state().side_to_move();
     let mut best_move = None;
     let mut best_score = -INFINITY;
-    for (index, &mv) in moves.iter().enumerate() {
+    let mut legal = 0;
+    for &mv in moves.iter() {
         board.make(mv);
+        if !is_legal(board, us) {
+            board.unmake(mv);
+            continue;
+        }
         // The root always searches on a full window, so `beta` is INFINITY and
         // the re-search condition reduces to `narrow > best_score`.
-        let result = search_move(board, depth, 1, best_score, INFINITY, index, ctx);
+        let result = search_move(board, depth, 1, best_score, INFINITY, legal, ctx);
         board.unmake(mv);
+        legal += 1;
         let score = result?;
         if score > best_score {
             best_score = score;
             best_move = Some(mv);
         }
+    }
+    if legal == 0 {
+        return Ok((None, terminal_score(board, 0)));
     }
     // Exact: rejected null-window results never replace `best_score`, while
     // every result that does replace it came from an exact-window search.
@@ -284,10 +291,7 @@ fn negamax(
         }
     }
     let mut moves = MoveList::new();
-    generate_legal(board, &mut moves);
-    if moves.is_empty() {
-        return Ok(terminal_score(board, ply));
-    }
+    generate_pseudo(board, &mut moves);
     // The stored move is only a hint: a key collision or an entry from an
     // earlier game can decode to a move that is illegal here, so it orders the
     // list rather than being searched directly.
@@ -302,10 +306,16 @@ fn negamax(
     let us = board.state().side_to_move();
     let mut best = -INFINITY;
     let mut best_move = None;
-    for (index, &mv) in moves.iter().enumerate() {
+    let mut legal = 0;
+    for &mv in moves.iter() {
         board.make(mv);
-        let result = search_move(board, depth, ply + 1, alpha, beta, index, ctx);
+        if !is_legal(board, us) {
+            board.unmake(mv);
+            continue;
+        }
+        let result = search_move(board, depth, ply + 1, alpha, beta, legal, ctx);
         board.unmake(mv);
+        legal += 1;
         let score = result?;
         if score > best {
             best = score;
@@ -324,6 +334,12 @@ fn negamax(
             }
             break;
         }
+    }
+    // Checkmate or stalemate. Known only after the loop now that legality is
+    // decided per move, and returned without a store to match what the
+    // pre-filtered version did.
+    if legal == 0 {
+        return Ok(terminal_score(board, ply));
     }
     let bound = if best >= beta {
         Bound::Lower
@@ -384,7 +400,7 @@ fn qsearch(
         board.make(mv);
         // Captures come back pseudo-legal. Filtering after `make` rather than
         // up front means a beta cutoff skips the checks it never needed.
-        let legal = in_check || !is_attacked(board, board.king_square(us), us.flip());
+        let legal = in_check || is_legal(board, us);
         let result = legal.then(|| qsearch(board, ply + 1, qply + 1, -beta, -alpha, ctx));
         board.unmake(mv);
         let Some(result) = result else {
@@ -557,6 +573,12 @@ fn score_to_tt(score: i32, ply: u32) -> i32 {
 /// Inverse of `score_to_tt`.
 fn score_from_tt(score: i32, ply: u32) -> i32 {
     shift_mate(score, -(ply as i32))
+}
+
+/// Whether the move just made was legal, i.e. left `us` without its king in
+/// check. Call with the board after `make` and the side that moved.
+fn is_legal(board: &Board, us: Color) -> bool {
+    !is_attacked(board, board.king_square(us), us.flip())
 }
 
 fn terminal_score(board: &Board, ply: u32) -> i32 {
@@ -769,6 +791,44 @@ mod tests {
                 "no pruning for {fen}: {} vs {plain_nodes}",
                 ctx.nodes
             );
+        }
+    }
+
+    // catches: the search filtering legality itself rather than taking a
+    // pre-filtered list. `plain_negamax` still calls `generate_legal`, so
+    // these compare the two strategies against each other on the positions
+    // where they can disagree: a pinned piece whose pseudo-legal moves are
+    // all illegal, an en-passant capture that exposes the king along a rank,
+    // castling out of and through check, and a double check where only king
+    // moves answer. A search that forgot to filter would return a score off
+    // an illegal move; one that miscounted legal moves would report mate or
+    // stalemate wrongly.
+    #[test]
+    fn search_filters_legality_exactly_as_generate_legal_does() {
+        let fens = [
+            // En passant discovering check along the fifth rank: the classic
+            // case a legality filter gets wrong.
+            "8/8/8/K2pP2r/8/8/8/7k w - d6 0 1",
+            // Absolutely pinned knight - every one of its moves is illegal.
+            "4k3/8/8/8/8/8/3n4/3KR3 b - - 0 1",
+            // In check with castling rights still set.
+            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+            // Double check: only king moves are legal.
+            "4k3/8/8/8/8/2n5/3PPP2/r3K3 w - - 0 1",
+            // Stalemate, so the legal count must be exactly zero.
+            "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1",
+            // Checkmate, likewise zero but scored as mate rather than draw.
+            "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1",
+        ];
+        for fen in fens {
+            for depth in 1..=3 {
+                let mut board: Board = fen.parse().unwrap();
+                let mut nodes = 0;
+                let expected = plain_negamax(&mut board, depth, 0, &mut nodes);
+                let mut ctx = static_leaf_ctx(depth);
+                let (_, score) = negamax_root(&mut board, depth, &mut ctx).unwrap();
+                assert_eq!(score, expected, "{fen} at depth {depth}");
+            }
         }
     }
 
