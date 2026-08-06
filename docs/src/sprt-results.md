@@ -47,4 +47,5 @@ authoritative result.
 | transposition table | STC | 306 | +107.2 | pass |
 | principal variation search | STC | 2752 | +14.0 | pass |
 | compute each ordering key once per move | STC | 1336 | +24.4 | pass |
+| stage main-search move generation | STC | 992 | +33.9 | pass |
 <!-- END generated -->

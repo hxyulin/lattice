@@ -37,3 +37,9 @@ d4652f5,2026-08-06,"docs: refresh bench ledger after moving aspiration to its ow
 5ebe61d,2026-08-06,"feat(search): search shape counters behind a profiling feature",186403
 5a25dc1,2026-08-06,"docs: refresh bench ledger after the profiling counters",
 4f24497,2026-08-06,"feat(tt): report whether a probe missed on an empty slot or a collision",186403
+ae5294c,2026-08-06,"docs: refresh bench ledger after the TT miss breakdown",
+1c9311f,2026-08-06,"feat(tools): sampling profiler with inline-frame and line attribution",186403
+ca0b432,2026-08-06,"perf(eval): maintain piece-square scores incrementally",186403
+eb44c71,2026-08-06,"merge: incremental piece-square evaluation",
+9a2a4f6,2026-08-06,"perf(search): stage main-search move generation",185737
+7b8488a,2026-08-07,"merge: staged main-search move generation",
