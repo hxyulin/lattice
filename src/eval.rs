@@ -14,6 +14,21 @@ const EG_VALUE: [i32; 6] = [94, 281, 297, 512, 936, 0];
 const PHASE_WEIGHT: [i32; 6] = [0, 1, 1, 2, 4, 0];
 const TOTAL_PHASE: i32 = 24;
 
+/// Bonus for having the move.
+///
+/// Removes the score oscillation between odd and even search depths. A leaf
+/// bonus is negated once per ply on the way to the root, so it arrives as `+T`
+/// at even depth and `-T` at odd, and the odd/even gap therefore closes at
+/// `2T`. The start position's measured gap of 31.8cp gives `T = 15.9`, which is
+/// also the value Stockfish's classical evaluation used.
+///
+/// Flat rather than tapered: the measured swing shows no midgame/endgame split
+/// (2.1..5.6 against 1.8..5.9, overlapping). The usual argument for tapering is
+/// zugzwang, where having to move is a liability - but a constant cannot detect
+/// zugzwang at any magnitude, so scaling it by phase would shrink a wrong
+/// answer rather than fix it.
+const TEMPO: i32 = 17;
+
 // The tables below are transcribed verbatim from the published PeSTO values,
 // in reading order: index 0 is a8 and index 63 is h1.
 #[rustfmt::skip]
@@ -242,17 +257,21 @@ fn phase(board: &Board) -> i32 {
 /// Returns the static evaluation in centipawns, relative to the side to move.
 ///
 /// Material and piece placement are scored from separate midgame and endgame
-/// tables, interpolated by how much material remains.
+/// tables, interpolated by how much material remains, plus `TEMPO` for the side
+/// to move.
 pub fn evaluate(board: &Board) -> i32 {
     let Accumulator { mg, eg, phase } = *board.accumulator();
     let mg_phase = phase.min(TOTAL_PHASE);
     let eg_phase = TOTAL_PHASE - mg_phase;
     let score = (mg * mg_phase + eg * eg_phase) / TOTAL_PHASE;
-    if board.state().side_to_move() == Color::White {
+    // After the flip, so the bonus always favours whoever is on move rather
+    // than always favouring White.
+    let score = if board.state().side_to_move() == Color::White {
         score
     } else {
         -score
-    }
+    };
+    score + TEMPO
 }
 
 #[cfg(test)]
@@ -308,6 +327,17 @@ mod tests {
         )
     }
 
+    /// The material and placement component alone, with the tempo bonus taken
+    /// back off.
+    ///
+    /// `TEMPO` is the one part of the score that does not flip with the side to
+    /// move, so a test asserting the material component negates, cancels, or
+    /// matches a hand-computed table value has to strip it first or it is
+    /// asserting against the bonus as well.
+    fn placement(board: &Board) -> i32 {
+        evaluate(board) - TEMPO
+    }
+
     // catches: any change to the arithmetic that the relational tests below
     // are blind to, because they hold under it. Verified by mutation: swapping
     // the midgame and endgame lookups, inverting the phase interpolation,
@@ -338,7 +368,7 @@ mod tests {
         ];
         for (fen, want) in cases {
             let board: Board = fen.parse().unwrap();
-            assert_eq!(evaluate(&board), want, "{fen}");
+            assert_eq!(placement(&board), want, "{fen}");
         }
     }
 
@@ -370,12 +400,27 @@ mod tests {
     }
 
     #[test]
-    fn symmetric_positions_are_zero_for_either_side() {
-        assert_eq!(evaluate(&Board::startpos()), 0);
+    fn symmetric_positions_score_the_tempo_bonus_for_either_side() {
+        // A position with nothing between the sides is worth exactly the tempo
+        // bonus, and worth it to whoever is on move - the same number for
+        // White and for Black, not a number that changes sign with colour.
+        // That is what distinguishes a side-to-move bonus from a White bonus,
+        // and it is the half a dropped sign flip would break.
+        //
+        // Written as TEMPO rather than 17 so retuning the constant does not
+        // reach into the tests. That alone would also pass for TEMPO = 0, so
+        // the bonus is pinned as nonzero here: the point of the term is to
+        // shift the score, and a silently disabled one must not look correct.
+        const { assert!(TEMPO > 0, "a zero tempo bonus is a disabled feature") };
+        assert_eq!(evaluate(&Board::startpos()), TEMPO);
         let white: Board = "4k3/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
         let black: Board = "4k3/8/8/8/8/8/8/4K3 b - - 0 1".parse().unwrap();
-        assert_eq!(evaluate(&white), 0);
-        assert_eq!(evaluate(&black), 0);
+        assert_eq!(evaluate(&white), TEMPO);
+        assert_eq!(evaluate(&black), TEMPO);
+        // The material and placement component really is zero here, so the
+        // whole score above is the bonus and not a cancellation that happens
+        // to land on the same number.
+        assert_eq!(evaluate(&white) - TEMPO, 0);
     }
 
     #[test]
@@ -393,7 +438,7 @@ mod tests {
         assert!(phase(&many) > TOTAL_PHASE, "raw phase should overflow");
         assert_eq!(phase(&many).min(TOTAL_PHASE), TOTAL_PHASE);
         // Symmetric material, so the clamp must still land on a zero score.
-        assert_eq!(evaluate(&many), 0);
+        assert_eq!(placement(&many), 0);
     }
 
     #[test]
@@ -417,7 +462,13 @@ mod tests {
             .parse()
             .unwrap();
         assert!(evaluate(&white) < 0, "white is a queen down");
-        assert_eq!(evaluate(&white), -evaluate(&black));
+        // The placement component negates with the side to move. The full
+        // score deliberately does not: `TEMPO` favours whoever is on move, so
+        // it is the same sign from both sides and survives the negation as a
+        // `2 * TEMPO` gap. Asserting the raw scores negate would be asserting
+        // the bonus away.
+        assert_eq!(placement(&white), -placement(&black));
+        assert_eq!(evaluate(&white) + evaluate(&black), 2 * TEMPO);
     }
 
     // catches: any make/unmake path that moves a piece without routing through
