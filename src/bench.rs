@@ -10,7 +10,11 @@ use crate::search::SearchProfile;
 use crate::search::{Limits, search_inner};
 use crate::tt::TranspositionTable;
 
-const DEPTH: u32 = 4;
+/// Deep enough that the tree exercises the pruning that only pays off with
+/// depth, and that a search change moves the count by a readable margin.
+/// Costs under a second in release; the debug build is roughly 60x slower,
+/// which is why the shipped-depth test is release-only.
+const DEPTH: u32 = 7;
 const POSITIONS: [&str; 12] = [
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",

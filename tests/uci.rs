@@ -137,7 +137,12 @@ fn position_moves_are_applied_before_the_next_command() {
 /// catches: `bench` producing no output, or the verifier line ChessEval parses
 /// being renamed. Invoked as an argv subcommand, which is the form the
 /// tooling uses and which no other test exercises.
+///
+/// Release-only for the same reason as `tests/bench.rs`: this runs the shipped
+/// suite through the real binary, which `debug_check` makes roughly 60x slower
+/// in a debug build.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "too slow in debug; run with --release")]
 fn bench_subcommand_prints_the_verifier_line() {
     let out = Command::new(env!("CARGO_BIN_EXE_lattice"))
         .arg("bench")

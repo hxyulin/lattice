@@ -19,3 +19,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The shipped-depth bench test is release-only: it self-skips in debug,
+      # so without this step nothing would run it.
+      - run: cargo test --release

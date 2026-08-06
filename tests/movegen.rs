@@ -3,6 +3,11 @@
 //! Deep perft is the definitive move generation check. These run against the
 //! public API only; fast variants that pin the same defects live beside the
 //! code in `src/movegen`.
+//!
+//! Perft comes in two depths. The shallow table runs in every profile, because
+//! in a debug build the walk doubles as the broadest check of `debug_check`'s
+//! zobrist and eval-accumulator invariants. The deep table is release-only,
+//! where the same trees cost seconds instead of minutes.
 
 use lattice::movegen::perft::{perft, perft_divide};
 use lattice::movegen::{
@@ -28,13 +33,51 @@ fn sorted(list: &MoveList) -> Vec<Move> {
     moves
 }
 
+/// The same positions at a depth every profile can afford. One ply shallower
+/// is 20-50x fewer nodes, which still visits every structural case below -
+/// depth buys repetition of them, not new kinds.
+const SHALLOW: [(&str, u32, u64); 7] = [
+    (POSITIONS[0], 4, 197_281),
+    (POSITIONS[1], 3, 97_862),
+    (POSITIONS[2], 4, 43_238),
+    (POSITIONS[3], 3, 9_467),
+    (POSITIONS[4], 3, 9_467),
+    (POSITIONS[5], 3, 62_379),
+    (KIWIPETE_LIKE, 3, 89_890),
+];
+
+const KIWIPETE_LIKE: &str =
+    "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 1";
+
 /// catches: any defect that changes the generated move set - wrong slider
 /// blocking, a missing knight or king direction, pawn file wrap, en passant
 /// treated as a normal capture, promotion under-generation, and every castling
 /// legality guard (transit occupancy, the b-file rook gap, castling out of or
 /// through check).
+///
+/// Runs in every profile, unlike its deep counterpart, and that is the point:
+/// in a debug build `Board::debug_check` re-derives the zobrist key and the
+/// eval accumulator on every make/unmake, so walking these trees is also the
+/// broadest test that the incremental updates stay correct. A release-only
+/// perft would check leaf counts and leave both invariants unexercised.
 #[test]
 fn perft_reference_positions() {
+    lattice::movegen::init();
+    for (fen, depth, expected) in SHALLOW {
+        let mut board: Board = fen.parse().unwrap();
+        assert_eq!(perft(&mut board, depth), expected, "{fen}");
+    }
+}
+
+/// The deep counterpart, one ply further on each position. Release-only: these
+/// are ~50x the nodes and `debug_check` makes a debug build roughly 60x slower
+/// again, which is minutes rather than seconds.
+///
+/// catches: what only depth can reach - a defect needing a longer move sequence
+/// to set up than the shallow table plays out.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "too slow in debug; run with --release")]
+fn perft_reference_positions_deep() {
     lattice::movegen::init();
     let cases = [
         (POSITIONS[0], 5, 4_865_609),
@@ -43,11 +86,7 @@ fn perft_reference_positions() {
         (POSITIONS[3], 4, 422_333),
         (POSITIONS[4], 4, 422_333),
         (POSITIONS[5], 4, 2_103_487),
-        (
-            "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 1",
-            4,
-            3_894_594,
-        ),
+        (KIWIPETE_LIKE, 4, 3_894_594),
     ];
     for (fen, depth, expected) in cases {
         let mut board: Board = fen.parse().unwrap();
@@ -57,12 +96,16 @@ fn perft_reference_positions() {
 
 /// catches: `perft_divide` recursing at the wrong depth or failing to unmake
 /// between root moves. Neither shows up in a plain `perft` total.
+///
+/// Depth 4 rather than 5: the property is that the divide sums to the total,
+/// and one ply less proves it just as well for 25x fewer nodes.
 #[test]
 fn divide_sums_to_perft() {
     lattice::movegen::init();
     let mut board = Board::startpos();
-    let total: u64 = perft_divide(&mut board, 5).iter().map(|(_, n)| n).sum();
-    assert_eq!(total, 4_865_609);
+    let total: u64 = perft_divide(&mut board, 4).iter().map(|(_, n)| n).sum();
+    assert_eq!(total, 197_281);
+    assert_eq!(total, perft(&mut board, 4), "divide must sum to perft");
 }
 
 /// catches: a capture generator that omits non-pawn captures or leaks quiet
