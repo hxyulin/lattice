@@ -40,9 +40,8 @@ d4652f5,2026-08-06,"docs: refresh bench ledger after moving aspiration to its ow
 ae5294c,2026-08-06,"docs: refresh bench ledger after the TT miss breakdown",
 1c9311f,2026-08-06,"feat(tools): sampling profiler with inline-frame and line attribution",186403
 ca0b432,2026-08-06,"perf(eval): maintain piece-square scores incrementally",186403
-eb44c71,2026-08-06,"merge: incremental piece-square evaluation",
-9a2a4f6,2026-08-06,"perf(search): stage main-search move generation",185737
-7b8488a,2026-08-07,"merge: staged main-search move generation",
-b0d2bb1,2026-08-07,"docs: refresh bench ledger after staged move generation",
-1a8e603,2026-08-07,"chore(bench): raise the bench suite to depth 7",11560394
-3d6ff61,2026-08-07,"feat(search): null move pruning",3968708
+32a917d,2026-08-06,"perf(search): stage main-search move generation",185737
+d2474e3,2026-08-07,"docs: refresh bench ledger after staged move generation",
+c4a89bd,2026-08-07,"chore(bench): raise the bench suite to depth 7",11560394
+4fc83c4,2026-08-07,"feat(search): null move pruning",3968708
+05ff639,2026-08-07,"docs: record the null move pruning SPRT result",
