@@ -57,6 +57,154 @@ pub(crate) struct SearchResult {
     pub(crate) nodes: u64,
     /// Quiescence nodes.
     pub(crate) qnodes: u64,
+    #[cfg(feature = "profiling")]
+    pub(crate) profile: SearchProfile,
+}
+
+#[cfg(feature = "profiling")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SearchProfile {
+    pub(crate) main_cutoffs: [u64; 5],
+    pub(crate) q_cutoffs: [u64; 5],
+    pub(crate) main_bounds: [u64; 3],
+    pub(crate) q_bounds: [u64; 3],
+    pub(crate) tt_probes: u64,
+    pub(crate) tt_hits: u64,
+    pub(crate) tt_cutoffs: u64,
+    pub(crate) tt_stores: u64,
+    pub(crate) qply: [u64; MAX_QPLY as usize + 1],
+    pub(crate) q_in_check: u64,
+    pub(crate) stand_pat_nodes: u64,
+    pub(crate) stand_pat_cutoffs: u64,
+    pub(crate) pvs_probes: u64,
+    pub(crate) pvs_researches: u64,
+}
+
+#[cfg(feature = "profiling")]
+impl std::ops::AddAssign for SearchProfile {
+    fn add_assign(&mut self, rhs: Self) {
+        for (left, right) in self.main_cutoffs.iter_mut().zip(rhs.main_cutoffs) {
+            *left += right;
+        }
+        for (left, right) in self.q_cutoffs.iter_mut().zip(rhs.q_cutoffs) {
+            *left += right;
+        }
+        for (left, right) in self.main_bounds.iter_mut().zip(rhs.main_bounds) {
+            *left += right;
+        }
+        for (left, right) in self.q_bounds.iter_mut().zip(rhs.q_bounds) {
+            *left += right;
+        }
+        for (left, right) in self.qply.iter_mut().zip(rhs.qply) {
+            *left += right;
+        }
+        self.tt_probes += rhs.tt_probes;
+        self.tt_hits += rhs.tt_hits;
+        self.tt_cutoffs += rhs.tt_cutoffs;
+        self.tt_stores += rhs.tt_stores;
+        self.q_in_check += rhs.q_in_check;
+        self.stand_pat_nodes += rhs.stand_pat_nodes;
+        self.stand_pat_cutoffs += rhs.stand_pat_cutoffs;
+        self.pvs_probes += rhs.pvs_probes;
+        self.pvs_researches += rhs.pvs_researches;
+    }
+}
+
+#[cfg(feature = "profiling")]
+impl SearchProfile {
+    fn record_cutoff(&mut self, quiescence: bool, move_number: usize) {
+        let bucket = match move_number {
+            1 => 0,
+            2 => 1,
+            3 => 2,
+            4..=8 => 3,
+            _ => 4,
+        };
+        if quiescence {
+            self.q_cutoffs[bucket] += 1;
+        } else {
+            self.main_cutoffs[bucket] += 1;
+        }
+    }
+
+    fn record_bound(&mut self, quiescence: bool, bound: Bound) {
+        let index = match bound {
+            Bound::Lower => 0,
+            Bound::Upper => 1,
+            Bound::Exact => 2,
+        };
+        if quiescence {
+            self.q_bounds[index] += 1;
+        } else {
+            self.main_bounds[index] += 1;
+        }
+    }
+
+    fn record_main_bound(&mut self, score: i32, alpha: i32, beta: i32) {
+        self.record_bound(false, score_bound(score, alpha, beta));
+    }
+
+    fn record_q_bound(&mut self, score: i32, alpha: i32, beta: i32) {
+        self.record_bound(true, score_bound(score, alpha, beta));
+    }
+
+    fn record_main_exact(&mut self) {
+        self.record_bound(false, Bound::Exact);
+    }
+
+    fn record_q_exact(&mut self) {
+        self.record_bound(true, Bound::Exact);
+    }
+
+    fn record_tt_probe(&mut self, hit: bool) {
+        self.tt_probes += 1;
+        self.tt_hits += u64::from(hit);
+    }
+
+    fn record_tt_cutoff(&mut self, bound: Bound) {
+        self.tt_cutoffs += 1;
+        self.record_bound(false, bound);
+    }
+
+    fn record_tt_store(&mut self) {
+        self.tt_stores += 1;
+    }
+
+    fn record_qply(&mut self, qply: u32) {
+        self.qply[qply.min(MAX_QPLY) as usize] += 1;
+    }
+
+    fn record_q_in_check(&mut self, in_check: bool) {
+        self.q_in_check += u64::from(in_check);
+    }
+
+    fn record_stand_pat_node(&mut self) {
+        self.stand_pat_nodes += 1;
+    }
+
+    fn record_stand_pat_cutoff(&mut self) {
+        self.stand_pat_cutoffs += 1;
+        self.record_bound(true, Bound::Lower);
+    }
+
+    fn record_pvs_probe(&mut self) {
+        self.pvs_probes += 1;
+    }
+
+    fn record_pvs_research(&mut self) {
+        self.pvs_researches += 1;
+    }
+}
+
+#[cfg(feature = "profiling")]
+fn score_bound(score: i32, alpha: i32, beta: i32) -> Bound {
+    if score >= beta {
+        Bound::Lower
+    } else if score <= alpha {
+        Bound::Upper
+    } else {
+        Bound::Exact
+    }
 }
 
 struct Ctx<'a> {
@@ -72,6 +220,8 @@ struct Ctx<'a> {
     history: History,
     /// Shared across searches, so one move's tree seeds the next.
     tt: &'a TranspositionTable,
+    #[cfg(feature = "profiling")]
+    profile: SearchProfile,
     /// Whether leaves run quiescence. Always true in play; the alpha-beta
     /// equivalence tests turn it off so their unpruned oracle stays cheap.
     #[cfg(test)]
@@ -121,6 +271,8 @@ pub(crate) fn search_inner(
         killers: [[None; 2]; MAX_PLY],
         history: [[[0; 64]; 64]; 2],
         tt,
+        #[cfg(feature = "profiling")]
+        profile: SearchProfile::default(),
         #[cfg(test)]
         quiesce_leaves: true,
         #[cfg(test)]
@@ -160,6 +312,8 @@ pub(crate) fn search_inner(
         best_move,
         nodes: ctx.nodes,
         qnodes: ctx.qnodes,
+        #[cfg(feature = "profiling")]
+        profile: ctx.profile,
     }
 }
 
@@ -188,7 +342,10 @@ fn negamax_root(
     let key = board.state().zobrist();
     // Ordering only: the root must return a move, so it never cuts on a
     // stored score however deep that score was searched.
-    let tt_move = ctx.tt.probe(key).and_then(|entry| entry.best_move);
+    let entry = ctx.tt.probe(key);
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_tt_probe(entry.is_some());
+    let tt_move = entry.and_then(|entry| entry.best_move);
     order_moves(board, &mut moves, tt_move, ctx.killers_at(0), &ctx.history);
     let us = board.state().side_to_move();
     let mut best_move = None;
@@ -216,6 +373,8 @@ fn negamax_root(
     }
     // Exact: rejected null-window results never replace `best_score`, while
     // every result that does replace it came from an exact-window search.
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_tt_store();
     ctx.tt.store(
         key,
         score_to_tt(best_score, 0),
@@ -244,10 +403,14 @@ fn search_move(
     ctx: &mut Ctx<'_>,
 ) -> Result<i32, Aborted> {
     if index > 0 && ctx.pvs_enabled() {
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_pvs_probe();
         let narrow = -negamax(board, depth - 1, child_ply, -alpha - 1, -alpha, ctx)?;
         if !(narrow > alpha && narrow < beta) {
             return Ok(narrow);
         }
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_pvs_research();
     }
     negamax(board, depth - 1, child_ply, -beta, -alpha, ctx).map(|score| -score)
 }
@@ -267,11 +430,18 @@ fn negamax(
         if !ctx.quiesce_leaves {
             return Ok(evaluate(board));
         }
-        return qsearch(board, ply, 0, alpha, beta, ctx);
+        let result = qsearch(board, ply, 0, alpha, beta, ctx);
+        #[cfg(feature = "profiling")]
+        if let Ok(score) = result {
+            ctx.profile.record_main_bound(score, alpha, beta);
+        }
+        return result;
     }
     let key = board.state().zobrist();
     let alpha_original = alpha;
     let entry = ctx.tt.probe(key);
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_tt_probe(entry.is_some());
     // A cut at ply 1 would return the previous search's score for the root's
     // own move without searching, so the iteration reports a depth it never
     // reached and the score freezes until the iteration passes the stored
@@ -287,6 +457,8 @@ fn negamax(
             Bound::Upper => score <= alpha,
         };
         if usable {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_tt_cutoff(entry.bound);
             return Ok(score);
         }
     }
@@ -323,6 +495,8 @@ fn negamax(
         }
         alpha = alpha.max(best);
         if alpha >= beta {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_cutoff(false, legal);
             if !mv.is_capture() && !mv.is_promotion() {
                 ctx.store_killer(ply, mv);
                 // ponytail: no decay - history is per-`go` and dies with Ctx.
@@ -339,6 +513,8 @@ fn negamax(
     // decided per move, and returned without a store to match what the
     // pre-filtered version did.
     if legal == 0 {
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_main_exact();
         return Ok(terminal_score(board, ply));
     }
     let bound = if best >= beta {
@@ -348,6 +524,10 @@ fn negamax(
     } else {
         Bound::Upper
     };
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_bound(false, bound);
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_tt_store();
     ctx.tt
         .store(key, score_to_tt(best, ply), best_move, depth, bound);
     Ok(best)
@@ -367,13 +547,27 @@ fn qsearch(
     beta: i32,
     ctx: &mut Ctx<'_>,
 ) -> Result<i32, Aborted> {
+    #[cfg(feature = "profiling")]
+    let alpha_original = alpha;
     ctx.qnodes += 1;
     ctx.check_abort()?;
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_qply(qply);
     if qply >= MAX_QPLY {
-        return Ok(evaluate(board));
+        let score = evaluate(board);
+        #[cfg(feature = "profiling")]
+        {
+            let us = board.state().side_to_move();
+            ctx.profile
+                .record_q_in_check(is_attacked(board, board.king_square(us), us.flip()));
+            ctx.profile.record_q_bound(score, alpha, beta);
+        }
+        return Ok(score);
     }
     let us = board.state().side_to_move();
     let in_check = is_attacked(board, board.king_square(us), us.flip());
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_q_in_check(in_check);
 
     let mut moves = MoveList::new();
     let mut best = -INFINITY;
@@ -382,13 +576,19 @@ fn qsearch(
         // king move may be the only answer, so this needs every legal move.
         generate_legal(board, &mut moves);
         if moves.is_empty() {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_q_exact();
             return Ok(terminal_score(board, ply));
         }
     } else {
         // Stand-pat: declining to capture is always an option, so the static
         // eval is a lower bound on this node.
         best = evaluate(board);
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_stand_pat_node();
         if best >= beta {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_stand_pat_cutoff();
             return Ok(best);
         }
         alpha = alpha.max(best);
@@ -396,6 +596,8 @@ fn qsearch(
     }
     order_moves(board, &mut moves, None, [None; 2], &ctx.history);
 
+    #[cfg(feature = "profiling")]
+    let mut legal_moves = 0;
     for &mv in moves.iter() {
         board.make(mv);
         // Captures come back pseudo-legal. Filtering after `make` rather than
@@ -406,12 +608,20 @@ fn qsearch(
         let Some(result) = result else {
             continue;
         };
+        #[cfg(feature = "profiling")]
+        {
+            legal_moves += 1;
+        }
         best = best.max(-result?);
         alpha = alpha.max(best);
         if alpha >= beta {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_cutoff(true, legal_moves);
             break;
         }
     }
+    #[cfg(feature = "profiling")]
+    ctx.profile.record_q_bound(best, alpha_original, beta);
     Ok(best)
 }
 
@@ -656,6 +866,8 @@ mod tests {
             killers: [[None; 2]; MAX_PLY],
             history: [[[0; 64]; 64]; 2],
             tt,
+            #[cfg(feature = "profiling")]
+            profile: SearchProfile::default(),
             quiesce_leaves: true,
             pvs: true,
         }
@@ -1435,5 +1647,25 @@ mod tests {
         // most likely to move unnoticed.
         assert_eq!(result.nodes, 24);
         assert!(result.qnodes > 0, "each leaf runs quiescence");
+    }
+
+    #[cfg(feature = "profiling")]
+    #[test]
+    fn profile_classifies_cutoffs_and_bounds() {
+        let mut profile = SearchProfile::default();
+        for move_number in [1, 2, 3, 4, 8, 9] {
+            profile.record_cutoff(false, move_number);
+        }
+        assert_eq!(profile.main_cutoffs, [1, 1, 1, 2, 1]);
+
+        profile.record_main_bound(20, -10, 20);
+        profile.record_main_bound(-10, -10, 20);
+        profile.record_main_bound(0, -10, 20);
+        assert_eq!(profile.main_bounds, [1, 1, 1]);
+
+        profile.record_qply(0);
+        profile.record_qply(MAX_QPLY);
+        assert_eq!(profile.qply[0], 1);
+        assert_eq!(profile.qply[MAX_QPLY as usize], 1);
     }
 }

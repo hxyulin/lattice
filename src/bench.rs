@@ -5,6 +5,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::Board;
+#[cfg(feature = "profiling")]
+use crate::search::SearchProfile;
 use crate::search::{Limits, search_inner};
 use crate::tt::TranspositionTable;
 
@@ -37,6 +39,8 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
     let tt = TranspositionTable::new();
     let mut nodes = 0;
     let mut qnodes = 0;
+    #[cfg(feature = "profiling")]
+    let mut profile = SearchProfile::default();
     for fen in POSITIONS {
         let mut board: Board = fen.parse().expect("bench FEN must be valid");
         let result = search_inner(
@@ -53,12 +57,18 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
         );
         nodes += result.nodes;
         qnodes += result.qnodes;
+        #[cfg(feature = "profiling")]
+        {
+            profile += result.profile;
+        }
     }
     let total = nodes + qnodes;
     let millis = start.elapsed().as_millis().max(1);
     let nps = u128::from(total) * 1000 / millis;
-    // `Nodes searched:` stays the total on its own line: ChessEval parses it
-    // as the bench signature, so the split goes on a separate line.
+    // ChessEval anchors its bench signature to a line *starting* with `Nodes
+    // searched`, so this one must stay unprefixed. `bench` is a one-shot
+    // subcommand rather than part of a UCI session, so the protocol channel
+    // is not in use here.
     let _ = writeln!(output, "Nodes searched: {total}");
     let _ = writeln!(output, "Nodes/second: {nps}");
     let _ = writeln!(
@@ -66,7 +76,77 @@ fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
         "Qnodes: {qnodes} ({}% of total), main nodes: {nodes}",
         qnodes * 100 / total.max(1)
     );
+    #[cfg(feature = "profiling")]
+    write_profile(output, profile, qnodes);
     total
+}
+
+#[cfg(feature = "profiling")]
+fn write_profile(output: &mut dyn Write, profile: SearchProfile, qnodes: u64) {
+    write_distribution(
+        output,
+        "main cutoff index 1st/2nd/3rd/4th-8th/>8th",
+        &profile.main_cutoffs,
+    );
+    write_distribution(
+        output,
+        "qsearch cutoff index 1st/2nd/3rd/4th-8th/>8th",
+        &profile.q_cutoffs,
+    );
+    write_distribution(output, "main bounds high/low/exact", &profile.main_bounds);
+    write_distribution(output, "qsearch bounds high/low/exact", &profile.q_bounds);
+    let _ = writeln!(
+        output,
+        "info string profile TT probes {} hits {} ({:.2}%) usable cutoffs {} ({:.2}% of hits) stores {} ({:.2}% of probes)",
+        profile.tt_probes,
+        profile.tt_hits,
+        percent(profile.tt_hits, profile.tt_probes),
+        profile.tt_cutoffs,
+        percent(profile.tt_cutoffs, profile.tt_hits),
+        profile.tt_stores,
+        percent(profile.tt_stores, profile.tt_probes),
+    );
+    let _ = writeln!(
+        output,
+        "info string profile qsearch in check {} ({:.2}%) stand-pat cutoffs {} / {} ({:.2}%)",
+        profile.q_in_check,
+        percent(profile.q_in_check, qnodes),
+        profile.stand_pat_cutoffs,
+        profile.stand_pat_nodes,
+        percent(profile.stand_pat_cutoffs, profile.stand_pat_nodes),
+    );
+    let _ = writeln!(
+        output,
+        "info string profile PVS re-searches {} / {} ({:.2}%)",
+        profile.pvs_researches,
+        profile.pvs_probes,
+        percent(profile.pvs_researches, profile.pvs_probes),
+    );
+    let qply_total = profile.qply.iter().sum();
+    let values = profile
+        .qply
+        .iter()
+        .enumerate()
+        .map(|(qply, &count)| format!("{qply}:{count} ({:.2}%)", percent(count, qply_total)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(output, "info string profile qply {values}");
+}
+
+#[cfg(feature = "profiling")]
+fn write_distribution(output: &mut dyn Write, name: &str, counts: &[u64]) {
+    let total = counts.iter().sum();
+    let values = counts
+        .iter()
+        .map(|&count| format!("{count} ({:.2}%)", percent(count, total)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(output, "info string profile {name}: {values}");
+}
+
+#[cfg(feature = "profiling")]
+fn percent(count: u64, total: u64) -> f64 {
+    count as f64 * 100.0 / total.max(1) as f64
 }
 
 #[cfg(test)]
