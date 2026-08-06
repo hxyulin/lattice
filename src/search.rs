@@ -12,7 +12,7 @@ use crate::movegen::{
 use crate::tt::Miss;
 use crate::tt::{Bound, TranspositionTable};
 use crate::uci::move_text;
-use crate::{Board, Color, Move, MoveType, Square};
+use crate::{Board, Color, Move, MoveType, PieceType, Square};
 
 /// Nodes between clock checks. Low enough that a small tree still checks
 /// several times: depth 2 from the start position is only 440 nodes, and at
@@ -25,6 +25,10 @@ const MATE_BOUND: i32 = MATE - 1000;
 /// Quiescence ply ceiling. Deep enough for any real exchange sequence, and a
 /// hard bound keeps the bench node count finite and deterministic.
 const MAX_QPLY: u32 = 8;
+/// Null-move floor. Below this the null search reduces to a bare quiescence
+/// verdict on a position that cannot legally arise, which is too thin to trust.
+/// Also the depth at which `depth - 1 - R` bottoms out at exactly 0.
+const MIN_NULL_DEPTH: u32 = 3;
 /// Killer ply ceiling. Search depth is bounded by the clock long before this;
 /// past it the killer slots are simply skipped.
 const MAX_PLY: usize = 64;
@@ -85,6 +89,8 @@ pub(crate) struct SearchProfile {
     pub(crate) stand_pat_cutoffs: u64,
     pub(crate) pvs_probes: u64,
     pub(crate) pvs_researches: u64,
+    pub(crate) null_attempts: u64,
+    pub(crate) null_cutoffs: u64,
 }
 
 #[cfg(feature = "profiling")]
@@ -115,6 +121,8 @@ impl std::ops::AddAssign for SearchProfile {
         self.stand_pat_cutoffs += rhs.stand_pat_cutoffs;
         self.pvs_probes += rhs.pvs_probes;
         self.pvs_researches += rhs.pvs_researches;
+        self.null_attempts += rhs.null_attempts;
+        self.null_cutoffs += rhs.null_cutoffs;
     }
 }
 
@@ -206,6 +214,14 @@ impl SearchProfile {
     fn record_pvs_research(&mut self) {
         self.pvs_researches += 1;
     }
+
+    fn record_null_attempt(&mut self) {
+        self.null_attempts += 1;
+    }
+
+    fn record_null_cutoff(&mut self) {
+        self.null_cutoffs += 1;
+    }
 }
 
 #[cfg(feature = "profiling")]
@@ -240,6 +256,8 @@ struct Ctx<'a> {
     quiesce_leaves: bool,
     #[cfg(test)]
     pvs: bool,
+    #[cfg(test)]
+    nmp: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -289,6 +307,8 @@ pub(crate) fn search_inner(
         quiesce_leaves: true,
         #[cfg(test)]
         pvs: true,
+        #[cfg(test)]
+        nmp: true,
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
@@ -428,14 +448,14 @@ fn search_move(
     if index > 0 && ctx.pvs_enabled() {
         #[cfg(feature = "profiling")]
         ctx.profile.record_pvs_probe();
-        let narrow = -negamax(board, depth - 1, child_ply, -alpha - 1, -alpha, ctx)?;
+        let narrow = -negamax(board, depth - 1, child_ply, -alpha - 1, -alpha, true, ctx)?;
         if !(narrow > alpha && narrow < beta) {
             return Ok(narrow);
         }
         #[cfg(feature = "profiling")]
         ctx.profile.record_pvs_research();
     }
-    negamax(board, depth - 1, child_ply, -beta, -alpha, ctx).map(|score| -score)
+    negamax(board, depth - 1, child_ply, -beta, -alpha, true, ctx).map(|score| -score)
 }
 
 fn negamax(
@@ -444,6 +464,7 @@ fn negamax(
     ply: u32,
     mut alpha: i32,
     beta: i32,
+    can_null: bool,
     ctx: &mut Ctx<'_>,
 ) -> Result<i32, Aborted> {
     ctx.nodes += 1;
@@ -490,13 +511,44 @@ fn negamax(
             return Ok(score);
         }
     }
+    let us = board.state().side_to_move();
+    let has_non_pawn_material =
+        !(board.color(us) & !board.pieces(PieceType::Pawn) & !board.pieces(PieceType::King))
+            .is_empty();
+    if depth >= MIN_NULL_DEPTH
+        && can_null
+        && ctx.nmp_enabled()
+        && has_non_pawn_material
+        && evaluate(board) >= beta
+        && !is_attacked(board, board.king_square(us), us.flip())
+    {
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_null_attempt();
+        let reduction = 2 + depth / 6;
+        board.make_null();
+        let result = negamax(
+            board,
+            depth.saturating_sub(1 + reduction),
+            ply + 1,
+            -beta,
+            -beta + 1,
+            false,
+            ctx,
+        );
+        board.unmake_null();
+        let score = -result?;
+        if score >= beta {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_null_cutoff();
+            return Ok(beta);
+        }
+    }
     // The stored move is only a hint: a key collision or an entry from an
     // earlier game can decode to a move that is nonsense here, so it is
     // screened by `is_pseudo_legal` before being played.
     let tt_move = entry
         .and_then(|entry| entry.best_move)
         .filter(|&mv| is_pseudo_legal(board, mv));
-    let us = board.state().side_to_move();
     let mut moves = MoveList::new();
     let mut best = -INFINITY;
     let mut best_move = None;
@@ -825,6 +877,17 @@ fn victim_square(mv: Move) -> Option<Square> {
 }
 
 impl Ctx<'_> {
+    fn nmp_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.nmp
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     fn pvs_enabled(&self) -> bool {
         #[cfg(test)]
         {
@@ -948,7 +1011,6 @@ fn write_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PieceType;
     use crate::movegen::{MoveList, generate_legal};
 
     fn run(fen: &str, depth: u32) -> (SearchResult, String) {
@@ -987,6 +1049,7 @@ mod tests {
             profile: SearchProfile::default(),
             quiesce_leaves: true,
             pvs: true,
+            nmp: true,
         }
     }
 
@@ -994,8 +1057,47 @@ mod tests {
     fn static_leaf_ctx(iteration_depth: u32) -> Ctx<'static> {
         Ctx {
             quiesce_leaves: false,
+            nmp: false,
             ..test_ctx(iteration_depth)
         }
+    }
+
+    #[test]
+    fn bare_pawn_zugzwang_suppresses_null_move_pruning() {
+        let fen = "8/5pk1/6p1/3p4/3P4/6P1/5PK1/8 w - - 0 1";
+        let mut enabled_board: Board = fen.parse().unwrap();
+        let mut enabled = test_ctx(5);
+        let enabled_score = negamax_root(&mut enabled_board, 5, &mut enabled).unwrap().1;
+
+        let mut disabled_board: Board = fen.parse().unwrap();
+        let mut disabled = test_ctx(5);
+        disabled.nmp = false;
+        let disabled_score = negamax_root(&mut disabled_board, 5, &mut disabled)
+            .unwrap()
+            .1;
+
+        assert_eq!(enabled_score, disabled_score);
+        assert_eq!(enabled.nodes, disabled.nodes);
+    }
+
+    #[test]
+    fn null_move_pruning_reduces_nodes() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let mut enabled_board: Board = fen.parse().unwrap();
+        let mut enabled = test_ctx(5);
+        negamax_root(&mut enabled_board, 5, &mut enabled).unwrap();
+
+        let mut disabled_board: Board = fen.parse().unwrap();
+        let mut disabled = test_ctx(5);
+        disabled.nmp = false;
+        negamax_root(&mut disabled_board, 5, &mut disabled).unwrap();
+
+        assert!(
+            enabled.nodes < disabled.nodes,
+            "NMP did not reduce nodes: {} vs {}",
+            enabled.nodes,
+            disabled.nodes
+        );
     }
 
     #[test]
@@ -1790,5 +1892,10 @@ mod tests {
         profile.record_qply(MAX_QPLY);
         assert_eq!(profile.qply[0], 1);
         assert_eq!(profile.qply[MAX_QPLY as usize], 1);
+
+        profile.record_null_attempt();
+        profile.record_null_cutoff();
+        assert_eq!(profile.null_attempts, 1);
+        assert_eq!(profile.null_cutoffs, 1);
     }
 }

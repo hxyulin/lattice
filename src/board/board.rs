@@ -208,6 +208,25 @@ impl Board {
         self.state = undo.state;
         self.debug_check();
     }
+    pub(crate) fn make_null(&mut self) {
+        self.history.push(Undo {
+            state: self.state,
+            captured: None,
+        });
+        self.set_ep(None);
+        self.state.halfmove = self.state.halfmove.saturating_add(1);
+        self.state.side_to_move = self.state.side_to_move.flip();
+        self.state.zobrist ^= side_key();
+        self.debug_check();
+    }
+    pub(crate) fn unmake_null(&mut self) {
+        let undo = self
+            .history
+            .pop()
+            .expect("unmake_null requires move history");
+        self.state = undo.state;
+        self.debug_check();
+    }
     pub(crate) fn add_piece(&mut self, piece: Piece, square: Square) {
         self.mailbox[square.index() as usize] = Some(piece);
         self.pieces[piece.piece_type() as usize].set(square);
@@ -527,6 +546,18 @@ mod invariants {
             b.unmake(m);
             assert_eq!(b.to_string(), fen, "unmake {from}{to} from {fen}");
         }
+    }
+
+    #[test]
+    fn null_move_roundtrips() {
+        let fen = "4k3/8/8/3pP3/8/8/8/4K3 w - d6 7 9";
+        let mut board = Board::from_str(fen).unwrap();
+        let before = board.clone();
+
+        board.make_null();
+        board.unmake_null();
+
+        assert_eq!(board, before);
     }
 
     // catches: en passant removing the pawn on the destination square instead
