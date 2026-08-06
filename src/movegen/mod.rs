@@ -15,11 +15,14 @@ use tables::{KING, KNIGHT, PAWN};
 
 /// A fixed-capacity list of chess moves.
 pub struct MoveList {
-    moves: [Move; 256],
+    moves: [Move; Self::CAPACITY],
     len: usize,
 }
 
 impl MoveList {
+    /// Slots available, against a measured pseudo-legal maximum of 218.
+    const CAPACITY: usize = 256;
+
     /// Returns an empty move list.
     pub fn new() -> Self {
         let dummy = Move::new(
@@ -28,15 +31,13 @@ impl MoveList {
             MoveType::Quiet,
         );
         Self {
-            moves: [dummy; 256],
+            moves: [dummy; Self::CAPACITY],
             len: 0,
         }
     }
     /// Appends a move.
-    ///
-    /// Capacity is 256 against a measured pseudo-legal maximum of 218.
     pub fn push(&mut self, mv: Move) {
-        debug_assert!(self.len < 256, "move list overflow");
+        debug_assert!(self.len < Self::CAPACITY, "move list overflow");
         self.moves[self.len] = mv;
         self.len += 1;
     }
@@ -97,20 +98,7 @@ fn for_each_attack(
 
 /// Generates pseudo-legal moves for the side to move.
 pub fn generate_pseudo(board: &Board, list: &mut MoveList) {
-    let us_color = board.state().side_to_move();
-    let us = board.color(us_color);
-    let them = board.color(us_color.flip());
-    let occ = board.occupied();
-    pawn::generate(board, list, board.pieces(PieceType::Pawn) & us, them);
-    for_each_attack(board, us, occ, |from, attacks| {
-        for to in attacks & them {
-            list.push(Move::new(from, to, MoveType::Capture));
-        }
-        for to in attacks & !occ {
-            list.push(Move::new(from, to, MoveType::Quiet));
-        }
-    });
-    generate_castling(board, list, us_color);
+    generate(board, list, true);
 }
 
 /// Generates pseudo-legal captures and promotion captures for the side to move.
@@ -119,16 +107,36 @@ pub fn generate_pseudo(board: &Board, list: &mut MoveList) {
 /// excluded.
 // ponytail: captures only. Add quiet promotions if they SPRT positive.
 pub fn generate_captures(board: &Board, list: &mut MoveList) {
+    generate(board, list, false);
+}
+
+/// The body both generators share: captures always, quiets and castling only
+/// when `quiets` is set. Kept as one function so the capture set cannot drift
+/// out of agreement with the full set.
+fn generate(board: &Board, list: &mut MoveList, quiets: bool) {
     let us_color = board.state().side_to_move();
     let us = board.color(us_color);
     let them = board.color(us_color.flip());
     let occ = board.occupied();
-    pawn::generate_captures(board, list, board.pieces(PieceType::Pawn) & us, them);
+    let pawns = board.pieces(PieceType::Pawn) & us;
+    if quiets {
+        pawn::generate(board, list, pawns, them);
+    } else {
+        pawn::generate_captures(board, list, pawns, them);
+    }
     for_each_attack(board, us, occ, |from, attacks| {
         for to in attacks & them {
             list.push(Move::new(from, to, MoveType::Capture));
         }
+        if quiets {
+            for to in attacks & !occ {
+                list.push(Move::new(from, to, MoveType::Quiet));
+            }
+        }
     });
+    if quiets {
+        generate_castling(board, list, us_color);
+    }
 }
 
 fn generate_castling(board: &Board, list: &mut MoveList, us: Color) {

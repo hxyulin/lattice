@@ -172,25 +172,13 @@ const fn fold(mut tables: [[i32; 64]; 6], values: [i32; 6]) -> [[i32; 64]; 6] {
     tables
 }
 
-/// Returns the game phase, 24 at the start position falling to 0 in a bare
-/// king endgame. Promotions can push the raw sum past 24, so callers clamp.
-fn phase(board: &Board) -> i32 {
-    let mut phase = 0;
-    for square in board.occupied() {
-        if let Some(piece) = board.piece_on(square) {
-            phase += PHASE_WEIGHT[piece.piece_type() as usize];
-        }
-    }
-    phase
-}
-
-/// Returns the static evaluation in centipawns, relative to the side to move.
-///
-/// Material and piece placement are scored from separate midgame and endgame
-/// tables, interpolated by how much material remains.
-pub fn evaluate(board: &Board) -> i32 {
+/// Scans the board once, returning the midgame score, the endgame score, and
+/// the raw game phase. One pass rather than three: every caller wants all of
+/// them, and the scan is a cache miss per occupied square.
+fn scan(board: &Board) -> (i32, i32, i32) {
     let mut mg = 0;
     let mut eg = 0;
+    let mut phase = 0;
     // ponytail: full scan per call; incremental PSQT in Board::make when bench
     // nps says eval is hot.
     for square in board.occupied() {
@@ -198,6 +186,7 @@ pub fn evaluate(board: &Board) -> i32 {
             continue;
         };
         let kind = piece.piece_type() as usize;
+        phase += PHASE_WEIGHT[kind];
         // Tables are in reading order (index 0 is a8) while the board is
         // little-endian (a1 is 0), so White is the side that flips.
         let (index, sign) = match piece.color() {
@@ -207,8 +196,23 @@ pub fn evaluate(board: &Board) -> i32 {
         mg += sign * MG_TABLE[kind][index];
         eg += sign * EG_TABLE[kind][index];
     }
+    (mg, eg, phase)
+}
 
-    let mg_phase = phase(board).min(TOTAL_PHASE);
+/// Returns the game phase, 24 at the start position falling to 0 in a bare
+/// king endgame. Promotions can push the raw sum past 24, so callers clamp.
+#[cfg(test)]
+fn phase(board: &Board) -> i32 {
+    scan(board).2
+}
+
+/// Returns the static evaluation in centipawns, relative to the side to move.
+///
+/// Material and piece placement are scored from separate midgame and endgame
+/// tables, interpolated by how much material remains.
+pub fn evaluate(board: &Board) -> i32 {
+    let (mg, eg, phase) = scan(board);
+    let mg_phase = phase.min(TOTAL_PHASE);
     let eg_phase = TOTAL_PHASE - mg_phase;
     let score = (mg * mg_phase + eg * eg_phase) / TOTAL_PHASE;
     if board.state().side_to_move() == Color::White {

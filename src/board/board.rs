@@ -19,18 +19,35 @@ const fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^ (x >> 31)
 }
+
+/// Every Zobrist key, folded at compile time: 768 piece-square keys, then 16
+/// castling keys, 8 file keys for en passant, and the side-to-move key.
+///
+/// `make` hashes two to four pieces plus the castling rights on every call, and
+/// `mix` is three multiplies and four shifts. A table turns each of those into
+/// one load.
+const KEYS: [u64; 793] = {
+    let mut keys = [0; 793];
+    let mut i = 0;
+    while i < 793 {
+        keys[i] = mix(i as u64);
+        i += 1;
+    }
+    keys
+};
+
 fn piece_key(piece: Piece, square: Square) -> u64 {
-    let dense = (piece.color() as u64) * 6 + piece.piece_type() as u64;
-    mix(dense * 64 + square.index() as u64)
+    let dense = (piece.color() as usize) * 6 + piece.piece_type() as usize;
+    KEYS[dense * 64 + square.index() as usize]
 }
 fn castle_key(rights: CastlingRights) -> u64 {
-    mix(768 + rights.0 as u64)
+    KEYS[768 + rights.0 as usize]
 }
 fn ep_key(square: Square) -> u64 {
-    mix(784 + square.file() as u64)
+    KEYS[784 + square.file() as usize]
 }
 fn side_key() -> u64 {
-    mix(792)
+    KEYS[792]
 }
 
 /// A chess position with synchronized bitboards and mailbox storage.

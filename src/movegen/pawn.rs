@@ -7,41 +7,46 @@ const FILE_H: u64 = FILE_A << 7;
 const RANK_3: u64 = 0x0000_0000_00ff_0000;
 const RANK_6: u64 = 0x0000_ff00_0000_0000;
 
+const QUIET_PROMOTIONS: [MoveType; 4] = [
+    MoveType::KnightPromo,
+    MoveType::BishopPromo,
+    MoveType::RookPromo,
+    MoveType::QueenPromo,
+];
+const CAPTURE_PROMOTIONS: [MoveType; 4] = [
+    MoveType::KnightPromoCap,
+    MoveType::BishopPromoCap,
+    MoveType::RookPromoCap,
+    MoveType::QueenPromoCap,
+];
+
+/// Pushes one pawn move, expanded into all four underpromotions when `to` is a
+/// back rank. The only place that decides promotion-versus-not, so the quiet
+/// and capture paths cannot disagree about which ranks promote.
+fn push_pawn_move(list: &mut MoveList, from: Square, to: Square, capture: bool) {
+    if to.rank() == 0 || to.rank() == 7 {
+        let promotions = if capture {
+            CAPTURE_PROMOTIONS
+        } else {
+            QUIET_PROMOTIONS
+        };
+        for kind in promotions {
+            list.push(Move::new(from, to, kind));
+        }
+    } else {
+        let kind = if capture {
+            MoveType::Capture
+        } else {
+            MoveType::Quiet
+        };
+        list.push(Move::new(from, to, kind));
+    }
+}
+
 fn push_moves(list: &mut MoveList, targets: Bitboard, delta: i8, capture: bool) {
     for to in targets {
         let from = Square::new_unchecked((to.index() as i8 - delta) as u8);
-        let promotion = if to.rank() == 0 || to.rank() == 7 {
-            if capture {
-                [
-                    MoveType::KnightPromoCap,
-                    MoveType::BishopPromoCap,
-                    MoveType::RookPromoCap,
-                    MoveType::QueenPromoCap,
-                ]
-            } else {
-                [
-                    MoveType::KnightPromo,
-                    MoveType::BishopPromo,
-                    MoveType::RookPromo,
-                    MoveType::QueenPromo,
-                ]
-            }
-        } else {
-            let kind = if capture {
-                MoveType::Capture
-            } else {
-                MoveType::Quiet
-            };
-            [kind; 4]
-        };
-        let count = if to.rank() == 0 || to.rank() == 7 {
-            4
-        } else {
-            1
-        };
-        for kind in promotion.into_iter().take(count) {
-            list.push(Move::new(from, to, kind));
-        }
+        push_pawn_move(list, from, to, capture);
     }
 }
 
@@ -111,19 +116,7 @@ fn push_captures(list: &mut MoveList, targets: Bitboard, delta: i8, ep: u64) {
         if ep & (1u64 << to.index()) != 0 {
             list.push(Move::new(from, to, MoveType::EnPassant));
         } else {
-            let promotion = to.rank() == 0 || to.rank() == 7;
-            if promotion {
-                for kind in [
-                    MoveType::KnightPromoCap,
-                    MoveType::BishopPromoCap,
-                    MoveType::RookPromoCap,
-                    MoveType::QueenPromoCap,
-                ] {
-                    list.push(Move::new(from, to, kind));
-                }
-            } else {
-                list.push(Move::new(from, to, MoveType::Capture));
-            }
+            push_pawn_move(list, from, to, true);
         }
     }
 }
