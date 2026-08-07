@@ -11,7 +11,7 @@ use core::ops::Index;
 use crate::{Bitboard, Board, CastlingRights, Color, Move, MoveType, PieceType, Square};
 pub use magic::init;
 use magic::{bishop_attacks, queen_attacks, rook_attacks};
-use tables::{KING, KNIGHT, PAWN};
+use tables::{BETWEEN, KING, KNIGHT, PAWN};
 
 /// A fixed-capacity list of chess moves.
 ///
@@ -280,19 +280,38 @@ pub fn generate_legal_in_check(board: &mut Board, list: &mut MoveList, in_check:
     let us = board.state().side_to_move();
     let king = board.king_square(us);
     debug_assert_eq!(in_check, is_attacked(board, king, us.flip()));
-    // In check every move is verified by playing it, so the pinned set would
-    // never be read: computing it is two magic lookups plus a loop per sniper.
-    let pinned = if in_check {
-        Bitboard::empty()
+    let pinned = pinned_pieces(board, king, us);
+    // In check, a move by a piece other than the king is legal only if it
+    // lands on the checker or between the checker and the king, and only if
+    // there is exactly one checker: two cannot both be answered by one move.
+    // Everything outside that mask is discarded without being played, which
+    // is most of the list - the whole point of generating evasions.
+    let targets = if in_check {
+        let checkers = attackers_to(board, king, board.occupied()) & board.color(us.flip());
+        match checkers.count() {
+            1 => {
+                let checker = checkers.lsb().expect("a checker is present");
+                checkers | BETWEEN[king.index() as usize][checker.index() as usize]
+            }
+            // Double check: only the king can move, so nothing else survives.
+            _ => Bitboard::empty(),
+        }
     } else {
-        pinned_pieces(board, king, us)
+        Bitboard::empty()
     };
     for &mv in pseudo.iter() {
-        if !in_check
-            && mv.from() != king
-            && mv.move_type() != MoveType::EnPassant
-            && !pinned.contains(mv.from())
-        {
+        let from_king = mv.from() == king;
+        // En passant is the one capture whose target square is not where the
+        // captured pawn stands, so the mask cannot judge it; it also removes
+        // two pieces from one rank, which can expose the king sideways. Both
+        // reasons put it on the make/unmake path always.
+        let en_passant = mv.move_type() == MoveType::EnPassant;
+        if in_check && !from_king && !en_passant && !targets.contains(mv.to()) {
+            continue;
+        }
+        // A piece that is not pinned, is not the king, and passes the mask
+        // cannot expose the king, so it needs no trial.
+        if !from_king && !en_passant && !pinned.contains(mv.from()) {
             list.push(mv);
             continue;
         }
@@ -342,7 +361,7 @@ fn pinned_pieces(board: &Board, king: Square, us: Color) -> Bitboard {
 #[cfg(test)]
 mod tests {
     use super::perft::perft;
-    use super::{MoveList, generate_captures, generate_legal, is_attacked};
+    use super::{MoveList, generate_captures, generate_legal, generate_pseudo, is_attacked};
     use crate::{Board, Color, Move, MoveType, Square};
 
     fn sorted(list: &MoveList) -> Vec<Move> {
@@ -351,6 +370,109 @@ mod tests {
             (mv.move_type() as u16) << 12 | (mv.from().index() as u16) << 6 | mv.to().index() as u16
         });
         moves
+    }
+
+    /// The pre-evasion algorithm: generate everything, play each move, keep
+    /// what leaves the king safe. Slow and obviously correct, which is what a
+    /// differential oracle has to be.
+    fn legal_by_trial(board: &mut Board) -> MoveList {
+        let mut pseudo = MoveList::new();
+        generate_pseudo(board, &mut pseudo);
+        let us = board.state().side_to_move();
+        let mut out = MoveList::new();
+        for &mv in pseudo.iter() {
+            board.make(mv);
+            if !is_attacked(board, board.king_square(us), us.flip()) {
+                out.push(mv);
+            }
+            board.unmake(mv);
+        }
+        out
+    }
+
+    /// Walks a game with a cheap deterministic move choice, yielding every
+    /// position it passes through. Deterministic so a failure reproduces.
+    fn walk_positions(start: &str, plies: usize, stride: usize, out: &mut Vec<Board>) {
+        let mut board: Board = start.parse().unwrap();
+        for ply in 0..plies {
+            out.push(board.clone());
+            let mut moves = MoveList::new();
+            generate_legal(&mut board, &mut moves);
+            if moves.is_empty() {
+                return;
+            }
+            // A varying index rather than a fixed one, so the walk explores
+            // captures and quiets instead of always taking the first move.
+            board.make(moves[(ply * stride + ply / 3) % moves.len()]);
+        }
+    }
+
+    // catches: evasion generation admitting or dropping a move the trial
+    // filter disagrees with. Perft would report a wrong total without saying
+    // which position or which move, and the in-check paths - double check,
+    // blocking, en passant while in check, pinned pieces - are exactly where
+    // a target-mask bug hides. This compares the two answers move for move.
+    #[test]
+    fn evasions_match_the_trial_filter_move_for_move() {
+        crate::movegen::init();
+        let mut positions: Vec<Board> = Vec::new();
+        for (start, stride) in [
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                3,
+            ),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                5,
+            ),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 2),
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                7,
+            ),
+            (
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 0 1",
+                4,
+            ),
+            (
+                "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+                6,
+            ),
+        ] {
+            walk_positions(start, 60, stride, &mut positions);
+        }
+        // Hand-picked in-check shapes, so the sweep cannot miss them by luck.
+        for fen in [
+            // Double check: only the king may move.
+            "4k3/8/8/8/8/8/4r3/4K1n1 w - - 0 1",
+            // Single check by a slider, blockable along the file.
+            "4k3/8/8/8/8/8/8/4K2r w - - 0 1",
+            // Check by a knight: capture or move, never block.
+            "4k3/8/8/8/8/5n2/8/4K3 w - - 0 1",
+            // Check by a pawn, adjacent to the king.
+            "4k3/8/8/8/8/8/3p4/4K3 w - - 0 1",
+            // In check with an en passant capture available.
+            "8/8/8/2k5/3pP3/8/8/4K2R b K e3 0 1",
+            // Pinned piece while in check: it cannot block.
+            "4k3/8/8/8/8/8/3PP3/2B1K2r w - - 0 1",
+        ] {
+            positions.push(fen.parse().unwrap());
+        }
+        let mut checked = 0;
+        for mut board in positions {
+            let mut fast = MoveList::new();
+            generate_legal(&mut board, &mut fast);
+            let slow = legal_by_trial(&mut board);
+            assert_eq!(sorted(&fast), sorted(&slow), "disagreement in {board}");
+            let us = board.state().side_to_move();
+            if is_attacked(&board, board.king_square(us), us.flip()) {
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 20,
+            "the sweep must reach in-check positions, saw {checked}"
+        );
     }
 
     /// `generate_legal` admits most moves without playing them, on the strength
