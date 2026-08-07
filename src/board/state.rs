@@ -66,4 +66,9 @@ impl State {
 pub struct Undo {
     pub(crate) state: State,
     pub(crate) captured: Option<super::Piece>,
+    /// Whether a null move produced this entry. A null leaves the pieces
+    /// untouched, so two of them restore the side to move and the Zobrist key
+    /// alike; a repetition scan that ran past one would match a position that
+    /// never occurred in the game.
+    pub(crate) null: bool,
 }
