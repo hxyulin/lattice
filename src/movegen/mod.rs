@@ -6,6 +6,7 @@ mod pawn;
 pub mod perft;
 mod tables;
 
+use core::mem::MaybeUninit;
 use core::ops::Index;
 
 use crate::{Bitboard, Board, CastlingRights, Color, Move, MoveType, PieceType, Square};
@@ -19,10 +20,21 @@ use tables::{BETWEEN, KING, KNIGHT, PAWN};
 /// occupies eight whole lines rather than eight plus eight bytes of a ninth,
 /// and the first line fetched carries the length together with the first 31
 /// moves. A `u16` length is enough for a capacity the generator cannot reach.
+///
+/// The slots are `MaybeUninit` so that constructing a list writes only the
+/// length. Filling all 255 slots with a dummy move cost a 510-byte pattern
+/// store per construction, and the search builds two lists per node - one for
+/// the caller and one inside `generate_legal` - to overwrite or ignore every
+/// byte of it.
 #[repr(C, align(64))]
 pub struct MoveList {
     len: u16,
-    moves: [Move; Self::CAPACITY],
+    /// Slots `[0, len)` are initialized; the rest are not. [`push`] is the
+    /// only writer and it initializes slot `len` before incrementing, so
+    /// every read path can rely on `len` alone.
+    ///
+    /// [`push`]: MoveList::push
+    moves: [MaybeUninit<Move>; Self::CAPACITY],
 }
 
 impl MoveList {
@@ -32,20 +44,25 @@ impl MoveList {
 
     /// Returns an empty move list.
     pub fn new() -> Self {
-        let dummy = Move::new(
-            Square::new_unchecked(0),
-            Square::new_unchecked(1),
-            MoveType::Quiet,
-        );
         Self {
             len: 0,
-            moves: [dummy; Self::CAPACITY],
+            moves: [MaybeUninit::uninit(); Self::CAPACITY],
         }
     }
     /// Appends a move.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if the list is full. Release builds do not check:
+    /// overflow is unreachable for a generator against a capacity of 255 when
+    /// no position offers more than 218 moves, and the debug assertion runs
+    /// under every test, including perft over the reference positions.
+    /// Pushing a 256th move in release is undefined behaviour.
     pub fn push(&mut self, mv: Move) {
         debug_assert!(self.len() < Self::CAPACITY, "move list overflow");
-        self.moves[self.len()] = mv;
+        let len = self.len();
+        // SAFETY: `len < CAPACITY` per the assertion above.
+        unsafe { self.moves.get_unchecked_mut(len).write(mv) };
         self.len += 1;
     }
     /// Returns the number of moves.
@@ -58,12 +75,21 @@ impl MoveList {
     }
     /// Iterates over the moves.
     pub fn iter(&self) -> core::slice::Iter<'_, Move> {
-        self.moves[..self.len()].iter()
+        self.as_slice().iter()
+    }
+    /// Returns the moves as a slice.
+    pub fn as_slice(&self) -> &[Move] {
+        // SAFETY: `push` initializes slot `len` before incrementing `len`, so
+        // the first `len` slots are initialized, and `MaybeUninit<Move>` has
+        // the same layout as `Move`.
+        unsafe { &*(core::ptr::from_ref(&self.moves[..self.len()]) as *const [Move]) }
     }
     /// Returns the moves as a mutable slice, for reordering in place.
     pub fn as_mut_slice(&mut self) -> &mut [Move] {
         let len = self.len();
-        &mut self.moves[..len]
+        // SAFETY: as in `as_slice`. Reordering the initialized prefix in
+        // place leaves every slot in it initialized.
+        unsafe { &mut *(core::ptr::from_mut(&mut self.moves[..len]) as *mut [Move]) }
     }
 }
 
@@ -76,7 +102,7 @@ impl Default for MoveList {
 impl Index<usize> for MoveList {
     type Output = Move;
     fn index(&self, index: usize) -> &Self::Output {
-        &self.moves[..self.len()][index]
+        &self.as_slice()[index]
     }
 }
 
@@ -363,6 +389,59 @@ mod tests {
     use super::perft::perft;
     use super::{MoveList, generate_captures, generate_legal, generate_pseudo, is_attacked};
     use crate::{Board, Color, Move, MoveType, Square};
+
+    #[test]
+    fn a_move_list_is_one_cache_line_aligned_and_eight_lines_long() {
+        assert_eq!(core::mem::size_of::<MoveList>(), 512);
+        assert_eq!(core::mem::align_of::<MoveList>(), 64);
+    }
+
+    /// The uninitialized tail is only sound while every reader stops at `len`.
+    /// Under Miri this fails if a read path ever runs past it.
+    #[test]
+    fn only_the_pushed_prefix_is_readable() {
+        let mut list = MoveList::new();
+        assert_eq!(list.len(), 0);
+        assert!(list.is_empty());
+        assert_eq!(list.as_slice(), &[]);
+        assert_eq!(list.iter().count(), 0);
+
+        let pushed: Vec<Move> = (1..=40)
+            .map(|i| {
+                Move::new(
+                    Square::new_unchecked(0),
+                    Square::new_unchecked(i),
+                    MoveType::Quiet,
+                )
+            })
+            .collect();
+        for &mv in &pushed {
+            list.push(mv);
+        }
+        assert_eq!(list.len(), pushed.len());
+        assert_eq!(list.as_slice(), pushed.as_slice());
+        assert_eq!(list.iter().copied().collect::<Vec<_>>(), pushed);
+        for (i, &mv) in pushed.iter().enumerate() {
+            assert_eq!(list[i], mv);
+        }
+        list.as_mut_slice().reverse();
+        assert_eq!(list.iter().copied().next(), pushed.last().copied());
+    }
+
+    #[test]
+    #[should_panic(expected = "move list overflow")]
+    #[cfg(debug_assertions)]
+    fn pushing_past_capacity_is_caught_in_debug() {
+        let mut list = MoveList::new();
+        let mv = Move::new(
+            Square::new_unchecked(0),
+            Square::new_unchecked(1),
+            MoveType::Quiet,
+        );
+        for _ in 0..=MoveList::CAPACITY {
+            list.push(mv);
+        }
+    }
 
     fn sorted(list: &MoveList) -> Vec<Move> {
         let mut moves: Vec<_> = list.iter().copied().collect();
