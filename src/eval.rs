@@ -362,7 +362,103 @@ fn rook_files(board: &Board, us: Color) -> (i32, i32) {
 fn term_sum(board: &Board, us: Color) -> (i32, i32) {
     let (mobility_mg, mobility_eg) = mobility(board, us);
     let (rook_mg, rook_eg) = rook_files(board, us);
-    (mobility_mg + rook_mg, mobility_eg + rook_eg)
+    let (pawn_mg, pawn_eg) = pawn_structure(board, us);
+    (
+        mobility_mg + rook_mg + pawn_mg,
+        mobility_eg + rook_eg + pawn_eg,
+    )
+}
+
+/// A file, spread to the two files either side of it as well.
+fn adjacent_files(file: u8) -> u64 {
+    const FILE_A: u64 = 0x0101_0101_0101_0101;
+    let f = FILE_A << file;
+    // The shifts cannot wrap onto the opposite edge because a file mask is
+    // eight bits spaced eight apart, so a one-bit shift moves each into the
+    // neighbouring file or off the board.
+    ((f << 1) & !FILE_A) | ((f >> 1) & !(FILE_A << 7))
+}
+
+/// Passed pawn bonus by the number of ranks the pawn has advanced, from its
+/// home rank (0, never scored) to the rank before promotion (6).
+///
+/// Steep and endgame-weighted: a passer on the sixth is close to a queen when
+/// nothing is left to stop it, and close to irrelevant with a full board.
+const PASSED_MG: [i32; 7] = [0, 2, 6, 14, 28, 50, 80];
+const PASSED_EG: [i32; 7] = [0, 8, 16, 30, 55, 95, 145];
+
+/// Penalty for a pawn with no friendly pawn on either adjacent file. It can
+/// never be defended by a pawn, so it is a permanent target.
+const ISOLATED_MG: i32 = -12;
+const ISOLATED_EG: i32 = -18;
+
+/// Penalty per pawn beyond the first on a file. They cannot defend each other
+/// and together they cover fewer squares than they would spread out.
+const DOUBLED_MG: i32 = -8;
+const DOUBLED_EG: i32 = -18;
+
+/// Pawn structure for one side, in midgame and endgame centipawns.
+fn pawn_structure(board: &Board, us: Color) -> (i32, i32) {
+    let ours = board.pieces(PieceType::Pawn) & board.color(us);
+    let theirs = board.pieces(PieceType::Pawn) & board.color(us.flip());
+    let (mut mg, mut eg) = (0, 0);
+    for square in ours {
+        let file = square.file();
+        let rank = square.rank();
+        // Ranks advanced, counted from the side's own home rank so that both
+        // colors index the same table.
+        let advanced = match us {
+            Color::White => rank,
+            Color::Black => 7 - rank,
+        } as usize;
+        let own_file = Bitboard::new(0x0101_0101_0101_0101 << file);
+        let neighbours = Bitboard::new(adjacent_files(file));
+
+        // Passed: no enemy pawn on this or an adjacent file ahead of it, which
+        // is exactly the set that could either block it or capture it on the
+        // way. `ahead` excludes the pawn's own square, so an enemy pawn beside
+        // it on a neighbouring file does not count as stopping it.
+        //
+        // Our own pawn ahead on the file disqualifies it too: the rear pawn of
+        // a doubled pair cannot run, and scoring both as passed would pay
+        // twice for one passer.
+        let ahead = ahead_of(square, us);
+        let blocked = !(ours & ahead & own_file).is_empty();
+        if !blocked && (theirs & ahead & (own_file | neighbours)).is_empty() {
+            mg += PASSED_MG[advanced];
+            eg += PASSED_EG[advanced];
+        }
+        // Isolated: no friendly pawn on either neighbouring file, anywhere.
+        if (ours & neighbours).is_empty() {
+            mg += ISOLATED_MG;
+            eg += ISOLATED_EG;
+        }
+        // Doubled: charged once per pawn that has a friendly pawn ahead of it
+        // on the same file, so a tripled file is charged twice.
+        if blocked {
+            mg += DOUBLED_MG;
+            eg += DOUBLED_EG;
+        }
+    }
+    (mg, eg)
+}
+
+/// Every square strictly ahead of a square from `color`'s point of view.
+fn ahead_of(square: Square, color: Color) -> Bitboard {
+    let rank = square.rank();
+    Bitboard::new(match color {
+        // All ranks above this one: shift the full board up past it.
+        Color::White => u64::MAX << ((rank + 1) * 8),
+        // All ranks below. `rank == 0` would shift by 64, which is undefined,
+        // but a black pawn on rank 0 has already promoted and cannot exist.
+        Color::Black => {
+            if rank == 0 {
+                0
+            } else {
+                u64::MAX >> ((8 - rank) * 8)
+            }
+        }
+    })
 }
 
 /// Returns the static evaluation in centipawns, relative to the side to move.
@@ -712,6 +808,67 @@ mod tests {
         // leaves the bonus intact.
         assert_eq!(score("4k3/8/8/8/8/8/P7/3RK3 w - - 0 1"), ROOK_OPEN_MG);
         const { assert!(ROOK_OPEN_MG > ROOK_SEMI_MG && ROOK_SEMI_MG > 0) };
+    }
+
+    // catches: a passer test that an enemy pawn beside it defeats, adjacent
+    // files wrapping around the board edge, doubled charged per file rather
+    // than per extra pawn, and the whole term reading zero.
+    #[test]
+    fn pawn_structure_scores_passers_isolanis_and_doubled_pawns() {
+        let score = |fen: &str, color| {
+            let board: Board = fen.parse().unwrap();
+            pawn_structure(&board, color)
+        };
+        // A white pawn on e5 with no black pawn ahead of it on d/e/f is passed,
+        // and isolated too - three ranks advanced, so PASSED[4] plus ISOLATED.
+        assert_eq!(
+            score("4k3/8/8/4P3/8/8/8/4K3 w - - 0 1", Color::White),
+            (PASSED_MG[4] + ISOLATED_MG, PASSED_EG[4] + ISOLATED_EG)
+        );
+        // A black pawn on d7 is ahead of it on an adjacent file, so not passed.
+        assert_eq!(
+            score("4k3/3p4/8/4P3/8/8/8/4K3 w - - 0 1", Color::White).0,
+            ISOLATED_MG
+        );
+        // A black pawn on d5 is beside it, not ahead, so it is still passed.
+        assert_eq!(
+            score("4k3/8/8/3pP3/8/8/8/4K3 w - - 0 1", Color::White).0,
+            PASSED_MG[4] + ISOLATED_MG
+        );
+        // Doubled is per extra pawn, not per file: e4+e5 is charged once,
+        // e3+e4+e5 twice. Both are isolated, and only the *front* pawn of each
+        // stack is passed - the one behind is blocked by its own pawn, and
+        // paying the passer bonus twice for one runner is the bug this pins.
+        let two = score("4k3/8/8/4P3/4P3/8/8/4K3 w - - 0 1", Color::White).0;
+        let three = score("4k3/8/8/4P3/4P3/4P3/8/4K3 w - - 0 1", Color::White).0;
+        assert_eq!(two, PASSED_MG[4] + 2 * ISOLATED_MG + DOUBLED_MG);
+        assert_eq!(three, PASSED_MG[4] + 3 * ISOLATED_MG + 2 * DOUBLED_MG);
+        // An a-file pawn's neighbours are the b-file only. If the mask wrapped
+        // to the h-file, the h-pawn here would stop it being isolated.
+        assert_eq!(
+            score("4k3/7p/8/8/8/8/P7/4K3 w - - 0 1", Color::White).0,
+            ISOLATED_MG + PASSED_MG[1]
+        );
+        // ...and symmetrically for the h-file, which is where a shift that
+        // wraps the other way would show.
+        assert_eq!(
+            score("4k3/p7/8/8/8/8/7P/4K3 w - - 0 1", Color::White).0,
+            ISOLATED_MG + PASSED_MG[1]
+        );
+        // A pawn with a friend beside it is neither isolated nor doubled, and
+        // with nothing ahead it is passed: this is the case where every
+        // penalty must be absent rather than cancelling.
+        assert_eq!(
+            score("4k3/8/8/8/8/8/PP6/4K3 w - - 0 1", Color::White).0,
+            2 * PASSED_MG[1]
+        );
+        // Black is scored from its own side: a black pawn on d2 is one rank
+        // from promoting, so it indexes the same slot as a white pawn on d7.
+        assert_eq!(
+            score("4k3/8/8/8/8/8/3p4/4K3 w - - 0 1", Color::Black).0,
+            PASSED_MG[6] + ISOLATED_MG
+        );
+        const { assert!(PASSED_EG[6] > 0 && ISOLATED_MG < 0 && DOUBLED_MG < 0) };
     }
 
     #[test]
