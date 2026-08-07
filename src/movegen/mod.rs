@@ -262,12 +262,31 @@ pub fn is_attacked(board: &Board, sq: Square, by: Color) -> bool {
 /// the king attacked; everything else is admitted directly, and only the
 /// remainder pays for a `make`/`unmake` pair.
 pub fn generate_legal(board: &mut Board, list: &mut MoveList) {
+    let us = board.state().side_to_move();
+    let in_check = is_attacked(board, board.king_square(us), us.flip());
+    generate_legal_in_check(board, list, in_check);
+}
+
+/// [`generate_legal`] for a caller that already knows whether the side to move
+/// is in check.
+///
+/// Quiescence is the caller that matters: it tests for check to decide whether
+/// stand-pat is available, and only generates legal moves when the answer is
+/// yes, so `generate_legal` recomputed the same `is_attacked` immediately
+/// after. `in_check` must describe `board`, or the legality filter is wrong.
+pub fn generate_legal_in_check(board: &mut Board, list: &mut MoveList, in_check: bool) {
     let mut pseudo = MoveList::new();
     generate_pseudo(board, &mut pseudo);
     let us = board.state().side_to_move();
     let king = board.king_square(us);
-    let in_check = is_attacked(board, king, us.flip());
-    let pinned = pinned_pieces(board, king, us);
+    debug_assert_eq!(in_check, is_attacked(board, king, us.flip()));
+    // In check every move is verified by playing it, so the pinned set would
+    // never be read: computing it is two magic lookups plus a loop per sniper.
+    let pinned = if in_check {
+        Bitboard::empty()
+    } else {
+        pinned_pieces(board, king, us)
+    };
     for &mv in pseudo.iter() {
         if !in_check
             && mv.from() != king

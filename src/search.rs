@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
 use crate::movegen::{
-    MoveList, attackers_to, generate_captures, generate_legal, generate_pseudo, generate_quiets,
-    is_attacked,
+    MoveList, attackers_to, generate_captures, generate_legal_in_check, generate_pseudo,
+    generate_quiets, is_attacked,
 };
 #[cfg(feature = "profiling")]
 use crate::tt::Miss;
@@ -797,7 +797,9 @@ fn qsearch(
     if in_check {
         // No stand-pat in check: the side to move must answer it, and a quiet
         // king move may be the only answer, so this needs every legal move.
-        generate_legal(board, &mut moves);
+        // `in_check` is already known here, so it is passed rather than
+        // recomputed - this is the hottest `generate_legal` caller.
+        generate_legal_in_check(board, &mut moves, in_check);
         if moves.is_empty() {
             #[cfg(feature = "profiling")]
             ctx.profile.record_q_exact();
