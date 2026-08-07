@@ -21,7 +21,7 @@ pub struct MoveList {
 
 impl MoveList {
     /// Slots available, against a measured pseudo-legal maximum of 218.
-    const CAPACITY: usize = 256;
+    pub const CAPACITY: usize = 256;
 
     /// Returns an empty move list.
     pub fn new() -> Self {

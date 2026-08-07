@@ -928,13 +928,29 @@ fn order_moves(
     killers: [Option<Move>; 2],
     history: &History,
 ) {
-    // Cached, not `sort_unstable_by_key`: that re-evaluates its closure on
-    // every comparison, and `order_key` is two mailbox lookups plus a probe
-    // into a 32KiB history table. Paying for it O(n log n) times rather than
-    // O(n) made move ordering the hottest thing in the whole search - this one
-    // word is worth roughly 1.9x throughput. Measured against an
-    // allocation-free array sort, which came out both slower and longer.
-    moves.sort_by_cached_key(|&mv| order_key(board, mv, tt_move, killers, history));
+    // Keys computed once, not per comparison: `order_key` is two mailbox
+    // lookups plus a probe into a 32KiB history table, and paying for it
+    // O(n log n) times rather than O(n) made move ordering the hottest thing
+    // in the whole search.
+    //
+    // Insertion sort over a stack array rather than `sort_by_cached_key`,
+    // which heap-allocates its key buffer on every node. Both are stable, so
+    // ties keep their generated order and the node count is unchanged.
+    let mut keys = [(0i32, 0i32); MoveList::CAPACITY];
+    for (slot, &mv) in keys.iter_mut().zip(moves.iter()) {
+        *slot = order_key(board, mv, tt_move, killers, history);
+    }
+    for i in 1..moves.len() {
+        let (key, mv) = (keys[i], moves[i]);
+        let mut j = i;
+        while j > 0 && keys[j - 1] > key {
+            keys[j] = keys[j - 1];
+            moves[j] = moves[j - 1];
+            j -= 1;
+        }
+        keys[j] = key;
+        moves[j] = mv;
+    }
 }
 
 /// Sort key for one move, ascending: gain descending, then attacker ascending
