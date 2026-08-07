@@ -81,3 +81,6 @@ be6f19a,2026-08-07,"docs: record the tempo SPRT result",
 c537b6e,2026-08-08,"feat(search): reverse futility pruning",886840
 541307e,2026-08-08,"docs: record the reverse futility pruning SPRT result",
 01a0fd7,2026-08-08,"feat(search): scale the late move reduction with depth and move number",824439
+15c0cc6,2026-08-08,"docs: record the late move reduction formula SPRT result",
+e191886,2026-08-08,"fix(tools): stop stamping merge commits, and identify ab-bench builds",
+2fac8d5,2026-08-08,"feat(eval): score piece mobility",945884

@@ -58,4 +58,5 @@ authoritative result.
 | bonus for having the move | STC | - | +12.3 | pass |
 | reverse futility pruning | STC | - | +41.1 | pass |
 | scale the late move reduction with depth and move number | STC | - | +38.4 | pass |
+| score piece mobility | STC | - | +27.4 | pass |
 <!-- END generated -->
