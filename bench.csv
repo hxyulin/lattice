@@ -52,3 +52,6 @@ db64cfb,2026-08-07,"docs: record the late move reductions SPRT result",
 e955af6,2026-08-07,"docs: record the late move reductions LTC result",
 73f045c,2026-08-07,"tools: add a Stockfish calibration gauntlet",
 8791ed9,2026-08-05,"feat(search): SEE pruning in quiescence",1274778
+94c6465,2026-08-07,"docs: record the SEE pruning SPRT result",
+fe042e0,2026-08-07,"feat(tt): size the transposition table at runtime",1274778
+67ce5c2,2026-08-07,"feat(uci): support setoption with the Hash and Threads options",1274778
