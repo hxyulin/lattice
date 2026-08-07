@@ -63,7 +63,16 @@ run_hook() {
     bash "$OLDPWD/tools/stamp-bench.sh" "$msgfile" >/dev/null 2>&1)
 }
 
-trailers() { grep -i '^Bench:' "$1" || true; }
+# Commits whatever setup_repo staged, so the next hook run sees the state an
+# amend sees: a clean index over a commit that already holds the source.
+commit_staged() {
+  (cd "$tmp/repo" && git commit -q -m "${1:-a commit}")
+}
+
+# The trailer, not the subject: a commit titled `bench: ...` also matches a
+# case-insensitive prefix, and conflating the two is what let the strip bug
+# hide.
+trailers() { tail -n +2 "$1" | grep -i '^Bench:' || true; }
 
 # The cherry-pick case: an inherited trailer names a tree that no longer
 # exists, so it must be replaced, and exactly once.
@@ -109,5 +118,72 @@ setup_repo
 printf 'docs: something\n' > "$tmp/msg"
 run_hook "$tmp/msg" 1274778
 check "docs-only commit is not stamped" "" "$(trailers "$tmp/msg")"
+
+# `git commit --amend` with nothing staged: the index is empty but the commit
+# being rewritten is full of Rust, so the guard has to look past the index or
+# it silently skips a commit that needs a signature. This is the case that
+# shipped unstamped.
+setup_repo
+commit_staged "perf: a rust change"
+printf 'perf: a rust change, reworded\n' > "$tmp/msg"
+run_hook "$tmp/msg" 1274778
+check "amend with an empty index is stamped" "Bench: 1274778" "$(trailers "$tmp/msg")"
+
+# The same amend, but the commit being rewritten carried a stale number: it
+# must be replaced rather than kept, exactly as on the cherry-pick path.
+setup_repo
+commit_staged "perf: a rust change"
+printf 'perf: reworded\n\nBench: 1274707\n' > "$tmp/msg"
+run_hook "$tmp/msg" 1274778
+check "amend replaces a stale trailer" "Bench: 1274778" "$(trailers "$tmp/msg")"
+
+# Amending a docs file onto a Rust commit is the one case this gets wrong,
+# and deliberately so: with a non-empty index it is indistinguishable from an
+# ordinary docs commit following a Rust one, since git offers no reliable
+# amend signal. The two want opposite answers, so one has to lose.
+#
+# The stamp loses. A missing trailer is a visible gap in bench.csv that
+# re-running the hook fixes; a spurious one is a wrong row that reads as
+# real. Stage the source alongside the docs, or amend with an empty index,
+# and it stamps.
+setup_repo
+commit_staged "perf: a rust change"
+(cd "$tmp/repo" && echo hi > README.md && git add README.md)
+printf 'perf: plus a readme\n' > "$tmp/msg"
+run_hook "$tmp/msg" 1274778
+check "amend adding only docs to a rust commit skips (known limit)" "" \
+  "$(trailers "$tmp/msg")"
+
+# catches: a case-insensitive strip eating the subject. This repo titles
+# commits `bench: ...`, and `grep -vi '^Bench:'` deleted that line along with
+# the trailer, silently promoting the body's first line to subject. It
+# happened twice to a real commit before it was noticed.
+setup_repo
+printf 'bench: measure something\n\nA body paragraph.\n\nBench: 1274707\n' > "$tmp/msg"
+run_hook "$tmp/msg" 1274778
+check "a bench: subject survives the strip" "bench: measure something" \
+  "$(head -1 "$tmp/msg")"
+check "and the trailer is still replaced" "Bench: 1274778" "$(trailers "$tmp/msg")"
+
+# catches: reading HEAD when the index already answered. An ordinary
+# docs-only commit landing right after a Rust commit must not inherit that
+# commit's answer - gen-ledgers.sh turns every trailer into a bench.csv row,
+# so a spurious stamp is a wrong row rather than a wasted rebuild. This is
+# the regression the first version of the amend fix introduced.
+setup_repo
+commit_staged "perf: a rust change"
+(cd "$tmp/repo" && echo hi > README.md && git add README.md)
+printf 'docs: after a rust commit\n' > "$tmp/msg"
+run_hook "$tmp/msg" 1274778
+check "docs commit after a rust commit is not stamped" "" "$(trailers "$tmp/msg")"
+
+# A docs-only commit amended on top of another docs-only commit must still
+# skip: neither the index nor the rewritten commit holds any Rust.
+setup_repo
+(cd "$tmp/repo" && git rm -q --cached src.rs && echo hi > README.md && git add README.md)
+commit_staged "docs: something"
+printf 'docs: reworded\n' > "$tmp/msg"
+run_hook "$tmp/msg" 1274778
+check "amend of a docs-only commit is not stamped" "" "$(trailers "$tmp/msg")"
 
 exit $fail
