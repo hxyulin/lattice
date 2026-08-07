@@ -36,7 +36,17 @@ impl Square {
 
     /// Returns the little-endian rank-file index.
     pub fn index(self) -> u8 {
-        self.0.get()
+        let index = self.0.get();
+        // The range is told to the optimizer once, here, rather than by an
+        // unchecked index at each of the ~25 table lookups that take a square.
+        // `NonMaxU8` only promises `!= 255`, so without this every `TABLE[sq]`
+        // against a 64-entry table carried a bounds check that cannot fire.
+        //
+        // SAFETY: every constructor masks with `& 63` or tests `< 64`.
+        if index >= 64 {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+        index
     }
 
     /// Returns the square mirrored vertically across the board.

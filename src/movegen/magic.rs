@@ -120,9 +120,13 @@ fn build() -> MagicTables {
     MagicTables { rook, bishop, pool }
 }
 
-fn lookup(magic: &Magic, occ: Bitboard) -> Bitboard {
+/// Takes the tables rather than reaching for the global: `TABLES` is a
+/// `LazyLock`, so each deref is an atomic load and a branch on the once-state.
+/// Passing it in means one deref per lookup instead of two, and one per queen
+/// instead of four.
+fn lookup(tables: &MagicTables, magic: &Magic, occ: Bitboard) -> Bitboard {
     let index = ((occ & magic.mask).bits().wrapping_mul(magic.magic) >> magic.shift) as usize;
-    TABLES.pool[magic.offset as usize + index]
+    tables.pool[magic.offset as usize + index]
 }
 
 /// Forces magic table generation.
@@ -134,15 +138,19 @@ pub fn init() {
 }
 
 pub(crate) fn rook_attacks(sq: Square, occ: Bitboard) -> Bitboard {
-    lookup(&TABLES.rook[sq.index() as usize], occ)
+    let tables = &*TABLES;
+    lookup(tables, &tables.rook[sq.index() as usize], occ)
 }
 
 pub(crate) fn bishop_attacks(sq: Square, occ: Bitboard) -> Bitboard {
-    lookup(&TABLES.bishop[sq.index() as usize], occ)
+    let tables = &*TABLES;
+    lookup(tables, &tables.bishop[sq.index() as usize], occ)
 }
 
 pub(crate) fn queen_attacks(sq: Square, occ: Bitboard) -> Bitboard {
-    rook_attacks(sq, occ) | bishop_attacks(sq, occ)
+    let tables = &*TABLES;
+    let index = sq.index() as usize;
+    lookup(tables, &tables.rook[index], occ) | lookup(tables, &tables.bishop[index], occ)
 }
 
 #[cfg(test)]

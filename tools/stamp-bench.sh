@@ -12,11 +12,40 @@ msg="$1" # pre-commit passes the commit-message file path here
 case "$PRE_COMMIT_COMMIT_MSG_SOURCE" in merge | squash) exit 0 ;; esac
 # An existing trailer is not trusted: cherry-pick and rebase carry the number
 # forward from a tree that no longer exists, so it is re-derived and replaced.
-# Only Rust/Cargo changes move the node count; everything else skips the rebuild.
-git diff --cached --name-only | grep -qE '\.rs$|Cargo\.(toml|lock)$' || exit 0
+#
+# Only Rust/Cargo changes move the node count; everything else skips the
+# rebuild. What counts as "changed" has to be the content the commit will
+# carry, not the index: `git commit --amend` with nothing staged leaves
+# `git diff --cached` empty while still producing a commit full of Rust, and
+# the hook then skipped a commit that needed stamping.
+#
+# An amend cannot be detected from the hook's arguments: git reports the
+# message source as `commit` only for the editor form, while
+# `commit --amend -m` and an ordinary `-m` commit both report `message`, and
+# no state file separates them. What does separate them is the index. A
+# commit with nothing staged would be rejected as empty, so an empty index
+# here means the content is coming from the commit being rewritten - and
+# `HEAD` is that commit.
+#
+# Falling back rather than unioning matters: `HEAD` is the *previous* commit
+# during an ordinary commit, and including it there stamped a tools-only
+# commit that happened to follow a Rust one. gen-ledgers.sh turns every
+# trailer into a bench.csv row, so that is a wrong row, not a wasted rebuild.
+# ponytail: amending only non-Rust files onto a Rust commit is not stamped -
+# that state is indistinguishable from an ordinary docs commit following a
+# Rust one. Stage the source too, or amend with an empty index.
+changed=$(git diff --cached --name-only)
+[ -z "$changed" ] && changed=$(git show --pretty= --name-only HEAD 2>/dev/null)
+printf '%s\n' "$changed" | grep -qE '\.rs$|Cargo\.(toml|lock)$' || exit 0
 # Dropped before the build, not after: if the build or bench below fails this
 # bails out, and an inherited number left behind would be worse than none.
-grep -vi '^Bench:' "$msg" > "$msg.stamp" && mv "$msg.stamp" "$msg"
+#
+# The subject line is never a trailer, however it is spelled. `grep -vi
+# '^Bench:'` deleted the subject of a commit titled `bench: ...` along with
+# the trailer, which silently promoted the body's first line to subject.
+# Skipping line 1 is enough: a trailer cannot be there.
+{ head -1 "$msg"; tail -n +2 "$msg" | grep -vi '^Bench:'; } > "$msg.stamp" &&
+  mv "$msg.stamp" "$msg"
 cargo build --release --bin lattice -q 2>/dev/null || exit 0
 n=$(./target/release/lattice bench </dev/null 2>&1 \
       | sed -n 's/^Nodes searched:[[:space:]]*\([0-9]*\).*/\1/p' | tail -1)

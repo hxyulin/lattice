@@ -66,10 +66,24 @@ pub struct Entry {
 /// entry carrying another position's move.
 #[derive(Debug)]
 pub struct TranspositionTable {
-    slots: Vec<(AtomicU64, AtomicU64)>,
+    slots: Vec<Slot>,
     /// Index width: the table holds `1 << bits` slots.
     bits: u32,
     generation: AtomicU64,
+}
+
+/// One table entry: `key ^ data`, then `data`.
+///
+/// The alignment states an invariant the layout already had: 16 bytes at
+/// 8-byte alignment never straddles a 64-byte line either, because a slot
+/// starts at a multiple of 16 within the allocation. Measured before and
+/// after, no slot in a fresh table crossed a line, and the probe benchmarks
+/// were unchanged. It is here so a future field cannot quietly break that.
+#[derive(Debug, Default)]
+#[repr(align(16))]
+struct Slot {
+    key: AtomicU64,
+    data: AtomicU64,
 }
 
 impl Default for TranspositionTable {
@@ -94,9 +108,7 @@ impl TranspositionTable {
             .saturating_sub(entries.leading_zeros() + 1)
             .min(MAX_BITS);
         Self {
-            slots: (0..1usize << bits)
-                .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
-                .collect(),
+            slots: (0..1usize << bits).map(|_| Slot::default()).collect(),
             bits,
             generation: AtomicU64::new(0),
         }
@@ -117,8 +129,8 @@ impl TranspositionTable {
     /// not merely stale but wrong.
     pub fn clear(&self) {
         for slot in &self.slots {
-            slot.0.store(0, Ordering::Relaxed);
-            slot.1.store(0, Ordering::Relaxed);
+            slot.key.store(0, Ordering::Relaxed);
+            slot.data.store(0, Ordering::Relaxed);
         }
         self.generation.store(0, Ordering::Relaxed);
     }
@@ -145,8 +157,8 @@ impl TranspositionTable {
     /// whether the table is too small.
     pub fn probe_kind(&self, key: u64) -> (Option<Entry>, Miss) {
         let slot = &self.slots[self.index(key)];
-        let stored_key = slot.0.load(Ordering::Relaxed);
-        let data = slot.1.load(Ordering::Relaxed);
+        let stored_key = slot.key.load(Ordering::Relaxed);
+        let data = slot.data.load(Ordering::Relaxed);
         if data == 0 {
             return (None, Miss::Empty);
         }
@@ -172,8 +184,8 @@ impl TranspositionTable {
     pub fn store(&self, key: u64, score: i32, best_move: Option<Move>, depth: u32, bound: Bound) {
         let slot = &self.slots[self.index(key)];
         let generation = self.generation.load(Ordering::Relaxed);
-        let existing = slot.1.load(Ordering::Relaxed);
-        let same_position = existing != 0 && slot.0.load(Ordering::Relaxed) ^ existing == key;
+        let existing = slot.data.load(Ordering::Relaxed);
+        let same_position = existing != 0 && slot.key.load(Ordering::Relaxed) ^ existing == key;
         if same_position && (existing >> 32) & 0xff > u64::from(depth) {
             return;
         }
@@ -188,8 +200,8 @@ impl TranspositionTable {
         if data == 0 {
             return;
         }
-        slot.0.store(key ^ data, Ordering::Relaxed);
-        slot.1.store(data, Ordering::Relaxed);
+        slot.key.store(key ^ data, Ordering::Relaxed);
+        slot.data.store(data, Ordering::Relaxed);
     }
 }
 

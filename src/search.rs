@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::eval::evaluate;
 use crate::movegen::{
-    MoveList, attackers_to, generate_captures, generate_legal, generate_pseudo, generate_quiets,
-    is_attacked,
+    MoveList, attackers_to, generate_captures, generate_legal_in_check, generate_pseudo,
+    generate_quiets, is_attacked,
 };
 #[cfg(feature = "profiling")]
 use crate::tt::Miss;
@@ -38,6 +38,15 @@ const MAX_PLY: usize = 64;
 /// Cutoff counts per side and from/to square, the ordering score for quiets
 /// that are neither captures nor killers.
 type History = [[[i32; 64]; 64]; 2];
+
+/// Scratch keys for one `order_moves` call, one slot per possible move.
+///
+/// Lives in `Ctx` rather than on the stack of `order_moves`: at 2KiB it was
+/// zeroed at every node, and a node sorts about 35 moves, so all but the first
+/// 35 slots were written and discarded untouched. `order_moves` does not
+/// recurse - it sorts and returns before the caller plays anything - so a
+/// single buffer serves the whole search.
+type OrderKeys = [(i32, i32); MoveList::CAPACITY];
 
 /// Constraints on a single search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -305,6 +314,8 @@ struct Ctx<'a> {
     killers: [[Option<Move>; 2]; MAX_PLY],
     /// Cutoff counts per side and from/to square.
     history: History,
+    /// Reused across nodes; see [`OrderKeys`].
+    order_keys: OrderKeys,
     /// Shared across searches, so one move's tree seeds the next.
     tt: &'a TranspositionTable,
     #[cfg(feature = "profiling")]
@@ -358,6 +369,7 @@ pub(crate) fn search_inner(
         iteration_depth: 1,
         killers: [[None; 2]; MAX_PLY],
         history: [[[0; 64]; 64]; 2],
+        order_keys: [(0, 0); MoveList::CAPACITY],
         tt,
         #[cfg(feature = "profiling")]
         profile: SearchProfile::default(),
@@ -443,12 +455,14 @@ fn negamax_root(
         entry
     };
     let tt_move = entry.and_then(|entry| entry.best_move);
+    let killers = ctx.killers_at(0);
     order_moves(
         board,
         moves.as_mut_slice(),
         tt_move,
-        ctx.killers_at(0),
+        killers,
         &ctx.history,
+        &mut ctx.order_keys,
     );
     let us = board.state().side_to_move();
     let mut best_move = None;
@@ -792,20 +806,13 @@ fn qsearch(
     #[cfg(feature = "profiling")]
     ctx.profile.record_q_in_check(in_check);
 
-    let mut moves = MoveList::new();
+    // Stand-pat first, and the list built only once this node is known to
+    // need one: 78% of quiescence nodes cut here, and constructing the list
+    // above the test spent 512 bytes on each of them for nothing.
     let mut best = -INFINITY;
-    if in_check {
-        // No stand-pat in check: the side to move must answer it, and a quiet
-        // king move may be the only answer, so this needs every legal move.
-        generate_legal(board, &mut moves);
-        if moves.is_empty() {
-            #[cfg(feature = "profiling")]
-            ctx.profile.record_q_exact();
-            return Ok(terminal_score(board, ply));
-        }
-    } else {
-        // Stand-pat: declining to capture is always an option, so the static
-        // eval is a lower bound on this node.
+    if !in_check {
+        // Declining to capture is always an option, so the static eval is a
+        // lower bound on this node.
         best = evaluate(board);
         #[cfg(feature = "profiling")]
         ctx.profile.record_stand_pat_node();
@@ -815,9 +822,30 @@ fn qsearch(
             return Ok(best);
         }
         alpha = alpha.max(best);
+    }
+    let mut moves = MoveList::new();
+    if in_check {
+        // No stand-pat in check: the side to move must answer it, and a quiet
+        // king move may be the only answer, so this needs every legal move.
+        // `in_check` is already known here, so it is passed rather than
+        // recomputed - this is the hottest `generate_legal` caller.
+        generate_legal_in_check(board, &mut moves, in_check);
+        if moves.is_empty() {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_q_exact();
+            return Ok(terminal_score(board, ply));
+        }
+    } else {
         generate_captures(board, &mut moves);
     }
-    order_moves(board, moves.as_mut_slice(), None, [None; 2], &ctx.history);
+    order_moves(
+        board,
+        moves.as_mut_slice(),
+        None,
+        [None; 2],
+        &ctx.history,
+        &mut ctx.order_keys,
+    );
 
     #[cfg(feature = "profiling")]
     let mut legal_moves = 0;
@@ -906,14 +934,16 @@ fn is_pseudo_legal(board: &Board, mv: Move) -> bool {
 }
 
 /// Sorts the moves added by the current stage, leaving earlier stages alone.
-fn order_range(board: &Board, moves: &mut MoveList, start: usize, ply: u32, ctx: &Ctx<'_>) {
+fn order_range(board: &Board, moves: &mut MoveList, start: usize, ply: u32, ctx: &mut Ctx<'_>) {
     // No `tt_move`: it has its own stage, so it never needs to sort first.
+    let killers = ctx.killers_at(ply);
     order_moves(
         board,
         &mut moves.as_mut_slice()[start..],
         None,
-        ctx.killers_at(ply),
+        killers,
         &ctx.history,
+        &mut ctx.order_keys,
     );
 }
 
@@ -927,14 +957,30 @@ fn order_moves(
     tt_move: Option<Move>,
     killers: [Option<Move>; 2],
     history: &History,
+    keys: &mut OrderKeys,
 ) {
-    // Cached, not `sort_unstable_by_key`: that re-evaluates its closure on
-    // every comparison, and `order_key` is two mailbox lookups plus a probe
-    // into a 32KiB history table. Paying for it O(n log n) times rather than
-    // O(n) made move ordering the hottest thing in the whole search - this one
-    // word is worth roughly 1.9x throughput. Measured against an
-    // allocation-free array sort, which came out both slower and longer.
-    moves.sort_by_cached_key(|&mv| order_key(board, mv, tt_move, killers, history));
+    // Keys computed once, not per comparison: `order_key` is two mailbox
+    // lookups plus a probe into a 32KiB history table, and paying for it
+    // O(n log n) times rather than O(n) made move ordering the hottest thing
+    // in the whole search.
+    //
+    // Insertion sort over the caller's buffer rather than `sort_by_cached_key`,
+    // which heap-allocates its key buffer on every node. Both are stable, so
+    // ties keep their generated order and the node count is unchanged.
+    for (slot, &mv) in keys.iter_mut().zip(moves.iter()) {
+        *slot = order_key(board, mv, tt_move, killers, history);
+    }
+    for i in 1..moves.len() {
+        let (key, mv) = (keys[i], moves[i]);
+        let mut j = i;
+        while j > 0 && keys[j - 1] > key {
+            keys[j] = keys[j - 1];
+            moves[j] = moves[j - 1];
+            j -= 1;
+        }
+        keys[j] = key;
+        moves[j] = mv;
+    }
 }
 
 /// Sort key for one move, ascending: gain descending, then attacker ascending
@@ -1223,6 +1269,7 @@ mod tests {
             iteration_depth,
             killers: [[None; 2]; MAX_PLY],
             history: [[[0; 64]; 64]; 2],
+            order_keys: [(0, 0); MoveList::CAPACITY],
             tt,
             #[cfg(feature = "profiling")]
             profile: SearchProfile::default(),
@@ -1531,11 +1578,22 @@ mod tests {
         let mut board: Board = fen.parse().unwrap();
         let mut moves = MoveList::new();
         generate_legal(&mut board, &mut moves);
-        order_moves(&board, moves.as_mut_slice(), None, [None; 2], &NO_HISTORY);
+        order_moves(
+            &board,
+            moves.as_mut_slice(),
+            None,
+            [None; 2],
+            &NO_HISTORY,
+            &mut no_keys(),
+        );
         (board, moves)
     }
 
     static NO_HISTORY: History = [[[0; 64]; 64]; 2];
+
+    fn no_keys() -> OrderKeys {
+        [(0, 0); MoveList::CAPACITY]
+    }
 
     fn key(board: &Board, mv: Move) -> (i32, i32) {
         order_key(board, mv, None, [None; 2], &NO_HISTORY)
@@ -1581,7 +1639,14 @@ mod tests {
             .find(|mv| !mv.is_capture() && !mv.is_promotion())
             .unwrap();
         let killers = [Some(killer), None];
-        order_moves(&board, moves.as_mut_slice(), None, killers, &NO_HISTORY);
+        order_moves(
+            &board,
+            moves.as_mut_slice(),
+            None,
+            killers,
+            &NO_HISTORY,
+            &mut no_keys(),
+        );
 
         let keys: Vec<_> = moves
             .iter()
@@ -2022,6 +2087,7 @@ mod tests {
             Some(quiet),
             [None; 2],
             &NO_HISTORY,
+            &mut no_keys(),
         );
         assert_eq!(
             moves.iter().next(),
