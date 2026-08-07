@@ -50,4 +50,5 @@ authoritative result.
 | stage main-search move generation | STC | 992 | +33.9 | pass |
 | null move pruning | STC | 256 | +135.6 | pass |
 | null move pruning | LTC | 256 | +145.0 | pass |
+| late move reductions | STC | 538 | +52.9 | pass |
 <!-- END generated -->
