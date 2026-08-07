@@ -318,15 +318,62 @@ fn pawn_attack_span(pawns: Bitboard, color: Color) -> Bitboard {
     })
 }
 
+/// Bonus for a rook on a file with no pawns of either color: the rook sees the
+/// whole board along it, which is most of what a rook is for.
+const ROOK_OPEN_MG: i32 = 26;
+const ROOK_OPEN_EG: i32 = 12;
+
+/// Bonus for a rook on a file with no pawn of its own colour but one of the
+/// enemy's. Less than open - the enemy pawn blocks the file - but the rook
+/// still bears on a pawn that cannot be defended by another pawn on the file.
+const ROOK_SEMI_MG: i32 = 11;
+const ROOK_SEMI_EG: i32 = 6;
+
+/// Rook file bonuses for one side, in midgame and endgame centipawns.
+///
+/// The endgame weight is the smaller one: with the board emptying, most files
+/// are open and the distinction stops separating good rooks from bad ones.
+fn rook_files(board: &Board, us: Color) -> (i32, i32) {
+    const FILE_A: u64 = 0x0101_0101_0101_0101;
+    let ours = board.pieces(PieceType::Pawn) & board.color(us);
+    let theirs = board.pieces(PieceType::Pawn) & board.color(us.flip());
+    let (mut mg, mut eg) = (0, 0);
+    for square in board.pieces(PieceType::Rook) & board.color(us) {
+        let file = Bitboard::new(FILE_A << square.file());
+        if !(ours & file).is_empty() {
+            continue;
+        }
+        if (theirs & file).is_empty() {
+            mg += ROOK_OPEN_MG;
+            eg += ROOK_OPEN_EG;
+        } else {
+            mg += ROOK_SEMI_MG;
+            eg += ROOK_SEMI_EG;
+        }
+    }
+    (mg, eg)
+}
+
+/// Every scored term other than the piece-square tables, for one side, in
+/// midgame and endgame centipawns.
+///
+/// One place for `evaluate` to call, so adding a term is one line here rather
+/// than another pair of bindings threaded through the blend.
+fn term_sum(board: &Board, us: Color) -> (i32, i32) {
+    let (mobility_mg, mobility_eg) = mobility(board, us);
+    let (rook_mg, rook_eg) = rook_files(board, us);
+    (mobility_mg + rook_mg, mobility_eg + rook_eg)
+}
+
 /// Returns the static evaluation in centipawns, relative to the side to move.
 ///
 /// Material and piece placement are scored from separate midgame and endgame
-/// tables, interpolated by how much material remains, plus `TEMPO` for the side
-/// to move.
+/// tables, interpolated by how much material remains, plus rook file control
+/// and `TEMPO` for the side to move.
 pub fn evaluate(board: &Board) -> i32 {
     let Accumulator { mg, eg, phase } = *board.accumulator();
-    let (white_mg, white_eg) = mobility(board, Color::White);
-    let (black_mg, black_eg) = mobility(board, Color::Black);
+    let (white_mg, white_eg) = term_sum(board, Color::White);
+    let (black_mg, black_eg) = term_sum(board, Color::Black);
     let score = blend(mg + white_mg - black_mg, eg + white_eg - black_eg, phase);
     let score = if board.state().side_to_move() == Color::White {
         score
@@ -636,6 +683,35 @@ mod tests {
                     && MOBILITY_EG[PieceType::Queen as usize] > 0
             )
         };
+    }
+
+    // catches: open and semi-open swapped, an enemy pawn treated as blocking
+    // like an own pawn, the bonus paid once per side rather than per rook, and
+    // the term reading zero.
+    #[test]
+    fn rook_files_separates_open_from_semi_open_from_blocked() {
+        let score = |fen: &str| {
+            let board: Board = fen.parse().unwrap();
+            rook_files(&board, Color::White).0
+        };
+        // No pawns at all on the d-file: open.
+        assert_eq!(score("4k3/8/8/8/8/8/8/3RK3 w - - 0 1"), ROOK_OPEN_MG);
+        // A black pawn on d7 makes it semi-open, not blocked.
+        assert_eq!(score("4k3/3p4/8/8/8/8/8/3RK3 w - - 0 1"), ROOK_SEMI_MG);
+        // Our own pawn on d2 blocks it: no bonus, whatever else is on the file.
+        assert_eq!(score("4k3/3p4/8/8/8/8/3P4/3RK3 w - - 0 1"), 0);
+        // Two rooks on two open files are paid twice.
+        assert_eq!(score("4k3/8/8/8/8/8/8/R2RK3 w - - 0 1"), 2 * ROOK_OPEN_MG);
+        // Two rooks doubled on one open file are also paid twice - the bonus is
+        // per rook, and this is the case a per-file loop would score once.
+        assert_eq!(
+            score("3rk3/8/8/8/3R4/8/8/3R1K2 w - - 0 1"),
+            2 * ROOK_OPEN_MG
+        );
+        // Only the rook's own file matters: an own pawn on a *different* file
+        // leaves the bonus intact.
+        assert_eq!(score("4k3/8/8/8/8/8/P7/3RK3 w - - 0 1"), ROOK_OPEN_MG);
+        const { assert!(ROOK_OPEN_MG > ROOK_SEMI_MG && ROOK_SEMI_MG > 0) };
     }
 
     #[test]
