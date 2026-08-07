@@ -44,6 +44,14 @@ const MIN_NULL_DEPTH: u32 = 3;
 /// hold 280. Worth re-sweeping downward once the evaluation gains mobility
 /// and pawn structure and the blind spot shrinks.
 const RFP_MARGIN: i32 = 300;
+/// Half-width of the aspiration window, in centipawns. Narrow enough that most
+/// nodes inside it fail high or low rather than computing an exact score, wide
+/// enough that an ordinary iteration-to-iteration drift stays inside it.
+const ASPIRATION_DELTA: i32 = 40;
+/// Depth at which aspiration starts. Below it an iteration is cheap enough
+/// that a re-search costs more than the narrow window saves, and the score is
+/// still moving too much between iterations for the last one to predict it.
+const ASPIRATION_MIN_DEPTH: u32 = 4;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
 /// Scale on the `ln(depth) * ln(move number)` reduction, and the constant
@@ -373,6 +381,8 @@ struct Ctx<'a> {
     #[cfg(test)]
     pvs: bool,
     #[cfg(test)]
+    aspiration: bool,
+    #[cfg(test)]
     nmp: bool,
     #[cfg(test)]
     rfp: bool,
@@ -426,6 +436,8 @@ pub(crate) fn search_inner(
         #[cfg(test)]
         pvs: true,
         #[cfg(test)]
+        aspiration: true,
+        #[cfg(test)]
         nmp: true,
         #[cfg(test)]
         rfp: true,
@@ -436,6 +448,7 @@ pub(crate) fn search_inner(
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
+    let mut prev_score = None;
 
     for depth in 1..=max_depth {
         // An unpruned tree grows about 35x per depth, so starting an iteration
@@ -444,10 +457,11 @@ pub(crate) fn search_inner(
             break;
         }
         ctx.iteration_depth = depth;
-        let result = negamax_root(board, depth, &mut ctx);
+        let result = aspirate(board, depth, prev_score, &mut ctx);
         let Ok((candidate, score)) = result else {
             break;
         };
+        prev_score = Some(score);
         best_move = candidate;
         listener.iteration(&Iteration {
             depth,
@@ -486,9 +500,52 @@ fn time_budget(board: &Board, limits: Limits) -> Option<u64> {
     Some(budget.min(remaining.saturating_sub(50)).max(1))
 }
 
+/// Searches one iteration, narrowly around the last one's score where that is
+/// worth trying, and at full width otherwise.
+///
+/// A narrow window makes every node cheaper, because more of them fail high or
+/// low without an exact score being computed. The bet is that the next
+/// iteration lands near the last, which holds often enough to pay for the
+/// re-searches when it does not.
+///
+/// Widening straight to infinity rather than in steps keeps the returned score
+/// exact at every depth. The driver assigns `best_move` unconditionally, and an
+/// iteration abandoned partway is discarded whole, so a merely-bounded score
+/// must never reach it.
+///
+/// Skipped below `ASPIRATION_MIN_DEPTH`, where iterations are too cheap for the
+/// re-search to pay for itself and scores are still moving, and skipped for
+/// mate scores, where the next iteration's score is not near the last one but a
+/// mate distance away from it.
+fn aspirate(
+    board: &mut Board,
+    depth: u32,
+    prev_score: Option<i32>,
+    ctx: &mut Ctx<'_>,
+) -> Result<(Option<Move>, i32), Aborted> {
+    let narrow = prev_score.filter(|score| {
+        ctx.aspiration_enabled() && depth >= ASPIRATION_MIN_DEPTH && score.abs() <= MATE_BOUND
+    });
+    if let Some(score) = narrow {
+        let (alpha, beta) = (
+            score.saturating_sub(ASPIRATION_DELTA),
+            score.saturating_add(ASPIRATION_DELTA),
+        );
+        let (best_move, score) = negamax_root(board, depth, alpha, beta, ctx)?;
+        // Strictly inside: a score sitting on either bound was only proved to
+        // reach it, not to be it.
+        if score > alpha && score < beta {
+            return Ok((best_move, score));
+        }
+    }
+    negamax_root(board, depth, -INFINITY, INFINITY, ctx)
+}
+
 fn negamax_root(
     board: &mut Board,
     depth: u32,
+    alpha: i32,
+    beta: i32,
     ctx: &mut Ctx<'_>,
 ) -> Result<(Option<Move>, i32), Aborted> {
     let mut moves = MoveList::new();
@@ -524,9 +581,11 @@ fn negamax_root(
             board.unmake(mv);
             continue;
         }
-        // The root always searches on a full window, so `beta` is INFINITY and
-        // the re-search condition reduces to `narrow > best_score`.
-        let result = search_move(board, depth, 1, best_score, INFINITY, legal, false, ctx);
+        // `alpha` is the floor the caller set; `best_score` raises it as moves
+        // come in. Under a full window the two coincide and this reduces to
+        // what the root did before aspiration existed.
+        let cut = best_score.max(alpha);
+        let result = search_move(board, depth, 1, cut, beta, legal, false, ctx);
         board.unmake(mv);
         legal += 1;
         let score = result?;
@@ -538,17 +597,23 @@ fn negamax_root(
     if legal == 0 {
         return Ok((None, terminal_score(board, 0)));
     }
-    // Exact: rejected null-window results never replace `best_score`, while
-    // every result that does replace it came from an exact-window search.
+    // The unconditional `Exact` this used to store was justified by `alpha`
+    // being `-INFINITY`, so that every score which replaced `best_score` came
+    // from an exact-window search. Aspiration breaks that: a search that fails
+    // low proved only a ceiling and one that fails high only a floor, and
+    // storing either as `Exact` would hand a later probe a number the search
+    // never established.
+    let bound = if best_score <= alpha {
+        Bound::Upper
+    } else if best_score >= beta {
+        Bound::Lower
+    } else {
+        Bound::Exact
+    };
     #[cfg(feature = "profiling")]
     ctx.profile.record_tt_store();
-    ctx.tt.store(
-        key,
-        score_to_tt(best_score, 0),
-        best_move,
-        depth,
-        Bound::Exact,
-    );
+    ctx.tt
+        .store(key, score_to_tt(best_score, 0), best_move, depth, bound);
     Ok((best_move, best_score))
 }
 
@@ -1262,6 +1327,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn aspiration_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.aspiration
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     fn lmr_enabled(&self) -> bool {
         #[cfg(test)]
         {
@@ -1417,6 +1493,7 @@ mod tests {
             profile: SearchProfile::default(),
             quiesce_leaves: true,
             pvs: true,
+            aspiration: true,
             nmp: true,
             rfp: true,
             lmr: true,
@@ -1444,11 +1521,15 @@ mod tests {
         let expired = "7k/8/5K2/8/8/8/8/6Q1 w - - 100 1";
 
         let mut board: Board = winning.parse().unwrap();
-        let score = negamax_root(&mut board, 4, &mut test_ctx(4)).unwrap().1;
+        let score = negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut test_ctx(4))
+            .unwrap()
+            .1;
         assert!(score > MATE_BOUND, "expected a mate score, got {score}");
 
         let mut board: Board = expired.parse().unwrap();
-        let score = negamax_root(&mut board, 4, &mut test_ctx(4)).unwrap().1;
+        let score = negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut test_ctx(4))
+            .unwrap()
+            .1;
         assert_eq!(score, DRAW, "an expired clock must draw a won position");
     }
 
@@ -1461,7 +1542,7 @@ mod tests {
     fn repetition_outranks_material() {
         let fen = "4k3/8/8/8/8/8/8/Q3K3 w - - 0 1";
         let mut board: Board = fen.parse().unwrap();
-        let fresh = negamax_root(&mut board.clone(), 4, &mut test_ctx(4))
+        let fresh = negamax_root(&mut board.clone(), 4, -INFINITY, INFINITY, &mut test_ctx(4))
             .unwrap()
             .1;
         assert!(fresh > 500, "expected a winning score, got {fresh}");
@@ -1478,7 +1559,9 @@ mod tests {
             !board.is_repetition(),
             "the root must not already be a repetition"
         );
-        let score = negamax_root(&mut board, 4, &mut test_ctx(4)).unwrap().1;
+        let score = negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut test_ctx(4))
+            .unwrap()
+            .1;
         assert_eq!(
             score, DRAW,
             "black is a queen down and must take the repetition"
@@ -1557,14 +1640,17 @@ mod tests {
         let fen = "8/5pk1/6p1/3p4/3P4/6P1/5PK1/8 w - - 0 1";
         let mut enabled_board: Board = fen.parse().unwrap();
         let mut enabled = test_ctx(5);
-        let enabled_score = negamax_root(&mut enabled_board, 5, &mut enabled).unwrap().1;
+        let enabled_score = negamax_root(&mut enabled_board, 5, -INFINITY, INFINITY, &mut enabled)
+            .unwrap()
+            .1;
 
         let mut disabled_board: Board = fen.parse().unwrap();
         let mut disabled = test_ctx(5);
         disabled.nmp = false;
-        let disabled_score = negamax_root(&mut disabled_board, 5, &mut disabled)
-            .unwrap()
-            .1;
+        let disabled_score =
+            negamax_root(&mut disabled_board, 5, -INFINITY, INFINITY, &mut disabled)
+                .unwrap()
+                .1;
 
         assert_eq!(enabled_score, disabled_score);
         assert_eq!(enabled.nodes, disabled.nodes);
@@ -1589,12 +1675,12 @@ mod tests {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let mut enabled_board: Board = fen.parse().unwrap();
         let mut enabled = test_ctx(8);
-        negamax_root(&mut enabled_board, 8, &mut enabled).unwrap();
+        negamax_root(&mut enabled_board, 8, -INFINITY, INFINITY, &mut enabled).unwrap();
 
         let mut disabled_board: Board = fen.parse().unwrap();
         let mut disabled = test_ctx(8);
         disabled.nmp = false;
-        negamax_root(&mut disabled_board, 8, &mut disabled).unwrap();
+        negamax_root(&mut disabled_board, 8, -INFINITY, INFINITY, &mut disabled).unwrap();
 
         assert!(
             enabled.nodes < disabled.nodes,
@@ -1672,12 +1758,12 @@ mod tests {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let mut enabled_board: Board = fen.parse().unwrap();
         let mut enabled = test_ctx(5);
-        negamax_root(&mut enabled_board, 5, &mut enabled).unwrap();
+        negamax_root(&mut enabled_board, 5, -INFINITY, INFINITY, &mut enabled).unwrap();
 
         let mut disabled_board: Board = fen.parse().unwrap();
         let mut disabled = test_ctx(5);
         disabled.lmr = false;
-        negamax_root(&mut disabled_board, 5, &mut disabled).unwrap();
+        negamax_root(&mut disabled_board, 5, -INFINITY, INFINITY, &mut disabled).unwrap();
 
         assert!(enabled.lmr_reductions > 0, "LMR never fired");
         assert!(
@@ -1694,7 +1780,7 @@ mod tests {
             .parse()
             .unwrap();
         let mut ctx = test_ctx(LMR_MIN_DEPTH);
-        negamax_root(&mut board, LMR_MIN_DEPTH, &mut ctx).unwrap();
+        negamax_root(&mut board, LMR_MIN_DEPTH, -INFINITY, INFINITY, &mut ctx).unwrap();
         assert_eq!(ctx.lmr_reductions, 0, "LMR reached a root move");
     }
 
@@ -1759,11 +1845,15 @@ mod tests {
             let mut board: Board = fen.parse().unwrap();
             let mut alpha_beta_ctx = static_leaf_ctx(3);
             alpha_beta_ctx.pvs = false;
-            let alpha_beta = negamax_root(&mut board, 3, &mut alpha_beta_ctx).unwrap().1;
+            let alpha_beta = negamax_root(&mut board, 3, -INFINITY, INFINITY, &mut alpha_beta_ctx)
+                .unwrap()
+                .1;
             alpha_beta_nodes += alpha_beta_ctx.nodes;
 
             let mut pvs_ctx = static_leaf_ctx(3);
-            let pvs = negamax_root(&mut board, 3, &mut pvs_ctx).unwrap().1;
+            let pvs = negamax_root(&mut board, 3, -INFINITY, INFINITY, &mut pvs_ctx)
+                .unwrap()
+                .1;
             pvs_nodes += pvs_ctx.nodes;
 
             assert_eq!(pvs, alpha_beta, "PVS changed the score for {fen}");
@@ -1797,7 +1887,8 @@ mod tests {
                 let mut nodes = 0;
                 let expected = plain_negamax(&mut board, depth, 0, &mut nodes);
                 let mut ctx = static_leaf_ctx(depth);
-                let (_, score) = negamax_root(&mut board, depth, &mut ctx).unwrap();
+                let (_, score) =
+                    negamax_root(&mut board, depth, -INFINITY, INFINITY, &mut ctx).unwrap();
                 assert_eq!(score, expected, "{fen} at depth {depth}");
             }
         }
@@ -1859,7 +1950,8 @@ mod tests {
             let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
 
             let mut ctx = static_leaf_ctx(3);
-            let (best_move, score) = negamax_root(&mut board, 3, &mut ctx).unwrap();
+            let (best_move, score) =
+                negamax_root(&mut board, 3, -INFINITY, INFINITY, &mut ctx).unwrap();
             assert_eq!(score, expected, "score changed for {fen}");
             assert!(best_move.is_some());
             assert!(
@@ -1902,7 +1994,8 @@ mod tests {
                 let mut nodes = 0;
                 let expected = plain_negamax(&mut board, depth, 0, &mut nodes);
                 let mut ctx = static_leaf_ctx(depth);
-                let (_, score) = negamax_root(&mut board, depth, &mut ctx).unwrap();
+                let (_, score) =
+                    negamax_root(&mut board, depth, -INFINITY, INFINITY, &mut ctx).unwrap();
                 assert_eq!(score, expected, "{fen} at depth {depth}");
             }
         }
@@ -2153,7 +2246,7 @@ mod tests {
                 .parse()
                 .unwrap();
         let mut ctx = static_leaf_ctx(4);
-        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut ctx).unwrap();
         assert!(
             ctx.nodes * 64 < UNPRUNED,
             "ordering should cut the tree hard: {} vs {UNPRUNED}",
@@ -2169,7 +2262,7 @@ mod tests {
         crate::movegen::init();
         let mut board: Board = "8/5pk1/6p1/3p4/3P4/6P1/5PK1/8 w - - 0 1".parse().unwrap();
         let mut ctx = test_ctx(5);
-        negamax_root(&mut board, 5, &mut ctx).unwrap();
+        negamax_root(&mut board, 5, -INFINITY, INFINITY, &mut ctx).unwrap();
 
         let killers = ctx.killers.iter().flatten().filter(|k| k.is_some()).count();
         assert!(killers > 0, "no killer was stored by any cutoff");
@@ -2212,7 +2305,7 @@ mod tests {
         // The main search must inherit that refutation.
         crate::movegen::init();
         let mut ctx = test_ctx(2);
-        let (best, _) = negamax_root(&mut board, 2, &mut ctx).unwrap();
+        let (best, _) = negamax_root(&mut board, 2, -INFINITY, INFINITY, &mut ctx).unwrap();
         assert_ne!(
             best.map(move_text).as_deref(),
             Some("d4c5"),
@@ -2454,11 +2547,15 @@ mod tests {
             let expected = plain_negamax(&mut board, 3, 0, &mut plain_nodes);
 
             let mut ctx = static_leaf_ctx(3);
-            let cold = negamax_root(&mut board, 3, &mut ctx).unwrap().1;
+            let cold = negamax_root(&mut board, 3, -INFINITY, INFINITY, &mut ctx)
+                .unwrap()
+                .1;
             assert_eq!(cold, expected, "cold TT changed the score for {fen}");
 
             // Same table, now populated: every node can hit.
-            let warm = negamax_root(&mut board, 3, &mut ctx).unwrap().1;
+            let warm = negamax_root(&mut board, 3, -INFINITY, INFINITY, &mut ctx)
+                .unwrap()
+                .1;
             assert_eq!(warm, expected, "warm TT changed the score for {fen}");
         }
     }
@@ -2473,7 +2570,8 @@ mod tests {
         let mut ctx = test_ctx(1);
         for depth in 1..=5 {
             ctx.iteration_depth = depth;
-            let (best, score) = negamax_root(&mut board, depth, &mut ctx).unwrap();
+            let (best, score) =
+                negamax_root(&mut board, depth, -INFINITY, INFINITY, &mut ctx).unwrap();
             assert_eq!(mate_in(score), Some(1), "depth {depth} scored {score}");
             assert_eq!(
                 best.map(move_text).as_deref(),
@@ -2576,10 +2674,10 @@ mod tests {
                 .parse()
                 .unwrap();
         let mut ctx = test_ctx(4);
-        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut ctx).unwrap();
         let cold = ctx.total();
         let before = ctx.total();
-        negamax_root(&mut board, 4, &mut ctx).unwrap();
+        negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut ctx).unwrap();
         let warm = ctx.total() - before;
         assert!(
             warm < cold,
