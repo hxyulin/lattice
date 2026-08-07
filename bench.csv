@@ -79,3 +79,5 @@ ba0b0b5,2026-08-07,"perf(movegen): leave the unused tail of a move list uninitia
 a128451,2026-08-07,"feat(eval): bonus for having the move",1303125
 be6f19a,2026-08-07,"docs: record the tempo SPRT result",
 c537b6e,2026-08-08,"feat(search): reverse futility pruning",886840
+541307e,2026-08-08,"docs: record the reverse futility pruning SPRT result",
+01a0fd7,2026-08-08,"feat(search): scale the late move reduction with depth and move number",824439

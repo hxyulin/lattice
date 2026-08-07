@@ -57,4 +57,5 @@ authoritative result.
 | detect draws by repetition and the fifty-move rule | STC | 454 | +73.0 | pass |
 | bonus for having the move | STC | - | +12.3 | pass |
 | reverse futility pruning | STC | - | +41.1 | pass |
+| scale the late move reduction with depth and move number | STC | - | +38.4 | pass |
 <!-- END generated -->
