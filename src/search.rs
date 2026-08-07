@@ -44,6 +44,14 @@ const MIN_NULL_DEPTH: u32 = 3;
 /// hold 280. Worth re-sweeping downward once the evaluation gains mobility
 /// and pawn structure and the blind spot shrinks.
 const RFP_MARGIN: i32 = 300;
+/// Quiets per node that can receive a history malus.
+///
+/// A cap rather than every quiet, because the array is per-node stack on the
+/// hot path. 32 covers the moves whose ordering is still in question: 97.5% of
+/// cutoffs land in the first three moves, so a quiet searched 33rd is already
+/// ranked below everything that matters and demoting it further changes no
+/// ordering decision.
+const MAX_TRACKED_QUIETS: usize = 32;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
 /// Scale on the `ln(depth) * ln(move number)` reduction, and the constant
@@ -379,6 +387,8 @@ struct Ctx<'a> {
     #[cfg(test)]
     lmr: bool,
     #[cfg(test)]
+    history_malus: bool,
+    #[cfg(test)]
     lmr_reductions: u64,
 }
 
@@ -431,6 +441,8 @@ pub(crate) fn search_inner(
         rfp: true,
         #[cfg(test)]
         lmr: true,
+        #[cfg(test)]
+        history_malus: true,
         #[cfg(test)]
         lmr_reductions: 0,
     };
@@ -753,6 +765,12 @@ fn negamax(
     let mut best_move = None;
     let mut legal = 0;
     let mut cutoff = None;
+    // Quiets searched without cutting, for the malus below. A fixed array
+    // rather than a `MoveList`: this is per-node stack on the hot path, and
+    // 255 slots would cost 512 bytes where the tail past MAX_TRACKED_QUIETS
+    // is quiets so late that ordering them is already moot.
+    let mut tried_quiets = [None; MAX_TRACKED_QUIETS];
+    let mut tried = 0usize;
     // Staged: the TT move alone, then captures, then quiets. Ordering is
     // unchanged - the TT move already sorted ahead of everything and captures
     // ahead of the killers - but a cutoff in an earlier stage means the later
@@ -802,6 +820,10 @@ fn negamax(
             let result = search_move(board, depth, ply + 1, alpha, beta, legal, reduce, ctx);
             board.unmake(mv);
             legal += 1;
+            if tried < MAX_TRACKED_QUIETS && !mv.is_capture() && !mv.is_promotion() {
+                tried_quiets[tried] = Some(mv);
+                tried += 1;
+            }
             let score = result?;
             if score > best {
                 best = score;
@@ -822,9 +844,31 @@ fn negamax(
             // ponytail: no decay - history is per-`go` and dies with Ctx.
             // Add halve-on-cap or the gravity update if it goes stale
             // within one search.
+            let bonus = (depth * depth) as i32;
             let slot =
                 &mut ctx.history[us as usize][mv.from().index() as usize][mv.to().index() as usize];
-            *slot = slot.saturating_add((depth * depth) as i32);
+            *slot = slot.saturating_add(bonus);
+            // Malus. The bonus alone only says which quiet was best here; it
+            // cannot separate a quiet that was tried and refuted from one that
+            // was never reached, since both sit at whatever score they already
+            // had. Penalising the refuted ones is what makes the two
+            // distinguishable, and it is the half that decides ordering at the
+            // nodes where no move stands out.
+            //
+            // The cutoff move is skipped rather than penalised and re-credited:
+            // it is in `tried_quiets` like any other quiet, and letting the two
+            // updates cancel would leave its score unchanged - the bonus would
+            // do nothing at exactly the node that earned it.
+            if ctx.history_malus_enabled() {
+                for &quiet in tried_quiets[..tried].iter().flatten() {
+                    if quiet == mv {
+                        continue;
+                    }
+                    let slot = &mut ctx.history[us as usize][quiet.from().index() as usize]
+                        [quiet.to().index() as usize];
+                    *slot = slot.saturating_sub(bonus);
+                }
+            }
         }
     }
     // Checkmate or stalemate. Known only after the loop now that legality is
@@ -1273,6 +1317,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn history_malus_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.history_malus
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     /// Every node visited. Clock and node-limit checks use this rather than
     /// `nodes` alone: quiescence is most of the tree, so counting main nodes
     /// only would leave thousands of nodes between two clock checks.
@@ -1420,6 +1475,7 @@ mod tests {
             nmp: true,
             rfp: true,
             lmr: true,
+            history_malus: true,
             lmr_reductions: 0,
         }
     }
@@ -2171,6 +2227,137 @@ mod tests {
             .filter(|&&h| h > 0)
             .count() as i32;
         assert!(history > 0, "no history bonus was recorded");
+    }
+
+    /// Runs a quiet endgame and returns the history table, with the malus on
+    /// or off. Every other search parameter is held fixed, so the two tables
+    /// differ only by the feature under test.
+    fn history_after_search(malus: bool) -> History {
+        crate::movegen::init();
+        let mut board: Board = "8/5pk1/6p1/3p4/3P4/6P1/5PK1/8 w - - 0 1".parse().unwrap();
+        let mut ctx = test_ctx(5);
+        ctx.history_malus = malus;
+        negamax_root(&mut board, 5, &mut ctx).unwrap();
+        ctx.history
+    }
+
+    // catches: a malus that is never applied, and one applied with the wrong
+    // sign. Nothing in the search subtracts from history without it, so a
+    // negative entry can only come from the malus.
+    #[test]
+    fn refuted_quiets_are_penalized() {
+        let without = history_after_search(false);
+        let with = history_after_search(true);
+
+        let negatives = |h: &History| h.iter().flatten().flatten().filter(|&&v| v < 0).count();
+        assert_eq!(
+            negatives(&without),
+            0,
+            "history went negative with the malus disabled"
+        );
+        assert!(negatives(&with) > 0, "no quiet was penalized by the malus");
+    }
+
+    // catches: the cancellation bug - including the cutoff move in the malus
+    // loop leaves its score unchanged, so the bonus does nothing at exactly
+    // the node that earned it. Its entry must be strictly positive and must
+    // match what it would have been with the malus off.
+    #[test]
+    fn the_cutoff_move_keeps_its_full_bonus() {
+        let without = history_after_search(false);
+        let with = history_after_search(true);
+
+        let best = without
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .max()
+            .expect("history is non-empty");
+        assert!(best > 0, "no bonus was recorded at all");
+        let best_with = with
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .max()
+            .expect("history is non-empty");
+        assert_eq!(
+            best, best_with,
+            "the best quiet's bonus changed: the cutoff move was penalized too"
+        );
+    }
+
+    // catches: a malus applied to captures, by asserting the invariant rather
+    // than probing one square - history is only ever read for quiets, so a
+    // stray capture entry is otherwise silent.
+    //
+    // At the root every from/to pair that carries history must be reachable by
+    // a quiet move. A capture is a different from/to pair than any quiet by the
+    // same piece (it needs an occupied destination), so a tracked capture shows
+    // up as an entry no root quiet can explain. Root-only is the strict part
+    // this can check: deeper entries belong to positions this test cannot
+    // reconstruct.
+    #[test]
+    fn only_quiet_moves_receive_history() {
+        crate::movegen::init();
+        // Kiwipete: captures and quiets both available in quantity, so the
+        // search really does try captures before any quiet cutoff.
+        let mut board: Board =
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
+                .parse()
+                .unwrap();
+        let mut ctx = test_ctx(5);
+        negamax_root(&mut board, 5, &mut ctx).unwrap();
+
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let captures: Vec<(usize, usize)> = moves
+            .iter()
+            .filter(|mv| mv.is_capture())
+            .map(|mv| (mv.from().index() as usize, mv.to().index() as usize))
+            .collect();
+        assert!(
+            !captures.is_empty(),
+            "position must offer captures for this to test anything"
+        );
+        let quiets: Vec<(usize, usize)> = moves
+            .iter()
+            .filter(|mv| !mv.is_capture())
+            .map(|mv| (mv.from().index() as usize, mv.to().index() as usize))
+            .collect();
+
+        for &(from, to) in &captures {
+            if quiets.contains(&(from, to)) {
+                continue;
+            }
+            assert_eq!(
+                ctx.history[Color::White as usize][from][to],
+                0,
+                "capture {from}->{to} received a history update"
+            );
+        }
+    }
+
+    // catches: an unbounded `tried_quiets` write. The array is fixed at
+    // MAX_TRACKED_QUIETS, so a node with more legal quiets than that must
+    // still search rather than panic on the 33rd.
+    #[test]
+    fn a_node_with_more_quiets_than_the_cap_is_searched() {
+        crate::movegen::init();
+        // Three queens and a rook give White far more than 32 quiet moves.
+        let mut board: Board = "1k6/8/8/8/Q2Q3Q/8/7R/4K3 w - - 0 1".parse().unwrap();
+        let quiets = {
+            let mut moves = MoveList::new();
+            generate_legal(&mut board, &mut moves);
+            moves.iter().filter(|mv| !mv.is_capture()).count()
+        };
+        assert!(
+            quiets > MAX_TRACKED_QUIETS,
+            "position needs more than {MAX_TRACKED_QUIETS} quiets to test the cap, has {quiets}"
+        );
+        let mut ctx = test_ctx(4);
+        assert!(negamax_root(&mut board, 4, &mut ctx).is_ok());
     }
 
     fn quiesce(fen: &str) -> (i32, u64) {
