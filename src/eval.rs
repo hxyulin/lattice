@@ -1,7 +1,8 @@
 //! Static position evaluation.
 
-use crate::board::Piece;
-use crate::{Board, Color, Square};
+use crate::board::{Piece, PieceType};
+use crate::movegen::{bishop_attacks, knight_attacks, queen_attacks, rook_attacks};
+use crate::{Bitboard, Board, Color, Square};
 
 /// Midgame material values. The king is 0 by construction: it is never
 /// captured, and a nonzero value would push scores into the mate range that
@@ -254,6 +255,69 @@ fn phase(board: &Board) -> i32 {
     board.accumulator().phase
 }
 
+/// Interpolates a midgame and an endgame score by how much material remains.
+fn blend(mg: i32, eg: i32, phase: i32) -> i32 {
+    let mg_phase = phase.min(TOTAL_PHASE);
+    (mg * mg_phase + eg * (TOTAL_PHASE - mg_phase)) / TOTAL_PHASE
+}
+
+/// Midgame and endgame centipawns per mobility square, indexed by piece type.
+///
+/// Scalar rather than the per-count tables larger engines use: those encode a
+/// diminishing return that a 300-position fit here could not resolve from the
+/// noise, and a knob that cannot be measured is a knob that cannot be tuned.
+/// Pawns and kings score nothing - a pawn's attacks are structure, not
+/// freedom, and a king with many squares in the midgame is an exposed king,
+/// which is the opposite sign.
+const MOBILITY_MG: [i32; 6] = [0, 4, 4, 2, 1, 0];
+const MOBILITY_EG: [i32; 6] = [0, 4, 5, 4, 6, 0];
+
+/// Mobility for one side, in midgame and endgame centipawns.
+///
+/// Squares occupied by our own pieces are excluded (they are not available),
+/// and so are squares an enemy pawn attacks: a knight standing where a pawn
+/// can take it is not mobile there in any sense the search will believe.
+/// Enemy pieces are counted, because attacking one is a real option.
+fn mobility(board: &Board, us: Color) -> (i32, i32) {
+    let occ = board.occupied();
+    let ours = board.color(us);
+    let their_pawns = board.pieces(PieceType::Pawn) & board.color(us.flip());
+    let pawn_attacks = pawn_attack_span(their_pawns, us.flip());
+    let available = !(ours | pawn_attacks);
+    let (mut mg, mut eg) = (0, 0);
+    for kind in [
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+    ] {
+        let index = kind as usize;
+        for square in board.pieces(kind) & ours {
+            let attacks = match kind {
+                PieceType::Knight => knight_attacks(square),
+                PieceType::Bishop => bishop_attacks(square, occ),
+                PieceType::Rook => rook_attacks(square, occ),
+                _ => queen_attacks(square, occ),
+            };
+            let count = (attacks & available).count() as i32;
+            mg += MOBILITY_MG[index] * count;
+            eg += MOBILITY_EG[index] * count;
+        }
+    }
+    (mg, eg)
+}
+
+/// Every square attacked by a set of pawns of one color.
+fn pawn_attack_span(pawns: Bitboard, color: Color) -> Bitboard {
+    const FILE_A: u64 = 0x0101_0101_0101_0101;
+    const FILE_H: u64 = FILE_A << 7;
+    let bits = pawns.bits();
+    Bitboard::new(match color {
+        Color::White => ((bits & !FILE_A) << 7) | ((bits & !FILE_H) << 9),
+        Color::Black => ((bits & !FILE_A) >> 9) | ((bits & !FILE_H) >> 7),
+    })
+}
+
 /// Returns the static evaluation in centipawns, relative to the side to move.
 ///
 /// Material and piece placement are scored from separate midgame and endgame
@@ -261,9 +325,9 @@ fn phase(board: &Board) -> i32 {
 /// to move.
 pub fn evaluate(board: &Board) -> i32 {
     let Accumulator { mg, eg, phase } = *board.accumulator();
-    let mg_phase = phase.min(TOTAL_PHASE);
-    let eg_phase = TOTAL_PHASE - mg_phase;
-    let score = (mg * mg_phase + eg * eg_phase) / TOTAL_PHASE;
+    let (white_mg, white_eg) = mobility(board, Color::White);
+    let (black_mg, black_eg) = mobility(board, Color::Black);
+    let score = blend(mg + white_mg - black_mg, eg + white_eg - black_eg, phase);
     let score = if board.state().side_to_move() == Color::White {
         score
     } else {
@@ -341,8 +405,18 @@ mod tests {
     /// move, so a test asserting the material component negates, cancels, or
     /// matches a hand-computed table value has to strip it first or it is
     /// asserting against the bonus as well.
+    ///
+    /// Computed from the accumulator rather than by subtracting the other
+    /// terms off `evaluate`: the blend truncates once, so peeling a separately
+    /// blended term back off leaves a rounding difference of a centipawn.
     fn placement(board: &Board) -> i32 {
-        evaluate(board) - TEMPO
+        let Accumulator { mg, eg, phase } = *board.accumulator();
+        let score = blend(mg, eg, phase);
+        if board.state().side_to_move() == Color::White {
+            score
+        } else {
+            -score
+        }
     }
 
     // catches: any change to the arithmetic that the relational tests below
@@ -514,6 +588,54 @@ mod tests {
             let mut board: Board = fen.parse().unwrap();
             walk(&mut board, 3);
         }
+    }
+
+    // catches: counting our own pieces' squares as available, ignoring the
+    // enemy pawn screen, scoring pawns or kings, and the whole term silently
+    // reading zero. Each case isolates one of those.
+    #[test]
+    fn mobility_counts_only_squares_a_piece_can_actually_use() {
+        let count = |fen: &str, color| {
+            let board: Board = fen.parse().unwrap();
+            mobility(&board, color)
+        };
+        // A lone knight on e4 reaches 8 squares.
+        assert_eq!(
+            count("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1", Color::White).0,
+            8 * 4
+        );
+        // Own pawns on two of those squares remove them.
+        assert_eq!(
+            count("4k3/8/3P1P2/8/4N3/8/8/4K3 w - - 0 1", Color::White).0,
+            6 * 4
+        );
+        // Enemy pawns on d6/f6 are targets, so those two squares still count -
+        // this is what distinguishes "not occupied by us" from "empty". But the
+        // same pawns attack c5, e5 and g5, and the knight reaches c5 and g5, so
+        // two other squares go away: 8 targets, minus 2 screened.
+        assert_eq!(
+            count("4k3/8/3p1p2/8/4N3/8/8/4K3 w - - 0 1", Color::White).0,
+            6 * 4
+        );
+        // A black pawn on d7 attacks c6 and e6; a white knight on d4 reaches
+        // both c6 and e6, so two of its eight squares are screened off.
+        assert_eq!(
+            count("4k3/3p4/8/8/3N4/8/8/4K3 w - - 0 1", Color::White).0,
+            6 * 4
+        );
+        // Pawns and kings contribute nothing, so a pawn-and-king position is
+        // flat zero rather than a number that happens to cancel.
+        assert_eq!(
+            count("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1", Color::White),
+            (0, 0)
+        );
+        // Nonzero somewhere, so a disabled term cannot pass the tests above.
+        const {
+            assert!(
+                MOBILITY_MG[PieceType::Knight as usize] > 0
+                    && MOBILITY_EG[PieceType::Queen as usize] > 0
+            )
+        };
     }
 
     #[test]
