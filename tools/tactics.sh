@@ -34,6 +34,14 @@ OUT="${OUT:-/tmp/lattice-tactics}"
 
 mkdir -p "$OUT"
 
+# On any exit, including the early ones below: a leaked worktree makes the
+# next run's `git worktree add` fail on a path that already exists.
+cleanup() {
+  git worktree remove --force "$OUT/build-a" 2>/dev/null || true
+  git worktree remove --force "$OUT/build-b" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 # Each revision is built in its own worktree so the working tree is left
 # alone: this is usually run with uncommitted changes present.
 build() {
@@ -53,6 +61,16 @@ BIN_B=$(build "$REF_B" b)
 echo "running $SUITE at depth $DEPTH ..." >&2
 SUITES_DIR="$SUITES_DIR" "$BIN_A" tactics "$SUITE" --depth "$DEPTH" > "$OUT/a.txt"
 SUITES_DIR="$SUITES_DIR" "$BIN_B" tactics "$SUITE" --depth "$DEPTH" > "$OUT/b.txt"
+
+# A revision from before the `tactics` subcommand existed reports nothing, and
+# an empty side would otherwise diff as "every position regressed".
+for side in a b; do
+  [ -s "$OUT/$side.txt" ] || {
+    ref=$([ "$side" = a ] && echo "$REF_A" || echo "$REF_B")
+    echo "$ref produced no report: does that revision have the tactics subcommand?" >&2
+    exit 2
+  }
+done
 
 # The bench signature of each build, which says whether the two searches are
 # even different trees. Equal counts plus a different solve rate means the
@@ -74,6 +92,3 @@ else
   echo
   echo "full diff: $OUT/diff.txt"
 fi
-
-git worktree remove --force "$OUT/build-a" 2>/dev/null || true
-git worktree remove --force "$OUT/build-b" 2>/dev/null || true
