@@ -256,17 +256,68 @@ pub fn is_attacked(board: &Board, sq: Square, by: Color) -> bool {
 }
 
 /// Generates legal moves for the side to move.
+///
+/// Most moves are legal without being played. Only a king move, an en passant
+/// capture, a move made while in check, or a move by a pinned piece can leave
+/// the king attacked; everything else is admitted directly, and only the
+/// remainder pays for a `make`/`unmake` pair.
 pub fn generate_legal(board: &mut Board, list: &mut MoveList) {
     let mut pseudo = MoveList::new();
     generate_pseudo(board, &mut pseudo);
     let us = board.state().side_to_move();
+    let king = board.king_square(us);
+    let in_check = is_attacked(board, king, us.flip());
+    let pinned = pinned_pieces(board, king, us);
     for &mv in pseudo.iter() {
+        if !in_check
+            && mv.from() != king
+            && mv.move_type() != MoveType::EnPassant
+            && !pinned.contains(mv.from())
+        {
+            list.push(mv);
+            continue;
+        }
         board.make(mv);
         if !is_attacked(board, board.king_square(us), us.flip()) {
             list.push(mv);
         }
         board.unmake(mv);
     }
+}
+
+/// The pieces of `us` that cannot move freely because a slider stands behind
+/// them, aimed at the king.
+///
+/// A sniper is an enemy slider that would attack the king if the pieces in
+/// the way were removed, which is what passing `them` as the occupancy finds.
+/// Where exactly one piece stands between a sniper and the king, that piece
+/// is pinned: moving it off the ray exposes the king.
+fn pinned_pieces(board: &Board, king: Square, us: Color) -> Bitboard {
+    let them = board.color(us.flip());
+    let occ = board.occupied();
+    let queens = board.pieces(PieceType::Queen);
+    let rq = (board.pieces(PieceType::Rook) | queens) & them;
+    let bq = (board.pieces(PieceType::Bishop) | queens) & them;
+    let snipers = (rook_attacks(king, them) & rq) | (bishop_attacks(king, them) & bq);
+    let mut pinned = Bitboard::empty();
+    for sniper in snipers {
+        // The squares strictly between the two, as the intersection of what
+        // each sees when the other is treated as a blocker.
+        let from_king = Bitboard::from_square(king);
+        let from_sniper = Bitboard::from_square(sniper);
+        let between = if rook_attacks(king, Bitboard::empty()).contains(sniper) {
+            rook_attacks(king, occ | from_sniper) & rook_attacks(sniper, occ | from_king)
+        } else {
+            bishop_attacks(king, occ | from_sniper) & bishop_attacks(sniper, occ | from_king)
+        };
+        let blockers = between & occ;
+        // Two or more blockers is not a pin: either can move and the other
+        // still shields the king.
+        if blockers.count() == 1 {
+            pinned |= blockers;
+        }
+    }
+    pinned
 }
 
 #[cfg(test)]
@@ -281,6 +332,45 @@ mod tests {
             (mv.move_type() as u16) << 12 | (mv.from().index() as u16) << 6 | mv.to().index() as u16
         });
         moves
+    }
+
+    /// `generate_legal` admits most moves without playing them, on the strength
+    /// of `pinned_pieces`. Perft would catch a wrong answer but not say why, so
+    /// this pins the pin detection itself.
+    #[test]
+    fn pinned_pieces_finds_exactly_the_pinned() {
+        let sq = |name: &str| -> Square {
+            let bytes = name.as_bytes();
+            Square::new_unchecked((bytes[1] - b'1') * 8 + (bytes[0] - b'a'))
+        };
+        // White knight on e2 between the king on e1 and a rook on e8.
+        let board: Board = "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1".parse().unwrap();
+        let pinned = super::pinned_pieces(&board, board.king_square(Color::White), Color::White);
+        assert_eq!(pinned.count(), 1);
+        assert!(pinned.contains(sq("e2")));
+
+        // Two pieces on the ray: neither is pinned, because either can move
+        // and the other still shields the king.
+        let board: Board = "4rk2/8/8/8/8/4N3/4N3/4K3 w - - 0 1".parse().unwrap();
+        let pinned = super::pinned_pieces(&board, board.king_square(Color::White), Color::White);
+        assert!(pinned.is_empty(), "two blockers on a ray is not a pin");
+
+        // A bishop pins along the diagonal but a rook on the same square would
+        // not, so the sniper's piece type has to match the ray.
+        let board: Board = "6kb/8/8/8/8/2N5/8/K7 w - - 0 1".parse().unwrap();
+        let pinned = super::pinned_pieces(&board, board.king_square(Color::White), Color::White);
+        assert_eq!(pinned.count(), 1);
+        assert!(pinned.contains(sq("c3")));
+
+        // An enemy piece between the king and the sniper is not our pin, and
+        // must not be reported: it is not ours to move.
+        let board: Board = "4rk2/8/8/8/8/8/4n3/4K3 w - - 0 1".parse().unwrap();
+        let pinned = super::pinned_pieces(&board, board.king_square(Color::White), Color::White);
+        assert_eq!(
+            pinned & board.color(Color::White),
+            crate::Bitboard::empty(),
+            "no white piece is pinned here"
+        );
     }
 
     fn legal(fen: &str) -> Vec<Move> {
