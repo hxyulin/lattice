@@ -1,5 +1,6 @@
 //! Iterative-deepening negamax search.
 
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,31 @@ const MIN_NULL_DEPTH: u32 = 3;
 const RFP_MARGIN: i32 = 300;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
-const LMR_REDUCTION: u32 = 1;
+/// Scale on the `ln(depth) * ln(move number)` reduction, and the constant
+/// subtracted from it. See [`LMR_TABLE`].
+const LMR_SCALE: f64 = 0.40;
+const LMR_BASE: f64 = 0.10;
+/// Reduction depth by `[depth][move number]`, both clamped to the table.
+///
+/// A flat reduction is the wrong shape: it says a late move at depth 4 and a
+/// late move at depth 20 deserve the same treatment, when the second is far
+/// more likely to be refuted cheaply and far more expensive to search in full.
+/// Growing the reduction with both terms is what bends the effective branching
+/// factor down as depth rises, rather than shifting it by a constant.
+///
+/// Logarithms because both terms have diminishing returns: the 30th move is
+/// barely less promising than the 20th, while the 5th is much less promising
+/// than the 3rd. Tabulated at startup so the search does no float work.
+static LMR_TABLE: LazyLock<[[u8; 64]; 64]> = LazyLock::new(|| {
+    let mut table = [[0u8; 64]; 64];
+    for (depth, row) in table.iter_mut().enumerate().skip(1) {
+        for (index, slot) in row.iter_mut().enumerate().skip(1) {
+            let reduction = LMR_BASE + (depth as f64).ln() * (index as f64).ln() * LMR_SCALE;
+            *slot = reduction.max(0.0) as u8;
+        }
+    }
+    table
+});
 /// Killer ply ceiling. Search depth is bounded by the clock long before this;
 /// past it the killer slots are simply skipped.
 const MAX_PLY: usize = 64;
@@ -557,7 +582,7 @@ fn search_move(
             }
             let reduced = -negamax(
                 board,
-                depth.saturating_sub(1 + LMR_REDUCTION),
+                depth.saturating_sub(1 + lmr_reduction(depth, index)),
                 child_ply,
                 -alpha - 1,
                 -alpha,
@@ -824,6 +849,23 @@ fn negamax(
     ctx.tt
         .store(key, score_to_tt(best, ply), best_move, depth, bound);
     Ok(best)
+}
+
+/// Plies to reduce a late quiet move by, from [`LMR_TABLE`].
+///
+/// Bounded above by `depth - 2` so a reduced search still has at least one ply
+/// of main search left: reducing straight into quiescence would answer a quiet
+/// move with a capture-only verdict, which is the one thing it cannot say
+/// anything about.
+///
+/// At the current scale the bound never binds - the formula does not exceed
+/// `depth - 2` anywhere in the table - so it is a guard against a future scale
+/// rather than something the search relies on today. It is kept, unlike the
+/// depth ceiling a flat reduction would need, because raising the scale is an
+/// expected next step and the failure it prevents is silent.
+fn lmr_reduction(depth: u32, index: usize) -> u32 {
+    let reduction = u32::from(LMR_TABLE[(depth as usize).min(63)][index.min(63)]);
+    reduction.clamp(1, depth.saturating_sub(2).max(1))
 }
 
 fn lmr_eligible(
@@ -1550,6 +1592,69 @@ mod tests {
             enabled.nodes,
             disabled.nodes
         );
+    }
+
+    /// The point of the table over a constant is that reduction grows with
+    /// both terms, so this asserts monotonicity in each rather than a set of
+    /// tabulated values, which would only restate the formula.
+    #[test]
+    fn the_reduction_grows_with_depth_and_move_number() {
+        for index in [4, 8, 16, 32] {
+            for depth in 4..40u32 {
+                assert!(
+                    lmr_reduction(depth + 1, index) >= lmr_reduction(depth, index),
+                    "depth {depth} -> {} but {} -> {} at index {index}",
+                    lmr_reduction(depth, index),
+                    depth + 1,
+                    lmr_reduction(depth + 1, index),
+                );
+            }
+        }
+        for depth in [4, 8, 16, 32] {
+            for index in 4..40usize {
+                assert!(
+                    lmr_reduction(depth, index + 1) >= lmr_reduction(depth, index),
+                    "index {index} -> {} but {} -> {} at depth {depth}",
+                    lmr_reduction(depth, index),
+                    index + 1,
+                    lmr_reduction(depth, index + 1),
+                );
+            }
+        }
+        // Strict somewhere, or a constant reduction would satisfy every
+        // >= above and the table would be pointless.
+        assert!(
+            lmr_reduction(32, 32) > lmr_reduction(4, 4),
+            "a late move at high depth must reduce more than an early one at low depth"
+        );
+        assert!(
+            lmr_reduction(32, 8) > lmr_reduction(4, 8),
+            "reduction must grow with depth at a fixed move number"
+        );
+        assert!(
+            lmr_reduction(8, 32) > lmr_reduction(8, 4),
+            "reduction must grow with move number at a fixed depth"
+        );
+    }
+
+    /// A reduction that swallows the whole remaining depth answers a quiet move
+    /// with quiescence, which searches captures only and so can say nothing
+    /// about it. The bound leaves at least one ply of main search.
+    #[test]
+    fn a_reduction_never_reaches_quiescence() {
+        for depth in LMR_MIN_DEPTH..64 {
+            for index in LMR_MIN_INDEX..64 {
+                let reduction = lmr_reduction(depth, index);
+                assert!(
+                    reduction >= 1,
+                    "an eligible move must be reduced: depth {depth} index {index}"
+                );
+                assert!(
+                    depth.saturating_sub(1 + reduction) >= 1,
+                    "depth {depth} index {index} reduced by {reduction} lands in quiescence"
+                );
+            }
+        }
     }
 
     #[test]
