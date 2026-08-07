@@ -14,7 +14,8 @@ use crate::tt::TranspositionTable;
 /// depth, and that a search change moves the count by a readable margin.
 /// Costs under a second in release; the debug build is roughly 60x slower,
 /// which is why the shipped-depth test is release-only.
-const DEPTH: u32 = 7;
+/// Search depth used by the fixed benchmark.
+pub const DEPTH: u32 = 7;
 const POSITIONS: [&str; 12] = [
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
@@ -35,7 +36,8 @@ pub fn run(output: &mut dyn Write) -> u64 {
     run_at(output, DEPTH)
 }
 
-fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
+/// Runs the fixed benchmark at `depth` and returns its deterministic node count.
+pub fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
     let start = Instant::now();
     let stop = AtomicBool::new(false);
     // One table for the run, built fresh: shared across positions the way a
@@ -139,6 +141,13 @@ fn write_profile(output: &mut dyn Write, profile: SearchProfile, qnodes: u64) {
         profile.null_cutoffs,
         profile.null_attempts,
         percent(profile.null_cutoffs, profile.null_attempts),
+    );
+    let _ = writeln!(
+        output,
+        "info string profile LMR re-searches {} / {} ({:.2}%)",
+        profile.lmr_researches,
+        profile.lmr_reductions,
+        percent(profile.lmr_researches, profile.lmr_reductions),
     );
     let qply_total = profile.qply.iter().sum();
     let values = profile

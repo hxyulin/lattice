@@ -29,6 +29,9 @@ const MAX_QPLY: u32 = 8;
 /// verdict on a position that cannot legally arise, which is too thin to trust.
 /// Also the depth at which `depth - 1 - R` bottoms out at exactly 0.
 const MIN_NULL_DEPTH: u32 = 3;
+const LMR_MIN_DEPTH: u32 = 3;
+const LMR_MIN_INDEX: usize = 4;
+const LMR_REDUCTION: u32 = 1;
 /// Killer ply ceiling. Search depth is bounded by the clock long before this;
 /// past it the killer slots are simply skipped.
 const MAX_PLY: usize = 64;
@@ -91,6 +94,8 @@ pub(crate) struct SearchProfile {
     pub(crate) pvs_researches: u64,
     pub(crate) null_attempts: u64,
     pub(crate) null_cutoffs: u64,
+    pub(crate) lmr_reductions: u64,
+    pub(crate) lmr_researches: u64,
 }
 
 #[cfg(feature = "profiling")]
@@ -123,6 +128,8 @@ impl std::ops::AddAssign for SearchProfile {
         self.pvs_researches += rhs.pvs_researches;
         self.null_attempts += rhs.null_attempts;
         self.null_cutoffs += rhs.null_cutoffs;
+        self.lmr_reductions += rhs.lmr_reductions;
+        self.lmr_researches += rhs.lmr_researches;
     }
 }
 
@@ -222,6 +229,14 @@ impl SearchProfile {
     fn record_null_cutoff(&mut self) {
         self.null_cutoffs += 1;
     }
+
+    fn record_lmr_reduction(&mut self) {
+        self.lmr_reductions += 1;
+    }
+
+    fn record_lmr_research(&mut self) {
+        self.lmr_researches += 1;
+    }
 }
 
 #[cfg(feature = "profiling")]
@@ -258,6 +273,10 @@ struct Ctx<'a> {
     pvs: bool,
     #[cfg(test)]
     nmp: bool,
+    #[cfg(test)]
+    lmr: bool,
+    #[cfg(test)]
+    lmr_reductions: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -309,6 +328,10 @@ pub(crate) fn search_inner(
         pvs: true,
         #[cfg(test)]
         nmp: true,
+        #[cfg(test)]
+        lmr: true,
+        #[cfg(test)]
+        lmr_reductions: 0,
     };
     let max_depth = limits.depth.unwrap_or(u32::MAX).max(1);
     let mut best_move = None;
@@ -402,7 +425,7 @@ fn negamax_root(
         }
         // The root always searches on a full window, so `beta` is INFINITY and
         // the re-search condition reduces to `narrow > best_score`.
-        let result = search_move(board, depth, 1, best_score, INFINITY, legal, ctx);
+        let result = search_move(board, depth, 1, best_score, INFINITY, legal, false, ctx);
         board.unmake(mv);
         legal += 1;
         let score = result?;
@@ -436,6 +459,7 @@ fn negamax_root(
 /// others only need refuting. A probe that beats `alpha` is re-searched
 /// properly, because a null window can prove a move is better but not by how
 /// much. `child_ply` is the ply of the position now on the board.
+#[allow(clippy::too_many_arguments)]
 fn search_move(
     board: &mut Board,
     depth: u32,
@@ -443,9 +467,33 @@ fn search_move(
     alpha: i32,
     beta: i32,
     index: usize,
+    reduce: bool,
     ctx: &mut Ctx<'_>,
 ) -> Result<i32, Aborted> {
     if index > 0 && ctx.pvs_enabled() {
+        let lmr_reduced = reduce && ctx.lmr_enabled();
+        if lmr_reduced {
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_lmr_reduction();
+            #[cfg(test)]
+            {
+                ctx.lmr_reductions += 1;
+            }
+            let reduced = -negamax(
+                board,
+                depth.saturating_sub(1 + LMR_REDUCTION),
+                child_ply,
+                -alpha - 1,
+                -alpha,
+                true,
+                ctx,
+            )?;
+            if reduced <= alpha {
+                return Ok(reduced);
+            }
+            #[cfg(feature = "profiling")]
+            ctx.profile.record_lmr_research();
+        }
         #[cfg(feature = "profiling")]
         ctx.profile.record_pvs_probe();
         let narrow = -negamax(board, depth - 1, child_ply, -alpha - 1, -alpha, true, ctx)?;
@@ -599,7 +647,8 @@ fn negamax(
                 board.unmake(mv);
                 continue;
             }
-            let result = search_move(board, depth, ply + 1, alpha, beta, legal, ctx);
+            let reduce = lmr_eligible(board, depth, legal, mv, ply, ctx);
+            let result = search_move(board, depth, ply + 1, alpha, beta, legal, reduce, ctx);
             board.unmake(mv);
             legal += 1;
             let score = result?;
@@ -649,6 +698,25 @@ fn negamax(
     ctx.tt
         .store(key, score_to_tt(best, ply), best_move, depth, bound);
     Ok(best)
+}
+
+fn lmr_eligible(
+    board: &Board,
+    depth: u32,
+    legal: usize,
+    mv: Move,
+    ply: u32,
+    ctx: &Ctx<'_>,
+) -> bool {
+    depth >= LMR_MIN_DEPTH
+        && legal >= LMR_MIN_INDEX
+        && !mv.is_capture()
+        && !mv.is_promotion()
+        && ctx.killers_at(ply).iter().all(|killer| *killer != Some(mv))
+        && {
+            let them = board.state().side_to_move();
+            !is_attacked(board, board.king_square(them), them.flip())
+        }
 }
 
 /// Searches the capture sequences leaving a leaf position until it is quiet,
@@ -899,6 +967,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn lmr_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.lmr
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     /// Every node visited. Clock and node-limit checks use this rather than
     /// `nodes` alone: quiescence is most of the tree, so counting main nodes
     /// only would leave thousands of nodes between two clock checks.
@@ -1050,6 +1129,8 @@ mod tests {
             quiesce_leaves: true,
             pvs: true,
             nmp: true,
+            lmr: true,
+            lmr_reductions: 0,
         }
     }
 
@@ -1058,6 +1139,7 @@ mod tests {
         Ctx {
             quiesce_leaves: false,
             nmp: false,
+            lmr: false,
             ..test_ctx(iteration_depth)
         }
     }
@@ -1098,6 +1180,84 @@ mod tests {
             enabled.nodes,
             disabled.nodes
         );
+    }
+
+    #[test]
+    fn late_move_reductions_reduce_nodes() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let mut enabled_board: Board = fen.parse().unwrap();
+        let mut enabled = test_ctx(5);
+        negamax_root(&mut enabled_board, 5, &mut enabled).unwrap();
+
+        let mut disabled_board: Board = fen.parse().unwrap();
+        let mut disabled = test_ctx(5);
+        disabled.lmr = false;
+        negamax_root(&mut disabled_board, 5, &mut disabled).unwrap();
+
+        assert!(enabled.lmr_reductions > 0, "LMR never fired");
+        assert!(
+            enabled.nodes < disabled.nodes,
+            "LMR did not reduce nodes: {} vs {}",
+            enabled.nodes,
+            disabled.nodes
+        );
+    }
+
+    #[test]
+    fn root_moves_are_not_reduced() {
+        let mut board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let mut ctx = test_ctx(LMR_MIN_DEPTH);
+        negamax_root(&mut board, LMR_MIN_DEPTH, &mut ctx).unwrap();
+        assert_eq!(ctx.lmr_reductions, 0, "LMR reached a root move");
+    }
+
+    #[test]
+    fn killer_moves_are_not_reduced() {
+        let mut board: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let mv = moves
+            .iter()
+            .copied()
+            .find(|&mv| move_text(mv) == "e2e3")
+            .unwrap();
+        let mut ctx = test_ctx(LMR_MIN_DEPTH);
+        ctx.killers[0][0] = Some(mv);
+        board.make(mv);
+        assert!(!lmr_eligible(
+            &board,
+            LMR_MIN_DEPTH,
+            LMR_MIN_INDEX,
+            mv,
+            0,
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn moves_that_leave_the_child_in_check_are_not_reduced() {
+        let mut board: Board = "4k3/8/8/8/8/8/R7/K7 w - - 0 1".parse().unwrap();
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let mv = moves
+            .iter()
+            .copied()
+            .find(|&mv| move_text(mv) == "a2e2")
+            .unwrap();
+        let ctx = test_ctx(LMR_MIN_DEPTH);
+        board.make(mv);
+        assert!(!lmr_eligible(
+            &board,
+            LMR_MIN_DEPTH,
+            LMR_MIN_INDEX,
+            mv,
+            0,
+            &ctx
+        ));
     }
 
     #[test]
@@ -1897,5 +2057,10 @@ mod tests {
         profile.record_null_cutoff();
         assert_eq!(profile.null_attempts, 1);
         assert_eq!(profile.null_cutoffs, 1);
+
+        profile.record_lmr_reduction();
+        profile.record_lmr_research();
+        assert_eq!(profile.lmr_reductions, 1);
+        assert_eq!(profile.lmr_researches, 1);
     }
 }

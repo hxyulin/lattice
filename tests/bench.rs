@@ -11,8 +11,7 @@
 
 /// catches: `run` searching at a depth other than the shipped one, and the
 /// printed count drifting from the returned one. Determinism is depth
-/// independent and covered by the depth-2 unit tests, so this runs the
-/// expensive suite once.
+/// independent and covered by the depth-2 unit tests.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "too slow in debug; run with --release")]
 fn shipped_depth_is_reproducible() {
@@ -30,11 +29,9 @@ fn shipped_depth_is_reproducible() {
         "the printed count and the returned count must agree"
     );
 
-    // The suite searches millions of nodes at the shipped depth and a small
-    // fraction of that at any shallower one, so this fails if `run` stops
-    // using the shipped DEPTH.
-    assert!(
-        nodes > 3_000_000,
-        "shipped-depth suite searched only {nodes} nodes"
+    assert_eq!(
+        nodes,
+        lattice::bench::run_at(&mut std::io::sink(), lattice::bench::DEPTH),
+        "run must use the shipped depth"
     );
 }
