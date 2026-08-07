@@ -43,5 +43,6 @@ ca0b432,2026-08-06,"perf(eval): maintain piece-square scores incrementally",1864
 32a917d,2026-08-06,"perf(search): stage main-search move generation",185737
 d2474e3,2026-08-07,"docs: refresh bench ledger after staged move generation",
 c4a89bd,2026-08-07,"chore(bench): raise the bench suite to depth 7",11560394
-4fc83c4,2026-08-07,"feat(search): null move pruning",3968708
-05ff639,2026-08-07,"docs: record the null move pruning SPRT result",
+f2e72d6,2026-08-07,"feat(search): null move pruning",3968708
+45c3528,2026-08-07,"docs: record the null move pruning SPRT result",
+af6e5b5,2026-08-07,"docs: refresh bench ledger after linearizing the feature merges",

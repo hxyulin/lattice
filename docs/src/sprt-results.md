@@ -49,4 +49,5 @@ authoritative result.
 | compute each ordering key once per move | STC | 1336 | +24.4 | pass |
 | stage main-search move generation | STC | 992 | +33.9 | pass |
 | null move pruning | STC | 256 | +135.6 | pass |
+| null move pruning | LTC | 256 | +145.0 | pass |
 <!-- END generated -->
