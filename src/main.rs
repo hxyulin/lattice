@@ -10,7 +10,7 @@ use lattice::bench;
 use lattice::movegen::perft::perft_divide;
 use lattice::search::search;
 use lattice::tt::TranspositionTable;
-use lattice::uci::{Command, move_text, parse};
+use lattice::uci::{Command, UciListener, move_text, parse};
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("bench") {
@@ -58,15 +58,15 @@ fn main() {
                 let search_tt = Arc::clone(&tt);
                 search_thread = Some(thread::spawn(move || {
                     let stdout = io::stdout();
-                    let mut output = stdout.lock();
+                    let mut listener = UciListener::new(stdout.lock());
                     search(
                         &mut search_board,
                         limits,
                         &search_stop,
                         &search_tt,
-                        &mut output,
+                        &mut listener,
                     );
-                    let _ = output.flush();
+                    let _ = io::stdout().flush();
                 }));
             }
             Command::Go(_) => {}

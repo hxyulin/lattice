@@ -1,7 +1,9 @@
 //! UCI command parsing and notation.
 
+use std::io::Write;
+
 use crate::movegen::{MoveList, generate_legal};
-use crate::search::Limits;
+use crate::search::{Iteration, Limits, SearchListener};
 use crate::{Board, Move, PieceType, Square};
 
 /// A parsed UCI command.
@@ -141,6 +143,51 @@ fn find_move(board: &mut Board, text: &str) -> Option<Move> {
                     | (Some(PieceType::Queen), Some(b'q'))
             )
     })
+}
+
+/// Renders a search as UCI `info` and `bestmove` lines.
+///
+/// This is the protocol side of [`SearchListener`]: the search reports what it
+/// found, and this turns it into the text a GUI reads.
+pub struct UciListener<W> {
+    output: W,
+}
+
+impl<W: Write> UciListener<W> {
+    /// Wraps a writer, normally stdout.
+    pub fn new(output: W) -> Self {
+        Self { output }
+    }
+
+    /// Returns the wrapped writer, for callers that captured into a buffer.
+    pub fn into_inner(self) -> W {
+        self.output
+    }
+}
+
+impl<W: Write> SearchListener for UciListener<W> {
+    fn iteration(&mut self, iteration: &Iteration) {
+        let score = iteration.mate_in().map_or_else(
+            || format!("score cp {}", iteration.score),
+            |moves| format!("score mate {moves}"),
+        );
+        let pv = iteration
+            .best_move
+            .map_or_else(String::new, |mv| format!(" pv {}", move_text(mv)));
+        let _ = writeln!(
+            self.output,
+            "info depth {} {score} nodes {} nps {} time {}{pv}",
+            iteration.depth,
+            iteration.nodes,
+            iteration.nps(),
+            iteration.elapsed.as_millis(),
+        );
+    }
+
+    fn finished(&mut self, best_move: Option<Move>) {
+        let best = best_move.map_or_else(|| "0000".to_owned(), move_text);
+        let _ = writeln!(self.output, "bestmove {best}");
+    }
 }
 
 /// Returns a move in UCI long algebraic notation.

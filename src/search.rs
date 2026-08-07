@@ -1,6 +1,5 @@
 //! Iterative-deepening negamax search.
 
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,7 +11,6 @@ use crate::movegen::{
 #[cfg(feature = "profiling")]
 use crate::tt::Miss;
 use crate::tt::{Bound, TranspositionTable};
-use crate::uci::move_text;
 use crate::{Bitboard, Board, Color, Move, MoveType, PieceType, Square};
 
 /// Nodes between clock checks. Low enough that a small tree still checks
@@ -61,6 +59,51 @@ pub struct Limits {
     /// Search until told to stop.
     pub infinite: bool,
 }
+
+/// What one iterative-deepening iteration found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Iteration {
+    /// Depth this iteration completed.
+    pub depth: u32,
+    /// Score from the side to move's point of view, in centipawns, unless
+    /// `mate_in` reads it as a distance to mate.
+    pub score: i32,
+    /// Nodes searched so far in this search, main plus quiescence.
+    pub nodes: u64,
+    /// Time since the search started.
+    pub elapsed: Duration,
+    /// Best move as of this iteration, absent only if the position has none.
+    pub best_move: Option<Move>,
+}
+
+impl Iteration {
+    /// Moves to mate if the score encodes one, negative when getting mated.
+    pub fn mate_in(&self) -> Option<i32> {
+        mate_in(self.score)
+    }
+
+    /// Nodes per second, averaged over the search so far.
+    pub fn nps(&self) -> u128 {
+        u128::from(self.nodes) * 1000 / self.elapsed.as_millis().max(1)
+    }
+}
+
+/// Observes a search as it runs.
+///
+/// The search reports what it found; rendering it is the caller's business.
+/// That keeps UCI text out of the library and lets a caller that wants the
+/// data rather than the protocol - the tactics runner reading which iteration
+/// first found the expected move - take it without parsing anything.
+pub trait SearchListener {
+    /// Called once per completed iterative-deepening iteration.
+    fn iteration(&mut self, _iteration: &Iteration) {}
+    /// Called once when the search stops, with its final answer.
+    fn finished(&mut self, _best_move: Option<Move>) {}
+}
+
+/// Discards everything, for searches whose result is read from the return
+/// value alone.
+impl SearchListener for () {}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SearchResult {
@@ -283,20 +326,16 @@ struct Ctx<'a> {
 #[derive(Debug, Clone, Copy)]
 struct Aborted;
 
-/// Searches the position and returns the best move found.
+/// Searches the position and returns the best move found, reporting each
+/// iteration to `listener`.
 pub fn search(
     board: &mut Board,
     limits: Limits,
     stop: &AtomicBool,
     tt: &TranspositionTable,
-    output: &mut dyn Write,
+    listener: &mut dyn SearchListener,
 ) -> Option<Move> {
-    let result = search_inner(board, limits, stop, tt, output, true);
-    let best = result
-        .best_move
-        .map_or_else(|| "0000".to_owned(), move_text);
-    let _ = writeln!(output, "bestmove {best}");
-    result.best_move
+    search_inner(board, limits, stop, tt, listener).best_move
 }
 
 pub(crate) fn search_inner(
@@ -304,8 +343,7 @@ pub(crate) fn search_inner(
     limits: Limits,
     stop: &AtomicBool,
     tt: &TranspositionTable,
-    output: &mut dyn Write,
-    emit_info: bool,
+    listener: &mut dyn SearchListener,
 ) -> SearchResult {
     let start = Instant::now();
     let deadline =
@@ -349,20 +387,18 @@ pub(crate) fn search_inner(
             break;
         };
         best_move = candidate;
-        if emit_info {
-            write_info(
-                output,
-                depth,
-                score,
-                ctx.total(),
-                start.elapsed(),
-                candidate,
-            );
-        }
+        listener.iteration(&Iteration {
+            depth,
+            score,
+            nodes: ctx.total(),
+            elapsed: start.elapsed(),
+            best_move: candidate,
+        });
         if candidate.is_none() {
             break;
         }
     }
+    listener.finished(best_move);
 
     SearchResult {
         best_move,
@@ -1151,35 +1187,15 @@ fn mate_in(score: i32) -> Option<i32> {
     })
 }
 
-fn write_info(
-    output: &mut dyn Write,
-    depth: u32,
-    score: i32,
-    nodes: u64,
-    elapsed: Duration,
-    best_move: Option<Move>,
-) {
-    let millis = elapsed.as_millis();
-    let nps = u128::from(nodes) * 1000 / millis.max(1);
-    let score_text = mate_in(score).map_or_else(
-        || format!("score cp {score}"),
-        |moves| format!("score mate {moves}"),
-    );
-    let pv = best_move.map_or_else(String::new, |mv| format!(" pv {}", move_text(mv)));
-    let _ = writeln!(
-        output,
-        "info depth {depth} {score_text} nodes {nodes} nps {nps} time {millis}{pv}"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::movegen::{MoveList, generate_legal};
+    use crate::uci::{UciListener, move_text};
 
     fn run(fen: &str, depth: u32) -> (SearchResult, String) {
         let mut board: Board = fen.parse().unwrap();
-        let mut output = Vec::new();
+        let mut listener = UciListener::new(Vec::new());
         let result = search_inner(
             &mut board,
             Limits {
@@ -1188,10 +1204,9 @@ mod tests {
             },
             &AtomicBool::new(false),
             &TranspositionTable::new(),
-            &mut output,
-            true,
+            &mut listener,
         );
-        (result, String::from_utf8(output).unwrap())
+        (result, String::from_utf8(listener.into_inner()).unwrap())
     }
 
     fn test_ctx(iteration_depth: u32) -> Ctx<'static> {
@@ -2037,8 +2052,7 @@ mod tests {
             },
             &stop,
             &tt,
-            &mut std::io::sink(),
-            false,
+            &mut (),
         );
 
         // Search the same position again: the root store left a deep entry for
@@ -2060,8 +2074,7 @@ mod tests {
                 },
                 &stop,
                 &tt,
-                &mut std::io::sink(),
-                false,
+                &mut (),
             );
             counts.push(result.nodes + result.qnodes);
         }
@@ -2151,8 +2164,7 @@ mod tests {
             },
             &AtomicBool::new(false),
             &TranspositionTable::new(),
-            &mut std::io::sink(),
-            false,
+            &mut (),
         );
         let elapsed = start.elapsed();
         assert!(result.best_move.is_some());
@@ -2164,7 +2176,6 @@ mod tests {
     #[test]
     fn depth_one_completes_despite_stop() {
         let mut board = Board::startpos();
-        let mut output = Vec::new();
         let result = search_inner(
             &mut board,
             Limits {
@@ -2174,8 +2185,7 @@ mod tests {
             },
             &AtomicBool::new(true),
             &TranspositionTable::new(),
-            &mut output,
-            false,
+            &mut (),
         );
         assert!(result.best_move.is_some());
         // 20 root moves plus one re-search each for the four that beat the

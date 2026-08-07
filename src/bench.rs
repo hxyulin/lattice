@@ -58,8 +58,7 @@ pub fn run_at(output: &mut dyn Write, depth: u32) -> u64 {
             },
             &stop,
             &tt,
-            &mut std::io::sink(),
-            false,
+            &mut (),
         );
         nodes += result.nodes;
         qnodes += result.qnodes;
@@ -239,8 +238,7 @@ mod tests {
                 },
                 &stop,
                 &tt,
-                &mut std::io::sink(),
-                false,
+                &mut (),
             );
             summed += result.nodes + result.qnodes;
         }
