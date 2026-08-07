@@ -2350,7 +2350,9 @@ mod tests {
                 rfp,
                 ..test_ctx(10)
             };
-            negamax_root(&mut board, 10, &mut ctx).unwrap().1
+            negamax_root(&mut board, 10, -INFINITY, INFINITY, &mut ctx)
+                .unwrap()
+                .1
         };
         let (with, without) = (score(true), score(false));
         assert!(
@@ -2383,7 +2385,9 @@ mod tests {
         let score = |rfp: bool| {
             let mut board: Board = fen.parse().unwrap();
             let mut ctx = Ctx { rfp, ..test_ctx(4) };
-            negamax_root(&mut board, 4, &mut ctx).unwrap().1
+            negamax_root(&mut board, 4, -INFINITY, INFINITY, &mut ctx)
+                .unwrap()
+                .1
         };
         assert_eq!(
             score(true),
@@ -2401,7 +2405,7 @@ mod tests {
         let nodes = |rfp: bool| {
             let mut board: Board = fen.parse().unwrap();
             let mut ctx = Ctx { rfp, ..test_ctx(6) };
-            negamax_root(&mut board, 6, &mut ctx).unwrap();
+            negamax_root(&mut board, 6, -INFINITY, INFINITY, &mut ctx).unwrap();
             ctx.total()
         };
         let (on, off) = (nodes(true), nodes(false));
