@@ -1,7 +1,7 @@
 //! Static position evaluation.
 
 use crate::board::{Piece, PieceType};
-use crate::movegen::{bishop_attacks, knight_attacks, queen_attacks, rook_attacks};
+use crate::movegen::{bishop_attacks, king_attacks, knight_attacks, queen_attacks, rook_attacks};
 use crate::{Bitboard, Board, Color, Square};
 
 /// Midgame material values. The king is 0 by construction: it is never
@@ -362,7 +362,80 @@ fn rook_files(board: &Board, us: Color) -> (i32, i32) {
 fn term_sum(board: &Board, us: Color) -> (i32, i32) {
     let (mobility_mg, mobility_eg) = mobility(board, us);
     let (rook_mg, rook_eg) = rook_files(board, us);
-    (mobility_mg + rook_mg, mobility_eg + rook_eg)
+    // Midgame only, so it contributes nothing to the endgame half.
+    let danger = king_danger(board, us);
+    (mobility_mg + rook_mg + danger, mobility_eg + rook_eg)
+}
+
+/// Weight per attacking piece type, in units the `KING_DANGER` table indexes.
+///
+/// A queen near the king is most of the threat, which is why it carries five
+/// times a knight's weight: mating nets are built around it and the minor
+/// pieces are the support.
+const ATTACK_WEIGHT: [i32; 6] = [0, 2, 2, 3, 5, 0];
+
+/// Danger score by summed attack weight, saturating at the end.
+///
+/// Non-linear on purpose, and this is the whole point of the term: one piece
+/// looking at the king zone is nothing, three converging on it is often
+/// winning. A linear sum cannot express "the third attacker matters more than
+/// the first", so a table indexed by the sum is the cheapest thing that can.
+/// It saturates rather than growing without bound - past a certain weight the
+/// position is decided and a larger number only distorts the search's
+/// comparisons between two already-winning lines.
+///
+/// Capped near fifty centipawns rather than the several hundred a textbook
+/// table reaches. This evaluation measures about three times over-scaled
+/// against a reference net, so a term transcribed at face value arrives three
+/// times too loud.
+///
+/// The cap is set by `null_move_pruning_reduces_nodes`, which fails when the
+/// term is loud enough to reshape the tree it prunes: at a ~308cp cap NMP
+/// *increased* nodes at depth 6 from the start position. A ~102cp cap fixed
+/// that against a material-and-placement evaluation, but failed again once
+/// mobility and rook files landed - a richer evaluation leaves less room for
+/// any one term. Halved again to ~51, which passes. The next value down (~17)
+/// also passes, so this is the loudest setting the search tolerates rather
+/// than the only one that works.
+#[rustfmt::skip]
+const KING_DANGER: [i32; 24] = [
+     0,  1,  2,  4,  6,  9, 12, 16,
+    20, 24, 28, 32, 36, 39, 42, 45,
+    47, 48, 49, 50, 50, 51, 51, 51,
+];
+
+/// Danger to `us`'s king from enemy pieces bearing on the squares around it,
+/// as a midgame penalty. Zero in the endgame, which is why it is not tapered
+/// here: with few pieces left there is no mating attack to fear, and an active
+/// king is an asset - the endgame king table already says so.
+fn king_danger(board: &Board, us: Color) -> i32 {
+    let king = board.king_square(us);
+    // The king's own square included: a piece attacking the king itself is
+    // part of the same attack, and dropping it would score a check as safer
+    // than the quiet move beside it.
+    let zone = king_attacks(king) | Bitboard::from_square(king);
+    let them = board.color(us.flip());
+    let occ = board.occupied();
+    let mut weight = 0;
+    for kind in [
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+    ] {
+        for square in board.pieces(kind) & them {
+            let attacks = match kind {
+                PieceType::Knight => knight_attacks(square),
+                PieceType::Bishop => bishop_attacks(square, occ),
+                PieceType::Rook => rook_attacks(square, occ),
+                _ => queen_attacks(square, occ),
+            };
+            if !(attacks & zone).is_empty() {
+                weight += ATTACK_WEIGHT[kind as usize];
+            }
+        }
+    }
+    -KING_DANGER[(weight as usize).min(KING_DANGER.len() - 1)]
 }
 
 /// Returns the static evaluation in centipawns, relative to the side to move.
@@ -712,6 +785,54 @@ mod tests {
         // leaves the bonus intact.
         assert_eq!(score("4k3/8/8/8/8/8/P7/3RK3 w - - 0 1"), ROOK_OPEN_MG);
         const { assert!(ROOK_OPEN_MG > ROOK_SEMI_MG && ROOK_SEMI_MG > 0) };
+    }
+
+    // catches: the sign inverted (danger scored as a bonus), a linear sum
+    // replacing the table, the king's own square dropped from the zone, and
+    // attackers counted per attacked square rather than per piece.
+    #[test]
+    fn king_danger_grows_faster_than_the_number_of_attackers() {
+        let danger = |fen: &str| {
+            let board: Board = fen.parse().unwrap();
+            king_danger(&board, Color::White)
+        };
+        // Nothing near the king is no danger at all.
+        assert_eq!(danger("4k3/8/8/8/8/8/8/4K3 w - - 0 1"), 0);
+        // A penalty, not a bonus: more attackers must never raise the score.
+        let one = danger("4k3/8/8/8/8/5n2/8/4K3 w - - 0 1");
+        let two = danger("4k3/8/8/8/8/3n1n2/8/4K3 w - - 0 1");
+        let three = danger("4k3/8/8/8/6n1/3n1n2/8/4K3 w - - 0 1");
+        assert!(one < 0, "one attacker should be a penalty, got {one}");
+        assert!(two < one && three < two, "{one} {two} {three}");
+        // Non-linear: the step from two attackers to three is larger than the
+        // step from one to two. A linear weight sum would make them equal, and
+        // that is the whole reason the table exists.
+        assert!(
+            (two - three) > (one - two),
+            "danger should accelerate: steps {} then {}",
+            one - two,
+            two - three
+        );
+        // A piece attacking many zone squares counts once, not once per square:
+        // a knight on f3 hits two squares beside a king on e1, and must still
+        // score exactly one knight's weight.
+        assert_eq!(
+            danger("4k3/8/8/8/8/5n2/8/4K3 w - - 0 1"),
+            -KING_DANGER[ATTACK_WEIGHT[PieceType::Knight as usize] as usize]
+        );
+        // The king's own square is in the zone: a rook giving check on the e
+        // file attacks e1 itself and no other zone square, so dropping the
+        // king's square would score this as perfectly safe.
+        assert!(
+            danger("4k3/8/8/8/8/8/8/r3K3 w - - 0 1") < 0,
+            "a checking rook must register as danger"
+        );
+        // Saturates rather than running off the end of the table. Five queens
+        // on open lines around the king is weight 25, past the table's 24.
+        assert_eq!(
+            danger("1k6/8/8/1q6/3q4/2q1q3/8/3qK3 w - - 0 1"),
+            -KING_DANGER[KING_DANGER.len() - 1]
+        );
     }
 
     #[test]

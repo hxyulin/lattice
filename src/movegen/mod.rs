@@ -19,6 +19,11 @@ pub(crate) fn knight_attacks(sq: Square) -> Bitboard {
     KNIGHT[sq.index() as usize]
 }
 
+/// Returns the squares a king on `sq` attacks.
+pub(crate) fn king_attacks(sq: Square) -> Bitboard {
+    KING[sq.index() as usize]
+}
+
 /// A fixed-capacity list of chess moves.
 ///
 /// Exactly 512 bytes and cache-line aligned, with the length leading: a list
