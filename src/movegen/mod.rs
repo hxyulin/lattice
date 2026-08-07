@@ -11,8 +11,13 @@ use core::ops::Index;
 
 use crate::{Bitboard, Board, CastlingRights, Color, Move, MoveType, PieceType, Square};
 pub use magic::init;
-use magic::{bishop_attacks, queen_attacks, rook_attacks};
+pub(crate) use magic::{bishop_attacks, queen_attacks, rook_attacks};
 use tables::{BETWEEN, KING, KNIGHT, PAWN};
+
+/// Returns the squares a knight on `sq` attacks.
+pub(crate) fn knight_attacks(sq: Square) -> Bitboard {
+    KNIGHT[sq.index() as usize]
+}
 
 /// A fixed-capacity list of chess moves.
 ///
