@@ -110,6 +110,31 @@ impl Board {
     pub const fn state(&self) -> &State {
         &self.state
     }
+    /// Whether this position has occurred before within the current halfmove
+    /// clock, i.e. a two-fold repetition.
+    ///
+    /// One repeat, not two: inside a search the second occurrence is where a
+    /// line becomes drawn by force, and waiting for a third means the search
+    /// has already committed to reaching it.
+    ///
+    /// The halfmove clock bounds the scan but is not load-bearing for
+    /// correctness - a position from before a pawn move or a capture cannot
+    /// share a key with this one, because neither is reversible. It is there
+    /// so the scan is O(clock) rather than O(game).
+    pub fn is_repetition(&self) -> bool {
+        let reversible = (self.state.halfmove as usize).min(self.history.len());
+        self.history
+            .iter()
+            .rev()
+            .take(reversible)
+            // A null move ends the scan rather than being stepped over:
+            // everything before it belongs to a line the game never played.
+            .take_while(|undo| !undo.null)
+            .enumerate()
+            // The nth entry back is n+1 plies back, and only an even number of
+            // plies restores the side to move.
+            .any(|(n, undo)| n % 2 == 1 && undo.state.zobrist == self.state.zobrist)
+    }
     /// Applies a move and saves enough information to undo it.
     pub fn make(&mut self, mv: Move) {
         let from = mv.from();
@@ -132,6 +157,7 @@ impl Board {
         self.history.push(Undo {
             state: self.state,
             captured,
+            null: false,
         });
         self.set_ep(None);
         self.remove_piece(moving, from);
@@ -212,6 +238,7 @@ impl Board {
         self.history.push(Undo {
             state: self.state,
             captured: None,
+            null: true,
         });
         self.set_ep(None);
         self.state.halfmove = self.state.halfmove.saturating_add(1);
