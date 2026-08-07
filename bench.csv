@@ -49,3 +49,6 @@ af6e5b5,2026-08-07,"docs: refresh bench ledger after linearizing the feature mer
 9fca3a1,2026-08-07,"docs: record the null move pruning LTC result",
 06b644a,2026-08-07,"feat(search): late move reductions",1834834
 db64cfb,2026-08-07,"docs: record the late move reductions SPRT result",
+e955af6,2026-08-07,"docs: record the late move reductions LTC result",
+73f045c,2026-08-07,"tools: add a Stockfish calibration gauntlet",
+8791ed9,2026-08-05,"feat(search): SEE pruning in quiescence",1274778
