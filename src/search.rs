@@ -19,6 +19,10 @@ use crate::{Bitboard, Board, Color, Move, MoveType, PieceType, Square};
 const CHECK_INTERVAL: u64 = 256;
 const MATE: i32 = 30_000;
 const INFINITY: i32 = 31_000;
+/// A drawn position, from the point of view of the side to move.
+const DRAW: i32 = 0;
+/// Halfmove clock at which the fifty-move rule applies: 50 full moves each.
+const FIFTY_MOVE_PLIES: u8 = 100;
 /// Scores above this in absolute value encode a distance to mate.
 const MATE_BOUND: i32 = MATE - 1000;
 /// Quiescence ply ceiling. Deep enough for any real exchange sequence, and a
@@ -568,6 +572,13 @@ fn negamax(
 ) -> Result<i32, Aborted> {
     ctx.nodes += 1;
     ctx.check_abort()?;
+    // Before the TT probe, and never stored: a draw by repetition or by the
+    // clock is a property of the path taken to this position, not of the
+    // position, so a score of 0 here would be wrong for another path that
+    // reaches the same key. `ply > 0` because the root must return a move.
+    if ply > 0 && is_draw(board) {
+        return Ok(DRAW);
+    }
     if depth == 0 {
         #[cfg(test)]
         if !ctx.quiesce_leaves {
@@ -1217,12 +1228,26 @@ fn is_legal(board: &Board, us: Color) -> bool {
     !is_attacked(board, board.king_square(us), us.flip())
 }
 
+/// Whether the position is drawn by repetition or by the fifty-move rule.
+///
+/// Both are properties of the path to this position rather than of the
+/// position itself, which is why the result must never reach the
+/// transposition table.
+///
+/// The fifty-move test deliberately ignores the case where the hundredth
+/// halfmove delivers mate, which is a win rather than a draw. Detecting that
+/// costs a legal move generation at every node to answer a question that
+/// decides a handful of games ever.
+fn is_draw(board: &Board) -> bool {
+    board.state().halfmove_clock() >= FIFTY_MOVE_PLIES || board.is_repetition()
+}
+
 fn terminal_score(board: &Board, ply: u32) -> i32 {
     let side = board.state().side_to_move();
     if is_attacked(board, board.king_square(side), side.flip()) {
         -MATE + ply as i32
     } else {
-        0
+        DRAW
     }
 }
 
@@ -1289,6 +1314,86 @@ mod tests {
             lmr: false,
             ..test_ctx(iteration_depth)
         }
+    }
+
+    /// The clock, not the position, decides: the same board is a forced mate
+    /// with a fresh clock and a draw with an expired one. Asserting both halves
+    /// is what makes this a test of the rule rather than of the eval.
+    #[test]
+    fn fifty_move_rule_draws_a_won_position() {
+        let winning = "7k/8/5K2/8/8/8/8/6Q1 w - - 0 1";
+        let expired = "7k/8/5K2/8/8/8/8/6Q1 w - - 100 1";
+
+        let mut board: Board = winning.parse().unwrap();
+        let score = negamax_root(&mut board, 4, &mut test_ctx(4)).unwrap().1;
+        assert!(score > MATE_BOUND, "expected a mate score, got {score}");
+
+        let mut board: Board = expired.parse().unwrap();
+        let score = negamax_root(&mut board, 4, &mut test_ctx(4)).unwrap().1;
+        assert_eq!(score, DRAW, "an expired clock must draw a won position");
+    }
+
+    /// White is a queen up, so every honest evaluation of this position is a
+    /// large positive score - but the position has already occurred, so the
+    /// search must return a draw regardless of the material on the board.
+    /// Material and verdict disagreeing is what makes this a test of
+    /// repetition rather than of the eval.
+    #[test]
+    fn repetition_outranks_material() {
+        let fen = "4k3/8/8/8/8/8/8/Q3K3 w - - 0 1";
+        let mut board: Board = fen.parse().unwrap();
+        let fresh = negamax_root(&mut board.clone(), 4, &mut test_ctx(4))
+            .unwrap()
+            .1;
+        assert!(fresh > 500, "expected a winning score, got {fresh}");
+
+        // Three plies of shuffling, leaving black to move one ply short of
+        // repeating the initial position. The root itself must not be a draw -
+        // the search has to find the repetition among the moves it tries, and
+        // black, being a queen down, will take it.
+        for mv in ["a1b1", "e8d8", "b1a1"] {
+            let mv = find_move(&mut board, mv);
+            board.make(mv);
+        }
+        assert!(
+            !board.is_repetition(),
+            "the root must not already be a repetition"
+        );
+        let score = negamax_root(&mut board, 4, &mut test_ctx(4)).unwrap().1;
+        assert_eq!(
+            score, DRAW,
+            "black is a queen down and must take the repetition"
+        );
+    }
+
+    /// A null move pushes an `Undo` and advances the halfmove clock without
+    /// changing the piece placement, so a scan that ignored the side to move
+    /// could match the pre-null position and report a repetition that never
+    /// happened. Two nulls return to the original side to move, which is the
+    /// case that would collide.
+    #[test]
+    fn null_moves_do_not_fabricate_a_repetition() {
+        let mut board: Board = "4k3/8/8/3n4/8/8/4P3/4K3 w - - 4 1".parse().unwrap();
+        assert!(!board.is_repetition());
+        board.make_null();
+        assert!(!board.is_repetition(), "one null move repeated nothing");
+        board.make_null();
+        assert!(
+            !board.is_repetition(),
+            "two null moves must not look like a repetition"
+        );
+        board.unmake_null();
+        board.unmake_null();
+        assert!(!board.is_repetition());
+    }
+
+    fn find_move(board: &mut Board, text: &str) -> Move {
+        let mut moves = MoveList::new();
+        generate_legal(board, &mut moves);
+        *moves
+            .iter()
+            .find(|mv| crate::uci::move_text(**mv) == text)
+            .unwrap_or_else(|| panic!("{text} is not legal here"))
     }
 
     #[test]
