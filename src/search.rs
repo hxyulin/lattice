@@ -29,6 +29,9 @@ const MAX_QPLY: u32 = 8;
 /// verdict on a position that cannot legally arise, which is too thin to trust.
 /// Also the depth at which `depth - 1 - R` bottoms out at exactly 0.
 const MIN_NULL_DEPTH: u32 = 3;
+const LMP_D1: usize = 6;
+const LMP_D2: usize = 10;
+const LMP_D3: usize = 16;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
 const LMR_REDUCTION: u32 = 1;
@@ -94,6 +97,7 @@ pub(crate) struct SearchProfile {
     pub(crate) pvs_researches: u64,
     pub(crate) null_attempts: u64,
     pub(crate) null_cutoffs: u64,
+    pub(crate) lmp_prunes: u64,
     pub(crate) lmr_reductions: u64,
     pub(crate) lmr_researches: u64,
 }
@@ -128,6 +132,7 @@ impl std::ops::AddAssign for SearchProfile {
         self.pvs_researches += rhs.pvs_researches;
         self.null_attempts += rhs.null_attempts;
         self.null_cutoffs += rhs.null_cutoffs;
+        self.lmp_prunes += rhs.lmp_prunes;
         self.lmr_reductions += rhs.lmr_reductions;
         self.lmr_researches += rhs.lmr_researches;
     }
@@ -230,6 +235,10 @@ impl SearchProfile {
         self.null_cutoffs += 1;
     }
 
+    fn record_lmp_prune(&mut self) {
+        self.lmp_prunes += 1;
+    }
+
     fn record_lmr_reduction(&mut self) {
         self.lmr_reductions += 1;
     }
@@ -275,6 +284,8 @@ struct Ctx<'a> {
     nmp: bool,
     #[cfg(test)]
     lmr: bool,
+    #[cfg(test)]
+    lmp: bool,
     #[cfg(test)]
     lmr_reductions: u64,
 }
@@ -330,6 +341,8 @@ pub(crate) fn search_inner(
         nmp: true,
         #[cfg(test)]
         lmr: true,
+        #[cfg(test)]
+        lmp: true,
         #[cfg(test)]
         lmr_reductions: 0,
     };
@@ -647,6 +660,13 @@ fn negamax(
                 board.unmake(mv);
                 continue;
             }
+            if ctx.lmp_enabled() && lmp_prune(board, depth, legal, mv, beta, alpha, best, us) {
+                #[cfg(feature = "profiling")]
+                ctx.profile.record_lmp_prune();
+                board.unmake(mv);
+                legal += 1;
+                continue;
+            }
             let reduce = lmr_eligible(board, depth, legal, mv, ply, ctx);
             let result = search_move(board, depth, ply + 1, alpha, beta, legal, reduce, ctx);
             board.unmake(mv);
@@ -698,6 +718,35 @@ fn negamax(
     ctx.tt
         .store(key, score_to_tt(best, ply), best_move, depth, bound);
     Ok(best)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lmp_prune(
+    board: &Board,
+    depth: u32,
+    legal: usize,
+    mv: Move,
+    beta: i32,
+    alpha: i32,
+    best: i32,
+    us: Color,
+) -> bool {
+    let limit = match depth {
+        1 => LMP_D1,
+        2 => LMP_D2,
+        3 => LMP_D3,
+        _ => return false,
+    };
+    beta <= alpha + 1
+        && legal >= limit
+        && !mv.is_capture()
+        && !mv.is_promotion()
+        && best > -MATE_BOUND
+        && !is_attacked(board, board.king_square(us), us.flip())
+        && {
+            let them = board.state().side_to_move();
+            !is_attacked(board, board.king_square(them), them.flip())
+        }
 }
 
 fn lmr_eligible(
@@ -978,6 +1027,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn lmp_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.lmp
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     /// Every node visited. Clock and node-limit checks use this rather than
     /// `nodes` alone: quiescence is most of the tree, so counting main nodes
     /// only would leave thousands of nodes between two clock checks.
@@ -1130,6 +1190,7 @@ mod tests {
             pvs: true,
             nmp: true,
             lmr: true,
+            lmp: true,
             lmr_reductions: 0,
         }
     }
@@ -1140,8 +1201,23 @@ mod tests {
             quiesce_leaves: false,
             nmp: false,
             lmr: false,
+            lmp: false,
             ..test_ctx(iteration_depth)
         }
+    }
+
+    fn made_move(fen: &str, text: &str) -> (Board, Move, Color) {
+        let mut board: Board = fen.parse().unwrap();
+        let us = board.state().side_to_move();
+        let mut moves = MoveList::new();
+        generate_pseudo(&board, &mut moves);
+        let mv = moves
+            .iter()
+            .copied()
+            .find(|&mv| move_text(mv) == text)
+            .unwrap();
+        board.make(mv);
+        (board, mv, us)
     }
 
     #[test]
@@ -1201,6 +1277,60 @@ mod tests {
             enabled.nodes,
             disabled.nodes
         );
+    }
+
+    #[test]
+    fn late_move_pruning_reduces_nodes() {
+        let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let mut enabled_board: Board = fen.parse().unwrap();
+        let mut enabled = test_ctx(4);
+        negamax_root(&mut enabled_board, 4, &mut enabled).unwrap();
+
+        let mut disabled_board: Board = fen.parse().unwrap();
+        let mut disabled = test_ctx(4);
+        disabled.lmp = false;
+        negamax_root(&mut disabled_board, 4, &mut disabled).unwrap();
+
+        assert!(
+            enabled.nodes < disabled.nodes,
+            "LMP did not reduce nodes: {} vs {}",
+            enabled.nodes,
+            disabled.nodes
+        );
+    }
+
+    #[test]
+    fn pv_nodes_are_not_late_move_pruned() {
+        let (board, mv, us) = made_move(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "e2e3",
+        );
+        assert!(lmp_prune(&board, 1, LMP_D1, mv, 1, 0, 0, us));
+        assert!(!lmp_prune(&board, 1, LMP_D1, mv, 2, 0, 0, us));
+    }
+
+    #[test]
+    fn in_check_nodes_are_not_late_move_pruned() {
+        let (board, mv, us) = made_move("4r1k1/8/8/8/8/8/R7/4K3 w - - 0 1", "a2a3");
+        assert!(is_attacked(&board, board.king_square(us), us.flip()));
+        assert!(!lmp_prune(&board, 1, LMP_D1, mv, 1, 0, 0, us));
+    }
+
+    #[test]
+    fn checking_moves_are_not_late_move_pruned() {
+        let (board, mv, us) = made_move("4k3/8/8/8/8/8/R7/K7 w - - 0 1", "a2e2");
+        let them = board.state().side_to_move();
+        assert!(is_attacked(&board, board.king_square(them), them.flip()));
+        assert!(!lmp_prune(&board, 1, LMP_D1, mv, 1, 0, 0, us));
+    }
+
+    #[test]
+    fn mate_loss_nodes_are_not_late_move_pruned() {
+        let (board, mv, us) = made_move(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "e2e3",
+        );
+        assert!(!lmp_prune(&board, 1, LMP_D1, mv, 1, 0, -MATE_BOUND, us));
     }
 
     #[test]
@@ -2057,6 +2187,9 @@ mod tests {
         profile.record_null_cutoff();
         assert_eq!(profile.null_attempts, 1);
         assert_eq!(profile.null_cutoffs, 1);
+
+        profile.record_lmp_prune();
+        assert_eq!(profile.lmp_prunes, 1);
 
         profile.record_lmr_reduction();
         profile.record_lmr_research();

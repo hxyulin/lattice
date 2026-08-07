@@ -144,6 +144,11 @@ fn write_profile(output: &mut dyn Write, profile: SearchProfile, qnodes: u64) {
     );
     let _ = writeln!(
         output,
+        "info string profile LMP prunes {}",
+        profile.lmp_prunes,
+    );
+    let _ = writeln!(
+        output,
         "info string profile LMR re-searches {} / {} ({:.2}%)",
         profile.lmr_researches,
         profile.lmr_reductions,
