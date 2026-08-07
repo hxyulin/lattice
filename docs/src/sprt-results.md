@@ -56,4 +56,5 @@ authoritative result.
 | movegen, ordering, and allocation optimization pass | STC | 456 | +55.5 | pass |
 | detect draws by repetition and the fifty-move rule | STC | 454 | +73.0 | pass |
 | bonus for having the move | STC | - | +12.3 | pass |
+| reverse futility pruning | STC | - | +41.1 | pass |
 <!-- END generated -->

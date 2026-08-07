@@ -77,3 +77,5 @@ ba0b0b5,2026-08-07,"perf(movegen): leave the unused tail of a move list uninitia
 15e5af6,2026-08-07,"feat(search): detect draws by repetition and the fifty-move rule",
 47253e0,2026-08-07,"docs: record the draw detection SPRT result",
 a128451,2026-08-07,"feat(eval): bonus for having the move",1303125
+be6f19a,2026-08-07,"docs: record the tempo SPRT result",
+c537b6e,2026-08-08,"feat(search): reverse futility pruning",886840
