@@ -47,4 +47,5 @@ f2e72d6,2026-08-07,"feat(search): null move pruning",3968708
 45c3528,2026-08-07,"docs: record the null move pruning SPRT result",
 af6e5b5,2026-08-07,"docs: refresh bench ledger after linearizing the feature merges",
 9fca3a1,2026-08-07,"docs: record the null move pruning LTC result",
-3232b91,2026-08-07,"feat(search): late move reductions",1834834
+06b644a,2026-08-07,"feat(search): late move reductions",1834834
+db64cfb,2026-08-07,"docs: record the late move reductions SPRT result",

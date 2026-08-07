@@ -51,4 +51,5 @@ authoritative result.
 | null move pruning | STC | 256 | +135.6 | pass |
 | null move pruning | LTC | 256 | +145.0 | pass |
 | late move reductions | STC | 538 | +52.9 | pass |
+| late move reductions | LTC | 512 | +61.8 | pass |
 <!-- END generated -->
