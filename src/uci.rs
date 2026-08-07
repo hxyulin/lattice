@@ -25,6 +25,13 @@ pub enum Command {
     Perft(u32),
     /// Run the fixed search benchmark.
     Bench,
+    /// Set an engine option. `value` is absent for button-type options.
+    SetOption {
+        /// Option name, which may contain spaces.
+        name: String,
+        /// Option value, which may contain spaces.
+        value: Option<String>,
+    },
 }
 
 /// Parses one line of UCI input. Returns `None` for unrecognised input.
@@ -40,8 +47,33 @@ pub fn parse(line: &str) -> Option<Command> {
         "quit" => Some(Command::Quit),
         "perft" => words.next()?.parse().ok().map(Command::Perft),
         "bench" => Some(Command::Bench),
+        "setoption" => parse_setoption(words),
         _ => None,
     }
+}
+
+/// `setoption name <name...> [value <value...>]`; both parts may span several
+/// tokens, so they are delimited by the keywords rather than token counts.
+fn parse_setoption<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<Command> {
+    if words.next()? != "name" {
+        return None;
+    }
+    let mut name: Vec<&str> = Vec::new();
+    let mut saw_value = false;
+    for word in words.by_ref() {
+        if word == "value" {
+            saw_value = true;
+            break;
+        }
+        name.push(word);
+    }
+    if name.is_empty() {
+        return None;
+    }
+    Some(Command::SetOption {
+        name: name.join(" "),
+        value: saw_value.then(|| words.collect::<Vec<_>>().join(" ")),
+    })
 }
 
 fn parse_go<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<Limits> {
@@ -168,8 +200,40 @@ mod tests {
 
     #[test]
     fn ignores_unrecognised_commands() {
-        assert!(parse("setoption name Hash value 16").is_none());
         assert!(parse("vendor extension").is_none());
+    }
+
+    fn option(line: &str) -> Option<(String, Option<String>)> {
+        match parse(line)? {
+            Command::SetOption { name, value } => Some((name, value)),
+            _ => None,
+        }
+    }
+
+    // catches: name or value truncated at the first token, and `value` being
+    // treated as part of the name.
+    #[test]
+    fn parses_setoption_with_multi_word_name_and_value() {
+        assert_eq!(
+            option("setoption name Hash value 16"),
+            Some(("Hash".into(), Some("16".into())))
+        );
+        assert_eq!(
+            option("setoption name Clear Hash"),
+            Some(("Clear Hash".into(), None))
+        );
+        assert_eq!(
+            option("setoption name Foo Bar value baz qux"),
+            Some(("Foo Bar".into(), Some("baz qux".into())))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_setoption() {
+        assert!(parse("setoption Hash 64").is_none());
+        assert!(parse("setoption").is_none());
+        assert!(parse("setoption name").is_none());
+        assert!(parse("setoption name value 16").is_none());
     }
 
     // catches: any keyword mapped to the wrong variant or dropped entirely.

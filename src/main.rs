@@ -22,7 +22,8 @@ fn main() {
     let mut board = Board::startpos();
     let stop = Arc::new(AtomicBool::new(false));
     // Outlives each `go` so one move's tree seeds the next.
-    let tt = Arc::new(TranspositionTable::new());
+    let mut tt = Arc::new(TranspositionTable::new());
+    let default_hash_mb = tt.size_mb();
     let mut search_thread: Option<JoinHandle<()>> = None;
     for line in stdin.lock().lines().map_while(Result::ok) {
         reap_finished(&mut search_thread);
@@ -35,7 +36,12 @@ fn main() {
                 // Off the clock: building these lazily inside the first search
                 // charges roughly 150ms to that move. The handshake has seconds.
                 lattice::movegen::init();
-                write_protocol("id name Lattice\nid author hxyulin\nuciok");
+                write_protocol(&format!(
+                    "id name Lattice\nid author hxyulin\n\
+                     option name Hash type spin default {default_hash_mb} min 1 max 4096\n\
+                     option name Threads type spin default 1 min 1 max 1\n\
+                     uciok"
+                ));
             }
             Command::IsReady => write_protocol("readyok"),
             Command::NewGame => {
@@ -88,6 +94,26 @@ fn main() {
                 let _ = output.flush();
             }
             Command::Bench => {}
+            // Unknown options are ignored: GUIs send options engines lack.
+            Command::SetOption { name, value } => match name.to_ascii_lowercase().as_str() {
+                // Replacing the Arc under a running search would leave that
+                // search on the old table; UCI only sends options when idle.
+                "hash" if search_thread.is_none() => {
+                    if let Some(mb) = value.and_then(|v| v.trim().parse::<usize>().ok()) {
+                        tt = Arc::new(TranspositionTable::with_size_mb(mb.clamp(1, 4096)));
+                    }
+                }
+                "threads"
+                    if value
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .is_some_and(|n| n > 1) =>
+                {
+                    write_protocol(
+                        "info string Threads > 1 is not supported; searching with 1 thread",
+                    );
+                }
+                _ => {}
+            },
         }
     }
     stop.store(true, Ordering::Relaxed);
