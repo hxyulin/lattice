@@ -54,4 +54,5 @@ authoritative result.
 | late move reductions | LTC | 512 | +61.8 | pass |
 | SEE pruning in quiescence | STC | 1152 | +27.1 | pass |
 | movegen, ordering, and allocation optimization pass | STC | 456 | +55.5 | pass |
+| detect draws by repetition and the fifty-move rule | STC | 454 | +73.0 | pass |
 <!-- END generated -->
