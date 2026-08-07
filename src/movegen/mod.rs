@@ -14,14 +14,21 @@ use magic::{bishop_attacks, queen_attacks, rook_attacks};
 use tables::{KING, KNIGHT, PAWN};
 
 /// A fixed-capacity list of chess moves.
+///
+/// Exactly 512 bytes and cache-line aligned, with the length leading: a list
+/// occupies eight whole lines rather than eight plus eight bytes of a ninth,
+/// and the first line fetched carries the length together with the first 31
+/// moves. A `u16` length is enough for a capacity the generator cannot reach.
+#[repr(C, align(64))]
 pub struct MoveList {
+    len: u16,
     moves: [Move; Self::CAPACITY],
-    len: usize,
 }
 
 impl MoveList {
-    /// Slots available, against a measured pseudo-legal maximum of 218.
-    pub const CAPACITY: usize = 256;
+    /// Slots available, against a measured pseudo-legal maximum of 218. Sized
+    /// so the list and its length together are exactly 512 bytes.
+    pub const CAPACITY: usize = 255;
 
     /// Returns an empty move list.
     pub fn new() -> Self {
@@ -31,19 +38,19 @@ impl MoveList {
             MoveType::Quiet,
         );
         Self {
-            moves: [dummy; Self::CAPACITY],
             len: 0,
+            moves: [dummy; Self::CAPACITY],
         }
     }
     /// Appends a move.
     pub fn push(&mut self, mv: Move) {
-        debug_assert!(self.len < Self::CAPACITY, "move list overflow");
-        self.moves[self.len] = mv;
+        debug_assert!(self.len() < Self::CAPACITY, "move list overflow");
+        self.moves[self.len()] = mv;
         self.len += 1;
     }
     /// Returns the number of moves.
     pub const fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
     /// Returns whether the list is empty.
     pub const fn is_empty(&self) -> bool {
@@ -51,11 +58,12 @@ impl MoveList {
     }
     /// Iterates over the moves.
     pub fn iter(&self) -> core::slice::Iter<'_, Move> {
-        self.moves[..self.len].iter()
+        self.moves[..self.len()].iter()
     }
     /// Returns the moves as a mutable slice, for reordering in place.
     pub fn as_mut_slice(&mut self) -> &mut [Move] {
-        &mut self.moves[..self.len]
+        let len = self.len();
+        &mut self.moves[..len]
     }
 }
 
@@ -68,7 +76,7 @@ impl Default for MoveList {
 impl Index<usize> for MoveList {
     type Output = Move;
     fn index(&self, index: usize) -> &Self::Output {
-        &self.moves[..self.len][index]
+        &self.moves[..self.len()][index]
     }
 }
 
