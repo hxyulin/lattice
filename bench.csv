@@ -55,3 +55,21 @@ e955af6,2026-08-07,"docs: record the late move reductions LTC result",
 94c6465,2026-08-07,"docs: record the SEE pruning SPRT result",
 fe042e0,2026-08-07,"feat(tt): size the transposition table at runtime",1274778
 67ce5c2,2026-08-07,"feat(uci): support setoption with the Hash and Threads options",1274778
+3f0bf8c,2026-08-07,"docs: refresh the bench ledger for the UCI option commits",
+3cfdd66,2026-08-07,"fix(tools): re-derive the Bench trailer instead of trusting an inherited one",
+8328cd4,2026-08-07,"refactor(search): report iterations through a listener instead of a writer",1274778
+98c82c5,2026-08-07,"feat(tactics): score EPD suites and report where the search first solved them",1274778
+ea95209,2026-08-07,"fix(tools): fail tactics.sh when a revision reports nothing",
+5d4be06,2026-08-07,"perf(search): sort move lists on the stack and deref the magic tables once",1274778
+d4a1067,2026-08-07,"perf(movegen): pack MoveList into exactly 512 bytes",1274778
+1f9a431,2026-08-07,"perf(movegen): decide legality by pin rather than by make and unmake",1274778
+210aff1,2026-08-07,"perf(movegen): let a caller pass the check status generate_legal recomputes",1274778
+b2b5a74,2026-08-07,"tools: interleaved A/B speed comparison with a QoS clamp",
+9bb0e16,2026-08-07,"perf(movegen): generate evasions by target mask instead of trying every move",1274778
+faf297c,2026-08-07,"fix(tools): stamp amended commits, and stop eating bench: subjects",
+d253bfb,2026-08-07,"bench: measure the in-check paths the existing positions never reach",1274778
+e820f55,2026-08-07,"perf(search): hoist the move-ordering key buffer out of the per-node stack",1274778
+29e265f,2026-08-07,"perf(search): build the quiescence move list only once the node needs one",1274778
+ba0b0b5,2026-08-07,"perf(movegen): leave the unused tail of a move list uninitialized",1274778
+6d23df7,2026-08-07,"perf(board): tell the optimizer a square index is under 64",1274778
+2db089c,2026-08-07,"perf: movegen, ordering, and allocation optimization pass",

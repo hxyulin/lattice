@@ -53,4 +53,5 @@ authoritative result.
 | late move reductions | STC | 538 | +52.9 | pass |
 | late move reductions | LTC | 512 | +61.8 | pass |
 | SEE pruning in quiescence | STC | 1152 | +27.1 | pass |
+| movegen, ordering, and allocation optimization pass | STC | 456 | +55.5 | pass |
 <!-- END generated -->
