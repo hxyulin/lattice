@@ -4,9 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Move;
 
-/// Entries in the table. 2^20 entries at 16 bytes each is 16 MiB.
-const BITS: u32 = 20;
-const ENTRIES: usize = 1 << BITS;
+/// Bytes per slot: a key-xor word beside a data word.
+const SLOT_BYTES: usize = 16;
+/// Default table size. 2^20 entries at 16 bytes each is 16 MiB.
+const DEFAULT_MB: usize = 16;
+/// Cap on the index width, so an absurd `Hash` cannot ask for an allocation
+/// that would overflow the entry count. 2^32 entries is 64 GiB.
+const MAX_BITS: u32 = 32;
 
 /// What a stored score says about the true score.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +67,8 @@ pub struct Entry {
 #[derive(Debug)]
 pub struct TranspositionTable {
     slots: Vec<(AtomicU64, AtomicU64)>,
+    /// Index width: the table holds `1 << bits` slots.
+    bits: u32,
     generation: AtomicU64,
 }
 
@@ -73,14 +79,32 @@ impl Default for TranspositionTable {
 }
 
 impl TranspositionTable {
-    /// Builds an empty table of the fixed default size.
+    /// Builds an empty table of the default size (16 MiB).
     pub fn new() -> Self {
+        Self::with_size_mb(DEFAULT_MB)
+    }
+
+    /// Builds an empty table holding about `mb` mebibytes.
+    ///
+    /// The entry count is rounded down to a power of two, so the actual size
+    /// may be smaller than requested. Clamped to at least one entry.
+    pub fn with_size_mb(mb: usize) -> Self {
+        let entries = mb.saturating_mul(1024 * 1024) / SLOT_BYTES;
+        let bits = usize::BITS
+            .saturating_sub(entries.leading_zeros() + 1)
+            .min(MAX_BITS);
         Self {
-            slots: (0..ENTRIES)
+            slots: (0..1usize << bits)
                 .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
                 .collect(),
+            bits,
             generation: AtomicU64::new(0),
         }
+    }
+
+    /// The table's current size in mebibytes.
+    pub fn size_mb(&self) -> usize {
+        self.slots.len() * SLOT_BYTES / (1024 * 1024)
     }
 
     /// Marks every entry as belonging to an older search, so the next one
@@ -100,8 +124,12 @@ impl TranspositionTable {
     }
 
     fn index(&self, key: u64) -> usize {
-        // The high bits: the low ones are the least mixed by `mix`.
-        (key >> (64 - BITS)) as usize
+        // The high bits: the low ones are the least mixed by `mix`. A
+        // one-entry table would shift by 64, which is not a legal shift.
+        if self.bits == 0 {
+            return 0;
+        }
+        (key >> (64 - self.bits)) as usize
     }
 
     /// Returns the entry stored for `key`, if the slot still holds it.
@@ -193,7 +221,7 @@ mod tests {
     #[test]
     fn a_different_key_in_the_same_slot_misses() {
         let tt = TranspositionTable::new();
-        // Same index (top BITS bits), different key.
+        // Same index (top `bits` bits), different key.
         let key = 0xffff_0000_0000_0000;
         let other = key | 1;
         tt.store(key, 42, Some(mv(1, 2)), 4, Bound::Exact);
@@ -276,6 +304,58 @@ mod tests {
         let entry = tt.probe(key).expect("stored");
         assert_eq!(entry.bound, Bound::Exact);
         assert_eq!(entry.score, 20);
+    }
+
+    // catches: a default size that drifts from the historical 16 MiB table,
+    // which would silently change every search result.
+    #[test]
+    fn the_default_size_is_sixteen_mebibytes() {
+        let tt = TranspositionTable::new();
+        assert_eq!(tt.slots.len(), 1 << 20);
+        assert_eq!(tt.bits, 20);
+        assert_eq!(tt.size_mb(), 16);
+        assert_eq!(
+            tt.slots.len(),
+            TranspositionTable::with_size_mb(16).slots.len()
+        );
+    }
+
+    // catches: a size that rounds up rather than down, which would hand back
+    // more memory than the GUI asked for.
+    #[test]
+    fn a_non_power_of_two_size_rounds_down() {
+        let tt = TranspositionTable::with_size_mb(100);
+        assert_eq!(tt.slots.len(), 1 << 22, "64 MiB, not 128 MiB");
+        assert_eq!(tt.size_mb(), 64);
+        let key = 0x1357_9bdf_2468_ace0;
+        tt.store(key, 11, Some(mv(1, 2)), 3, Bound::Exact);
+        assert_eq!(tt.probe(key).expect("stored").score, 11);
+    }
+
+    // catches: a zero-length table, whose first probe would panic on an
+    // out-of-bounds index, and a shift by 64 in `index`.
+    #[test]
+    fn a_zero_size_still_holds_one_entry() {
+        let tt = TranspositionTable::with_size_mb(0);
+        assert_eq!(tt.slots.len(), 1);
+        assert_eq!(tt.size_mb(), 0);
+        assert_eq!(tt.index(u64::MAX), 0);
+        assert!(tt.probe(0xdead_beef).is_none());
+        tt.store(0xdead_beef, 7, Some(mv(1, 2)), 2, Bound::Lower);
+        assert_eq!(tt.probe(0xdead_beef).expect("stored").score, 7);
+    }
+
+    #[test]
+    fn stores_round_trip_at_every_size() {
+        for mb in [1, 16, 64] {
+            let tt = TranspositionTable::with_size_mb(mb);
+            assert_eq!(tt.size_mb(), mb, "{mb}");
+            let key = 0x0f1e_2d3c_4b5a_6978;
+            tt.store(key, -42, Some(mv(5, 6)), 8, Bound::Lower);
+            let entry = tt.probe(key).unwrap_or_else(|| panic!("{mb} MiB"));
+            assert_eq!(entry.score, -42, "{mb}");
+            assert_eq!(entry.depth, 8, "{mb}");
+        }
     }
 
     #[test]
