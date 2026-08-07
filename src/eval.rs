@@ -27,7 +27,7 @@ const TOTAL_PHASE: i32 = 24;
 /// zugzwang, where having to move is a liability - but a constant cannot detect
 /// zugzwang at any magnitude, so scaling it by phase would shrink a wrong
 /// answer rather than fix it.
-const TEMPO: i32 = 17;
+pub(crate) const TEMPO: i32 = 17;
 
 // The tables below are transcribed verbatim from the published PeSTO values,
 // in reading order: index 0 is a8 and index 63 is h1.
@@ -264,13 +264,20 @@ pub fn evaluate(board: &Board) -> i32 {
     let mg_phase = phase.min(TOTAL_PHASE);
     let eg_phase = TOTAL_PHASE - mg_phase;
     let score = (mg * mg_phase + eg * eg_phase) / TOTAL_PHASE;
-    // After the flip, so the bonus always favours whoever is on move rather
-    // than always favouring White.
     let score = if board.state().side_to_move() == Color::White {
         score
     } else {
         -score
     };
+    // After the flip, so the bonus always favours whoever is on move rather
+    // than always favouring White.
+    //
+    // A null move flips the side to move without touching a piece, so both
+    // sides of one collect the bonus and `before + after` comes to `2 * TEMPO`
+    // where a position unchanged by a null should give 0. Every leaf and
+    // stand-pat is consistent with every other, so the inflation cancels
+    // everywhere except across a null - `search` corrects it at that one
+    // comparison rather than `evaluate` trying to detect a null it cannot see.
     score + TEMPO
 }
 

@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::eval::evaluate;
+use crate::eval::{TEMPO, evaluate};
 use crate::movegen::{
     MoveList, attackers_to, generate_captures, generate_legal_in_check, generate_pseudo,
     generate_quiets, is_attacked,
@@ -629,7 +629,11 @@ fn negamax(
         && can_null
         && ctx.nmp_enabled()
         && has_non_pawn_material
-        && evaluate(board) >= beta
+        // The tempo bonus does not survive a null move: it is added to
+        // whoever is on move, and a null changes only that, so the score this
+        // gate reads and the score the null search returns are inflated
+        // `2 * TEMPO` apart. Withholding it here compares like with like.
+        && evaluate(board) - TEMPO >= beta
         && !is_attacked(board, board.king_square(us), us.flip())
     {
         #[cfg(feature = "profiling")]
@@ -1385,6 +1389,43 @@ mod tests {
         board.unmake_null();
         board.unmake_null();
         assert!(!board.is_repetition());
+    }
+
+    /// catches: the tempo bonus leaking into the null-move gate.
+    ///
+    /// `evaluate` adds `TEMPO` to whoever is on move, and a null move changes
+    /// only that, so a position and its null differ by `2 * TEMPO` where they
+    /// should be exact negations. The gate reads a pre-null score and compares
+    /// it against one returned through a null, so the bonus has to come off or
+    /// null-move pruning cuts on an advantage it invented.
+    ///
+    /// Written against the raw difference rather than a node count: a node
+    /// count would also move for a dozen unrelated reasons.
+    #[test]
+    fn the_tempo_bonus_does_not_survive_a_null_move() {
+        crate::movegen::init();
+        for fen in [
+            "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        ] {
+            let mut board: Board = fen.parse().unwrap();
+            let before = evaluate(&board);
+            board.make_null();
+            let after = evaluate(&board);
+            board.unmake_null();
+            assert_eq!(
+                before + after,
+                2 * TEMPO,
+                "a null move should leave the position worth its negation \
+                 plus the bonus both sides collected: {fen}"
+            );
+            assert_eq!(
+                (before - TEMPO) + (after - TEMPO),
+                0,
+                "stripping the bonus must make the two exact negations: {fen}"
+            );
+        }
     }
 
     fn find_move(board: &mut Board, text: &str) -> Move {
