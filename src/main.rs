@@ -9,13 +9,21 @@ use lattice::Board;
 use lattice::bench;
 use lattice::movegen::perft::perft_divide;
 use lattice::search::search;
+use lattice::tactics;
 use lattice::tt::TranspositionTable;
 use lattice::uci::{Command, UciListener, move_text, parse};
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("bench") {
-        bench::run(&mut io::stdout().lock());
-        return;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("bench") => {
+            bench::run(&mut io::stdout().lock());
+            return;
+        }
+        Some("tactics") => {
+            std::process::exit(run_tactics(&args[1..]));
+        }
+        _ => {}
     }
 
     let stdin = io::stdin();
@@ -118,6 +126,58 @@ fn main() {
     }
     stop.store(true, Ordering::Relaxed);
     join_search(&mut search_thread);
+}
+
+/// `tactics [suite] [--depth N]`. The suite is a path, or a bare name looked
+/// up in `$SUITES_DIR` (default `~/dev/chess-data/test-suites`), so the large
+/// EPD files stay out of the repository. Returns the process exit code.
+fn run_tactics(args: &[String]) -> i32 {
+    let mut suite = "wac".to_owned();
+    let mut depth = 10;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--depth" => match rest.next().and_then(|d| d.parse().ok()) {
+                Some(value) => depth = value,
+                None => {
+                    eprintln!("tactics: --depth needs a number");
+                    return 2;
+                }
+            },
+            other if other.starts_with('-') => {
+                eprintln!("tactics: unknown option {other}");
+                return 2;
+            }
+            other => suite = other.to_owned(),
+        }
+    }
+    let path = resolve_suite(&suite);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("tactics: {}: {error}", path.display());
+            return 2;
+        }
+    };
+    let name = path
+        .file_stem()
+        .map_or_else(|| suite.clone(), |stem| stem.to_string_lossy().into_owned());
+    let outcomes = tactics::run(&mut io::stdout().lock(), &name, &text, depth);
+    // Reporting is the job; a regression is judged by diffing two runs, not
+    // by this exit code. Only a suite that yielded nothing is an error.
+    i32::from(outcomes.is_empty()) * 2
+}
+
+fn resolve_suite(suite: &str) -> std::path::PathBuf {
+    let direct = std::path::Path::new(suite);
+    if direct.is_file() {
+        return direct.to_path_buf();
+    }
+    let dir = std::env::var("SUITES_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/dev/chess-data/test-suites")
+    });
+    std::path::Path::new(&dir).join(format!("{suite}.epd"))
 }
 
 fn write_protocol(text: &str) {

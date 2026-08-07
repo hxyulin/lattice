@@ -17,7 +17,15 @@ extend-exclude = ["Cargo.lock"]
 # regeneration can fail the hook on a SHA nobody chose. Ignoring the shape
 # rather than excluding the file keeps the commit subjects in bench.csv spell
 # checked.
-extend-ignore-re = ["\\b[0-9a-f]{7,40}\\b"]
+#
+# SAN moves read as words too: `Ba2` is a bishop move, not `By`/`Be`, and the
+# tactical suites are written in SAN. Matching the notation beats listing each
+# move: a piece letter, an optional origin hint and capture mark, then the
+# destination square.
+extend-ignore-re = [
+  "\\b[0-9a-f]{7,40}\\b",
+  "\\b[KQRBN][a-h1-8]?x?[a-h][1-8]\\b",
+]
 
 # Add false positives here when typos flags a chess term it should not, e.g.
 # a FEN fragment or an identifier:

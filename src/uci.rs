@@ -4,7 +4,7 @@ use std::io::Write;
 
 use crate::movegen::{MoveList, generate_legal};
 use crate::search::{Iteration, Limits, SearchListener};
-use crate::{Board, Move, PieceType, Square};
+use crate::{Board, Move, MoveType, PieceType, Square};
 
 /// A parsed UCI command.
 #[derive(Debug)]
@@ -190,6 +190,125 @@ impl<W: Write> SearchListener for UciListener<W> {
     }
 }
 
+/// Returns a move in standard algebraic notation, as EPD and PGN write it.
+///
+/// The check and mate suffixes are omitted: producing them means making the
+/// move to see whether the reply is check, and every consumer here compares
+/// against [`parse_san`], which ignores them on both sides.
+pub fn san_text(board: &Board, mv: Move) -> String {
+    match mv.move_type() {
+        MoveType::KingCastle => return "O-O".to_owned(),
+        MoveType::QueenCastle => return "O-O-O".to_owned(),
+        _ => {}
+    }
+    let file_char = |sq: Square| (b'a' + sq.file()) as char;
+    let rank_char = |sq: Square| (b'1' + sq.rank()) as char;
+    let Some(piece) = board.piece_on(mv.from()) else {
+        return move_text(mv);
+    };
+    let piece_type = piece.piece_type();
+    let mut text = String::new();
+    if piece_type == PieceType::Pawn {
+        // A capturing pawn names its file; a pushing pawn names nothing.
+        if mv.is_capture() {
+            text.push(file_char(mv.from()));
+        }
+    } else {
+        text.push(piece_letter(piece_type));
+        text.push_str(&disambiguator(board, mv, piece_type));
+    }
+    if mv.is_capture() {
+        text.push('x');
+    }
+    text.push(file_char(mv.to()));
+    text.push(rank_char(mv.to()));
+    if let Some(promoted) = mv.promoted_piece() {
+        text.push('=');
+        text.push(piece_letter(promoted));
+    }
+    text
+}
+
+fn piece_letter(piece_type: PieceType) -> char {
+    match piece_type {
+        PieceType::Pawn => 'P',
+        PieceType::Knight => 'N',
+        PieceType::Bishop => 'B',
+        PieceType::Rook => 'R',
+        PieceType::Queen => 'Q',
+        PieceType::King => 'K',
+    }
+}
+
+/// The shortest origin hint that separates `mv` from the other legal moves of
+/// the same piece type to the same square: nothing, the file, the rank, or the
+/// whole square.
+fn disambiguator(board: &Board, mv: Move, piece_type: PieceType) -> String {
+    let mut board = board.clone();
+    let mut moves = MoveList::new();
+    generate_legal(&mut board, &mut moves);
+    let rivals: Vec<Move> = moves
+        .iter()
+        .copied()
+        .filter(|&other| {
+            other.to() == mv.to()
+                && other.from() != mv.from()
+                && board
+                    .piece_on(other.from())
+                    .is_some_and(|piece| piece.piece_type() == piece_type)
+        })
+        .collect();
+    if rivals.is_empty() {
+        return String::new();
+    }
+    let file = (b'a' + mv.from().file()) as char;
+    let rank = (b'1' + mv.from().rank()) as char;
+    if !rivals.iter().any(|r| r.from().file() == mv.from().file()) {
+        return file.to_string();
+    }
+    if !rivals.iter().any(|r| r.from().rank() == mv.from().rank()) {
+        return rank.to_string();
+    }
+    format!("{file}{rank}")
+}
+
+/// Resolves a move written in standard algebraic notation against a position.
+///
+/// Rather than parsing SAN's disambiguation grammar, this renders every legal
+/// move and compares: the grammar is only well defined relative to a position
+/// anyway, so generating the candidates answers it exactly and leaves nothing
+/// to get subtly wrong. Check, mate, and annotation suffixes are ignored, as
+/// are the `e.p.` marker and the `0-0` castling spelling.
+pub fn parse_san(board: &Board, san: &str) -> Option<Move> {
+    let wanted = normalize_san(san);
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut board = board.clone();
+    let mut moves = MoveList::new();
+    generate_legal(&mut board, &mut moves);
+    moves
+        .iter()
+        .copied()
+        .find(|&mv| normalize_san(&san_text(&board, mv)) == wanted)
+}
+
+/// Strips what does not identify the move: check, mate and annotation marks,
+/// the `e.p.` suffix, and the separators some suites put inside a move.
+fn normalize_san(san: &str) -> String {
+    let san = san.trim();
+    let san = san.strip_suffix("e.p.").unwrap_or(san);
+    let mut text: String = san
+        .chars()
+        .filter(|c| !matches!(c, '+' | '#' | '!' | '?' | '=' | '-' | ' '))
+        .collect();
+    // `0-0` is the same castling move as `O-O`; the dashes are already gone.
+    if text.chars().all(|c| c == '0') && !text.is_empty() {
+        text = "O".repeat(text.len());
+    }
+    text
+}
+
 /// Returns a move in UCI long algebraic notation.
 pub fn move_text(mv: Move) -> String {
     let square = |sq: Square| [(b'a' + sq.file()) as char, (b'1' + sq.rank()) as char];
@@ -358,4 +477,111 @@ mod tests {
         };
         assert_eq!(fen.to_string(), "4k3/8/8/8/4P3/8/8/4K3 b - e3 0 1");
     }
+
+    fn san_of(fen: &str, uci: &str) -> String {
+        let mut board: Board = fen.parse().unwrap();
+        let mv = find_move(&mut board, uci).expect("test move must be legal");
+        san_text(&board, mv)
+    }
+
+    #[test]
+    fn renders_the_san_cases_that_differ_from_uci() {
+        // Piece letter, and a pawn push carrying none.
+        assert_eq!(san_of(START, "g1f3"), "Nf3");
+        assert_eq!(san_of(START, "e2e4"), "e4");
+        // A capturing pawn names its origin file, other pieces use `x` alone.
+        let caps = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2";
+        assert_eq!(san_of(caps, "e4d5"), "exd5");
+        assert_eq!(san_of(KIWIPETE, "e5g6"), "Nxg6");
+        // Castling either way, from a position that allows both.
+        assert_eq!(san_of(KIWIPETE, "e1g1"), "O-O");
+        assert_eq!(san_of(KIWIPETE, "e1c1"), "O-O-O");
+        // Promotion, quiet and capturing.
+        let promo = "6n1/5P2/8/8/8/8/8/K6k w - - 0 1";
+        assert_eq!(san_of(promo, "f7f8q"), "f8=Q");
+        assert_eq!(san_of(promo, "f7g8n"), "fxg8=N");
+        // En passant: a pawn capture like any other, named by its file.
+        let ep = "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1";
+        assert_eq!(san_of(ep, "e5d6"), "exd6");
+    }
+
+    #[test]
+    fn disambiguates_by_the_shortest_hint_that_works() {
+        // Two knights reach b3 from different files, so the file suffices.
+        let files = "4k3/8/8/8/8/8/8/N1N1K3 w - - 0 1";
+        assert_eq!(san_of(files, "a1b3"), "Nab3");
+        // Same file, different ranks: the rank is the distinguishing part.
+        let ranks = "4k3/8/8/N7/8/8/8/N3K3 w - - 0 1";
+        assert_eq!(san_of(ranks, "a1b3"), "N1b3");
+        // Three queens bear on d4: one shares the a-file with a1 and another
+        // shares rank 1, so neither half alone identifies it.
+        let both = "1k6/8/8/8/Q7/8/8/Q2QK3 w - - 0 1";
+        assert_eq!(san_of(both, "a1d4"), "Qa1d4");
+        // A lone piece never takes a hint.
+        assert_eq!(san_of(START, "b1c3"), "Nc3");
+    }
+
+    #[test]
+    fn parse_san_accepts_what_the_suites_write() {
+        let mut board: Board = KIWIPETE.parse().unwrap();
+        let expect = |san: &str, uci: &str| {
+            let mut board: Board = KIWIPETE.parse().unwrap();
+            let want = find_move(&mut board, uci).unwrap();
+            assert_eq!(parse_san(&board, san), Some(want), "parsing {san}");
+        };
+        expect("Nxg6", "e5g6");
+        expect("O-O", "e1g1");
+        expect("0-0", "e1g1");
+        expect("O-O-O", "e1c1");
+        // Check, mate and annotation marks carry no information about which
+        // move was meant, and the suites are inconsistent about them.
+        expect("Nxg6+", "e5g6");
+        expect("Nxg6!!", "e5g6");
+        expect("Nxg6?!", "e5g6");
+        // Whitespace around the token, as `bm Nxg6 ;` leaves behind.
+        expect("  Nxg6  ", "e5g6");
+        // An illegal or unparsable move resolves to nothing rather than to
+        // some other move that happens to share a prefix.
+        assert_eq!(parse_san(&board, "Nxg7"), None);
+        assert_eq!(parse_san(&board, "zzz"), None);
+        assert_eq!(parse_san(&board, ""), None);
+        let _ = &mut board;
+    }
+
+    // catches: a disambiguation rule that renders a move the same way as one
+    // of its rivals. Any such collision makes parse_san return whichever came
+    // first, silently scoring the wrong move as solved. Rendering every legal
+    // move in a position and requiring the strings to be distinct is the
+    // property that rules it out, and it covers far more shapes than the
+    // handwritten cases above.
+    #[test]
+    fn san_is_unique_and_roundtrips_for_every_legal_move() {
+        crate::movegen::init();
+        for fen in [START, KIWIPETE, POSITION_3, POSITION_4, POSITION_5] {
+            let mut board: Board = fen.parse().unwrap();
+            let mut moves = MoveList::new();
+            generate_legal(&mut board, &mut moves);
+            let mut seen: Vec<String> = Vec::new();
+            for &mv in moves.iter() {
+                let san = san_text(&board, mv);
+                assert!(
+                    !seen.contains(&san),
+                    "{san} rendered twice in {fen}, so it cannot be resolved"
+                );
+                seen.push(san.clone());
+                assert_eq!(
+                    parse_san(&board, &san),
+                    Some(mv),
+                    "{san} did not resolve back to itself in {fen}"
+                );
+            }
+            assert!(!seen.is_empty());
+        }
+    }
+
+    const START: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    const KIWIPETE: &str = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+    const POSITION_3: &str = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1";
+    const POSITION_4: &str = "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
+    const POSITION_5: &str = "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 0 1";
 }

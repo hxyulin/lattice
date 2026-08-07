@@ -10,6 +10,8 @@ pub mod eval;
 pub mod movegen;
 /// Position search and time management.
 pub mod search;
+/// Tactical test-suite runner.
+pub mod tactics;
 /// Transposition table.
 pub mod tt;
 /// UCI command parsing and move notation.
