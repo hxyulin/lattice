@@ -51,6 +51,26 @@ sample() {
   fi
 }
 
+# Which build is which. A stale binary left in /tmp is the failure this
+# catches: it reads as a valid baseline and silently answers the wrong
+# question. The bench node count identifies a build better than a git SHA
+# would - it is a property of the binary itself, so it cannot be stamped
+# wrongly or go stale against the source it was built from. Equal counts mean
+# the two paths are the same build, whatever the paths suggest.
+identify() {
+  local bin="$1" nodes
+  nodes=$("$bin" bench </dev/null 2>&1 | sed -n 's/^Nodes searched:[[:space:]]*//p' | tail -1)
+  printf '%s (bench %s, %s)\n' "$bin" "${nodes:-unknown}" \
+    "$(date -r "$bin" '+%Y-%m-%d %H:%M' 2>/dev/null || echo 'mtime unknown')"
+}
+A_ID=$(identify "$BIN_A")
+B_ID=$(identify "$BIN_B")
+echo "A: $A_ID" >&2
+echo "B: $B_ID" >&2
+if [ "${A_ID#* }" = "${B_ID#* }" ]; then
+  echo "warning: A and B bench identically - comparing a build against itself?" >&2
+fi
+
 a_samples=()
 b_samples=()
 echo "interleaving $RUNS runs of $MODE (qos clamp: $CLAMP_NOTE)" >&2

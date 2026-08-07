@@ -10,6 +10,16 @@ set -e
 msg="$1" # pre-commit passes the commit-message file path here
 [ -n "$SKIP_BENCH" ] && exit 0
 case "$PRE_COMMIT_COMMIT_MSG_SOURCE" in merge | squash) exit 0 ;; esac
+# The env var alone is not enough. `git merge --no-ff` leaves
+# PRE_COMMIT_COMMIT_MSG_SOURCE empty, so the case above does not fire, and the
+# merge's staged files are the branch's Rust files - which stamped a merge
+# commit with a `Bench:` trailer it must not carry. gen-ledgers.sh turns every
+# trailer into a bench.csv row, so that is a duplicate row for a feature
+# already counted at its own commit.
+#
+# MERGE_HEAD is git's own record that a merge is in progress, present for
+# every form of it, so it is asked directly rather than inferred.
+if [ -f "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then exit 0; fi
 # An existing trailer is not trusted: cherry-pick and rebase carry the number
 # forward from a tree that no longer exists, so it is re-derived and replaced.
 #

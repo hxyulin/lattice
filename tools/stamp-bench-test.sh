@@ -186,4 +186,23 @@ printf 'docs: reworded\n' > "$tmp/msg"
 run_hook "$tmp/msg" 1274778
 check "amend of a docs-only commit is not stamped" "" "$(trailers "$tmp/msg")"
 
+# catches: a `--no-ff` merge being stamped. `git merge` sets the message
+# source to `merge` only for the fast-forward-refusing default path; with
+# `--no-ff` the variable arrives empty, so the env check does not fire, and
+# the merge's staged files are the branch's Rust files. The result was a
+# `Bench:` trailer on a merge commit, which gen-ledgers.sh turns into a
+# duplicate bench.csv row for a feature already counted at its own commit.
+setup_repo
+commit_staged "feat: a rust change"
+(cd "$tmp/repo" &&
+  git checkout -q -b side &&
+  echo "fn main() { let _ = 1; }" > src.rs &&
+  git add src.rs && git commit -q -m "feat: side change" &&
+  git checkout -q - &&
+  git merge --no-ff --no-commit side >/dev/null 2>&1 || true)
+printf 'Merge branch side\n' > "$tmp/msg"
+# Explicitly empty, which is what --no-ff actually passes.
+PRE_COMMIT_COMMIT_MSG_SOURCE="" run_hook "$tmp/msg" 1274778
+check "a --no-ff merge is not stamped" "" "$(trailers "$tmp/msg")"
+
 exit $fail
