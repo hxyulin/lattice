@@ -32,6 +32,17 @@ const MAX_QPLY: u32 = 8;
 /// verdict on a position that cannot legally arise, which is too thin to trust.
 /// Also the depth at which `depth - 1 - R` bottoms out at exactly 0.
 const MIN_NULL_DEPTH: u32 = 3;
+/// Per-ply reverse futility margin, in centipawns. Read as: one ply is assumed
+/// to be worth at most this much to the side to move.
+///
+/// Wide, because this evaluation is material and placement only and has a
+/// measured positional blind spot: a margin that merely bounds real play would
+/// here prune against a known eval error. Swept against the wac suite, where
+/// the solve count falls off a cliff below 300 - 40/60/80/120/200 solve
+/// 256/258/262/266/275 of 300 against main's 280 - while 300 and above all
+/// hold 280. Worth re-sweeping downward once the evaluation gains mobility
+/// and pawn structure and the blind spot shrinks.
+const RFP_MARGIN: i32 = 300;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
 const LMR_REDUCTION: u32 = 1;
@@ -149,6 +160,7 @@ pub(crate) struct SearchProfile {
     pub(crate) stand_pat_cutoffs: u64,
     pub(crate) pvs_probes: u64,
     pub(crate) pvs_researches: u64,
+    pub(crate) rfp_cutoffs: u64,
     pub(crate) null_attempts: u64,
     pub(crate) null_cutoffs: u64,
     pub(crate) lmr_reductions: u64,
@@ -183,6 +195,7 @@ impl std::ops::AddAssign for SearchProfile {
         self.stand_pat_cutoffs += rhs.stand_pat_cutoffs;
         self.pvs_probes += rhs.pvs_probes;
         self.pvs_researches += rhs.pvs_researches;
+        self.rfp_cutoffs += rhs.rfp_cutoffs;
         self.null_attempts += rhs.null_attempts;
         self.null_cutoffs += rhs.null_cutoffs;
         self.lmr_reductions += rhs.lmr_reductions;
@@ -279,6 +292,10 @@ impl SearchProfile {
         self.pvs_researches += 1;
     }
 
+    fn record_rfp_cutoff(&mut self) {
+        self.rfp_cutoffs += 1;
+    }
+
     fn record_null_attempt(&mut self) {
         self.null_attempts += 1;
     }
@@ -333,6 +350,8 @@ struct Ctx<'a> {
     #[cfg(test)]
     nmp: bool,
     #[cfg(test)]
+    rfp: bool,
+    #[cfg(test)]
     lmr: bool,
     #[cfg(test)]
     lmr_reductions: u64,
@@ -383,6 +402,8 @@ pub(crate) fn search_inner(
         pvs: true,
         #[cfg(test)]
         nmp: true,
+        #[cfg(test)]
+        rfp: true,
         #[cfg(test)]
         lmr: true,
         #[cfg(test)]
@@ -622,6 +643,45 @@ fn negamax(
         }
     }
     let us = board.state().side_to_move();
+    // Computed once for both gates below. `evaluate` reads the incremental
+    // accumulator, so this is a few adds rather than a board scan.
+    let static_eval = evaluate(board);
+
+    // Reverse futility pruning. A node whose static score already clears beta
+    // by more than the search could plausibly claw back is assumed to fail
+    // high without searching it.
+    //
+    // Unlike the null-move gate below, both sides of this comparison are the
+    // same node's score, so the tempo bonus cancels and is not withheld.
+    //
+    // No depth ceiling. The usual one exists because a linear margin stops
+    // bounding anything once the search can recover more than `margin * depth`,
+    // but this margin is wide enough that the product outruns any static score
+    // long before that: capping at 4, 5, 6, 8 or 10 plies leaves the bench at
+    // 886840 in every case, so a ceiling here would be a knob that does nothing.
+    //
+    // The in-check guard is last because `is_attacked` generates attacks and is
+    // the expensive term here, while the margin test is a subtract and a
+    // compare that rejects most nodes. Testing it first cost 25% of NPS: every
+    // node paid for it, and only the few that clear beta ever needed it.
+    //
+    // The guard is defensive rather than load-bearing at this margin:
+    // instrumented over kiwipete to depth 6, no in-check node ever cleared beta
+    // by 300 per ply, because being in check is exactly when the static score
+    // overstates the position. It costs nothing there, and the margin is meant
+    // to come down once the evaluation improves, which is when it would fire.
+    if ctx.rfp_enabled()
+        // A mate bound is not a material claim, so a margin in centipawns
+        // cannot say anything about the distance to it.
+        && beta.abs() <= MATE_BOUND
+        && static_eval - RFP_MARGIN * depth as i32 >= beta
+        && !is_attacked(board, board.king_square(us), us.flip())
+    {
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_rfp_cutoff();
+        return Ok(static_eval);
+    }
+
     let has_non_pawn_material =
         !(board.color(us) & !board.pieces(PieceType::Pawn) & !board.pieces(PieceType::King))
             .is_empty();
@@ -633,7 +693,7 @@ fn negamax(
         // whoever is on move, and a null changes only that, so the score this
         // gate reads and the score the null search returns are inflated
         // `2 * TEMPO` apart. Withholding it here compares like with like.
-        && evaluate(board) - TEMPO >= beta
+        && static_eval - TEMPO >= beta
         && !is_attacked(board, board.king_square(us), us.flip())
     {
         #[cfg(feature = "profiling")]
@@ -1138,6 +1198,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn rfp_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.rfp
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     fn pvs_enabled(&self) -> bool {
         #[cfg(test)]
         {
@@ -1305,6 +1376,7 @@ mod tests {
             quiesce_leaves: true,
             pvs: true,
             nmp: true,
+            rfp: true,
             lmr: true,
             lmr_reductions: 0,
         }
@@ -1315,6 +1387,7 @@ mod tests {
         Ctx {
             quiesce_leaves: false,
             nmp: false,
+            rfp: false,
             lmr: false,
             ..test_ctx(iteration_depth)
         }
@@ -2044,6 +2117,83 @@ mod tests {
             "no captures, so score is stand-pat"
         );
         assert_eq!(qnodes, 1);
+    }
+
+    /// Reverse futility answers a node with a static score instead of a
+    /// search, so it must not change a mate verdict.
+    ///
+    /// The gate cannot fire for a large positive `beta` - the static score is
+    /// material and placement, so it never reaches 29000 - but it clears a
+    /// large negative one trivially, which is where the bound on `beta` earns
+    /// its place. Black is mated in four here, verified against a depth-11
+    /// search, so both directions have a mate answer to preserve. Comparing
+    /// the gate against itself disabled is what makes this a test of the
+    /// pruning rather than of the eval.
+    #[test]
+    fn reverse_futility_does_not_change_a_mate_verdict() {
+        let fen = "7k/7p/5R1R/8/8/8/8/6K1 b - - 0 1";
+        let score = |rfp: bool| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = Ctx {
+                rfp,
+                ..test_ctx(10)
+            };
+            negamax_root(&mut board, 10, &mut ctx).unwrap().1
+        };
+        let (with, without) = (score(true), score(false));
+        assert!(
+            mate_in(without).is_some(),
+            "the position must be a mate for the test to say anything: {without}"
+        );
+        assert_eq!(
+            with, without,
+            "reverse futility changed a mate score it must have left alone"
+        );
+    }
+
+    /// A node in check has no static score worth pruning on: the side to move
+    /// must answer the check, and the reply may be forced and losing however
+    /// good the material looks.
+    ///
+    /// Removing the guard does not currently fail this - at a margin of 300 no
+    /// in-check node was observed clearing beta at all, instrumented over
+    /// kiwipete to depth 6 - so this pins the intended behaviour ahead of the
+    /// margin coming down rather than catching a live defect.
+    #[test]
+    fn reverse_futility_does_not_prune_in_check() {
+        let fen = "4k3/8/8/8/8/8/4r3/4K2Q w - - 0 1";
+        let board: Board = fen.parse().unwrap();
+        let us = board.state().side_to_move();
+        assert!(
+            is_attacked(&board, board.king_square(us), us.flip()),
+            "the position must be in check for the test to say anything"
+        );
+        let score = |rfp: bool| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = Ctx { rfp, ..test_ctx(4) };
+            negamax_root(&mut board, 4, &mut ctx).unwrap().1
+        };
+        assert_eq!(
+            score(true),
+            score(false),
+            "reverse futility pruned a node in check"
+        );
+    }
+
+    /// The gate is load-bearing rather than decorative: turning it off has to
+    /// move the node count, or the margin is so wide it never fires and the
+    /// feature is dead code.
+    #[test]
+    fn reverse_futility_prunes() {
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let nodes = |rfp: bool| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = Ctx { rfp, ..test_ctx(6) };
+            negamax_root(&mut board, 6, &mut ctx).unwrap();
+            ctx.total()
+        };
+        let (on, off) = (nodes(true), nodes(false));
+        assert!(on < off, "reverse futility did not prune: {on} vs {off}");
     }
 
     #[test]
