@@ -198,6 +198,8 @@ pub(crate) struct SearchProfile {
     pub(crate) pvs_probes: u64,
     pub(crate) pvs_researches: u64,
     pub(crate) rfp_cutoffs: u64,
+    /// Checking moves searched at undiminished depth.
+    pub(crate) check_extensions: u64,
     pub(crate) null_attempts: u64,
     pub(crate) null_cutoffs: u64,
     pub(crate) lmr_reductions: u64,
@@ -233,6 +235,7 @@ impl std::ops::AddAssign for SearchProfile {
         self.pvs_probes += rhs.pvs_probes;
         self.pvs_researches += rhs.pvs_researches;
         self.rfp_cutoffs += rhs.rfp_cutoffs;
+        self.check_extensions += rhs.check_extensions;
         self.null_attempts += rhs.null_attempts;
         self.null_cutoffs += rhs.null_cutoffs;
         self.lmr_reductions += rhs.lmr_reductions;
@@ -333,6 +336,10 @@ impl SearchProfile {
         self.rfp_cutoffs += 1;
     }
 
+    fn record_check_extension(&mut self) {
+        self.check_extensions += 1;
+    }
+
     fn record_null_attempt(&mut self) {
         self.null_attempts += 1;
     }
@@ -391,6 +398,8 @@ struct Ctx<'a> {
     #[cfg(test)]
     rfp: bool,
     #[cfg(test)]
+    check_extension: bool,
+    #[cfg(test)]
     lmr: bool,
     #[cfg(test)]
     lmr_reductions: u64,
@@ -445,6 +454,8 @@ pub(crate) fn search_inner(
         nmp: true,
         #[cfg(test)]
         rfp: true,
+        #[cfg(test)]
+        check_extension: true,
         #[cfg(test)]
         lmr: true,
         #[cfg(test)]
@@ -862,13 +873,34 @@ fn negamax(
             if stage != Stage::TtMove && Some(mv) == tt_move {
                 continue;
             }
+            let losing = see(board, mv) < 0;
             board.make(mv);
             if !is_legal(board, us) {
                 board.unmake(mv);
                 continue;
             }
-            let reduce = lmr_eligible(board, depth, legal, mv, ply, ctx);
-            let result = search_move(board, depth, ply + 1, alpha, beta, legal, reduce, ctx);
+            // One attack generation, read two ways: the side to move is now
+            // the side this move was played against, so "is it attacked" is
+            // "does this move give check". LMR declines to reduce such a move
+            // and the extension below lengthens it.
+            let them = board.state().side_to_move();
+            let gives_check = is_attacked(board, board.king_square(them), them.flip());
+            let extension = check_extension(gives_check, losing, ply, ctx);
+            #[cfg(feature = "profiling")]
+            if extension > 0 {
+                ctx.profile.record_check_extension();
+            }
+            let reduce = lmr_eligible(depth, legal, mv, ply, gives_check, ctx);
+            let result = search_move(
+                board,
+                depth + extension,
+                ply + 1,
+                alpha,
+                beta,
+                legal,
+                reduce,
+                ctx,
+            );
             board.unmake(mv);
             legal += 1;
             let score = result?;
@@ -938,22 +970,46 @@ fn lmr_reduction(depth: u32, index: usize) -> u32 {
 }
 
 fn lmr_eligible(
-    board: &Board,
     depth: u32,
     legal: usize,
     mv: Move,
     ply: u32,
+    gives_check: bool,
     ctx: &Ctx<'_>,
 ) -> bool {
     depth >= LMR_MIN_DEPTH
         && legal >= LMR_MIN_INDEX
         && !mv.is_capture()
         && !mv.is_promotion()
+        && !gives_check
         && ctx.killers_at(ply).iter().all(|killer| *killer != Some(mv))
-        && {
-            let them = board.state().side_to_move();
-            !is_attacked(board, board.king_square(them), them.flip())
-        }
+}
+
+/// Plies to add to a checking move's search, so a forcing line is not cut off
+/// mid-sequence by the horizon.
+///
+/// A check is the one move type whose replies are nearly forced, so the
+/// subtree is narrow and the usual reason to trust the horizon - that the
+/// position is quiet enough for a static score to mean something - does not
+/// hold. Extending trades a small number of nodes for seeing the end of the
+/// sequence.
+///
+/// A check that hangs the checking piece is declined: it is a tempo rather
+/// than a threat, and extending it costs a ply of depth in most positions
+/// while gaining nothing. `see` scores a quiet move 0, so this only ever
+/// declines a capture; a quiet check is extended regardless.
+///
+/// The `ply` bound is a stack guard, not a termination proof. An extension
+/// holds depth constant, so `depth == 0` no longer bounds the recursion the
+/// way it does for every other change here - but the fifty-move rule still
+/// does, since a non-repeating check sequence needs captures or pawn moves to
+/// reset the clock and both are finite. What is left is a sequence that
+/// terminates but far too deep, and removing the bound leaves the bench at
+/// 1060717 unchanged, so it does not fire at any depth reached today. It is
+/// kept because the failure it prevents is a stack overflow rather than a
+/// wrong score.
+fn check_extension(gives_check: bool, losing: bool, ply: u32, ctx: &Ctx<'_>) -> u32 {
+    u32::from(gives_check && !losing && ply + 1 < MAX_PLY as u32 && ctx.check_extension_enabled())
 }
 
 /// Searches the capture sequences leaving a leaf position until it is quiet,
@@ -1320,6 +1376,17 @@ impl Ctx<'_> {
         }
     }
 
+    fn check_extension_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.check_extension
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     fn pvs_enabled(&self) -> bool {
         #[cfg(test)]
         {
@@ -1500,6 +1567,8 @@ mod tests {
             aspiration: true,
             nmp: true,
             rfp: true,
+            #[cfg(test)]
+            check_extension: true,
             lmr: true,
             lmr_reductions: 0,
         }
@@ -1511,6 +1580,8 @@ mod tests {
             quiesce_leaves: false,
             nmp: false,
             rfp: false,
+            #[cfg(test)]
+            check_extension: false,
             lmr: false,
             ..test_ctx(iteration_depth)
         }
@@ -1804,11 +1875,11 @@ mod tests {
         ctx.killers[0][0] = Some(mv);
         board.make(mv);
         assert!(!lmr_eligible(
-            &board,
             LMR_MIN_DEPTH,
             LMR_MIN_INDEX,
             mv,
             0,
+            false,
             &ctx
         ));
     }
@@ -1825,12 +1896,15 @@ mod tests {
             .unwrap();
         let ctx = test_ctx(LMR_MIN_DEPTH);
         board.make(mv);
+        let them = board.state().side_to_move();
+        let gives_check = is_attacked(&board, board.king_square(them), them.flip());
+        assert!(gives_check);
         assert!(!lmr_eligible(
-            &board,
             LMR_MIN_DEPTH,
             LMR_MIN_INDEX,
             mv,
             0,
+            gives_check,
             &ctx
         ));
     }
@@ -2410,6 +2484,76 @@ mod tests {
         };
         let (on, off) = (nodes(true), nodes(false));
         assert!(on < off, "reverse futility did not prune: {on} vs {off}");
+    }
+
+    /// The extension holds depth constant, so unlike every other change here
+    /// the recursion is not bounded by `depth == 0` the way every other change
+    /// here is. This does not run away today - see `check_extension` - so what
+    /// is asserted is that it still returns, and cheaply.
+    #[test]
+    fn the_ply_bound_terminates_a_check_sequence() {
+        let mut board: Board = "7k/8/8/8/8/8/5RR1/6K1 w - - 0 1".parse().expect("fen");
+        let mut ctx = test_ctx(6);
+        let nodes = negamax_root(&mut board, 6, &mut ctx).map(|_| ctx.total());
+        assert!(
+            nodes.is_ok_and(|nodes| nodes < 5_000_000),
+            "the ply bound did not contain the check sequence"
+        );
+    }
+
+    /// Extending has to cost nodes, or the gate never fires and the feature is
+    /// dead code. This is the mirror of `reverse_futility_prunes`: every other
+    /// change here is checked for pruning, this one for spending.
+    #[test]
+    fn checks_are_extended() {
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let nodes = |check_extension: bool| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = Ctx {
+                check_extension,
+                ..test_ctx(6)
+            };
+            negamax_root(&mut board, 6, &mut ctx).unwrap();
+            ctx.total()
+        };
+        let (on, off) = (nodes(true), nodes(false));
+        assert!(on > off, "checks were not extended: {on} vs {off}");
+    }
+
+    /// A check that hangs the checking piece is a tempo, not a threat, and
+    /// extending it is what made the ungated version lose a ply of depth.
+    ///
+    /// Asserted on the gate rather than on a node count: checks arise all
+    /// over a subtree, so a whole-search count cannot say which of them the
+    /// gate declined.
+    #[test]
+    fn a_losing_check_is_not_extended() {
+        crate::movegen::init();
+        // The knight's only checks are Nxc7+ and Nxd6+, both onto a defended
+        // square, so both lose the knight outright.
+        let mut board: Board = "1b2k3/2p1p3/3p4/1N6/8/8/8/4K3 w - - 0 1".parse().unwrap();
+        let ctx = test_ctx(4);
+        let mut moves = MoveList::new();
+        generate_legal(&mut board, &mut moves);
+        let mut checks = 0;
+        for &mv in moves.iter() {
+            let losing = see(&board, mv) < 0;
+            board.make(mv);
+            let them = board.state().side_to_move();
+            let gives_check = is_attacked(&board, board.king_square(them), them.flip());
+            board.unmake(mv);
+            if !gives_check {
+                continue;
+            }
+            checks += 1;
+            assert!(losing, "test position must have only losing checks: {mv:?}");
+            assert_eq!(
+                check_extension(gives_check, losing, 0, &ctx),
+                0,
+                "a check losing the piece outright was extended: {mv:?}"
+            );
+        }
+        assert!(checks > 0, "position has no checks to decline");
     }
 
     #[test]
