@@ -47,7 +47,11 @@ const RFP_MARGIN: i32 = 300;
 /// Half-width of the aspiration window, in centipawns. Narrow enough that most
 /// nodes inside it fail high or low rather than computing an exact score, wide
 /// enough that an ordinary iteration-to-iteration drift stays inside it.
-const ASPIRATION_DELTA: i32 = 40;
+///
+/// Swept over 8/16/25/30/35/40/45/50/60/80 against the bench: flat between 40
+/// and 60, rising sharply below 40 as re-searches start to dominate. 45 is the
+/// measured minimum inside that plateau rather than a distinct optimum.
+const ASPIRATION_DELTA: i32 = 45;
 /// Depth at which aspiration starts. Below it an iteration is cheap enough
 /// that a re-search costs more than the narrow window saves, and the score is
 /// still moving too much between iterations for the last one to predict it.
