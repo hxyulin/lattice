@@ -136,6 +136,11 @@ fn write_profile(output: &mut dyn Write, profile: SearchProfile, qnodes: u64) {
     );
     let _ = writeln!(
         output,
+        "info string profile RFP cutoffs {}",
+        profile.rfp_cutoffs,
+    );
+    let _ = writeln!(
+        output,
         "info string profile null cutoffs {} / {} ({:.2}%)",
         profile.null_cutoffs,
         profile.null_attempts,
