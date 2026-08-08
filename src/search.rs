@@ -759,8 +759,11 @@ fn negamax(
         }
     }
     let us = board.state().side_to_move();
-    // Computed once for both gates below. `evaluate` reads the incremental
-    // accumulator, so this is a few adds rather than a board scan.
+    // Computed once for both gates below, and worth hoisting: `evaluate` is no
+    // longer the accumulator read this comment used to describe. Material and
+    // placement are still incremental, but mobility, rook files and pawn
+    // structure each scan the board once per side per call, which makes this
+    // the most expensive thing at the node - around 11x an `is_attacked`.
     let static_eval = evaluate(board);
 
     // Reverse futility pruning. A node whose static score already clears beta
@@ -900,7 +903,13 @@ fn negamax(
             if stage != Stage::TtMove && Some(mv) == tt_move {
                 continue;
             }
-            let losing = see(board, mv) < 0;
+            // `see` returns 0 for a quiet - `victim_square` finds nothing to
+            // take - so the capture test is the same answer for less work, and
+            // quiets are most of the list at most nodes. Worth guarding because
+            // the one consumer is `check_extension`, which short-circuits on
+            // `gives_check` first, so the score is discarded at every node that
+            // does not give check.
+            let losing = mv.is_capture() && see(board, mv) < 0;
             board.make(mv);
             if !is_legal(board, us) {
                 board.unmake(mv);
