@@ -59,4 +59,5 @@ authoritative result.
 | reverse futility pruning | STC | - | +41.1 | pass |
 | scale the late move reduction with depth and move number | STC | - | +38.4 | pass |
 | score piece mobility | STC | - | +27.4 | pass |
+| score rooks on open and semi-open files | STC | - | +23.0 | pass |
 <!-- END generated -->

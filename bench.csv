@@ -84,3 +84,5 @@ c537b6e,2026-08-08,"feat(search): reverse futility pruning",886840
 15c0cc6,2026-08-08,"docs: record the late move reduction formula SPRT result",
 e191886,2026-08-08,"fix(tools): stop stamping merge commits, and identify ab-bench builds",
 2fac8d5,2026-08-08,"feat(eval): score piece mobility",945884
+1e936c7,2026-08-08,"docs: record the mobility SPRT result",
+9f60137,2026-08-08,"feat(eval): score rooks on open and semi-open files",942174
