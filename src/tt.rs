@@ -119,8 +119,14 @@ impl TranspositionTable {
         self.slots.len() * SLOT_BYTES / (1024 * 1024)
     }
 
-    /// Marks every entry as belonging to an older search, so the next one
-    /// replaces them freely. Cheaper than zeroing 16 MiB.
+    /// Bumps the generation counter that [`TranspositionTable::store`] stamps
+    /// into each entry.
+    ///
+    /// The stamp is inert: nothing decodes those bits, so no entry is treated
+    /// differently for being old. Replacement across positions is already
+    /// unconditional, which is what this was meant to achieve, so wiring the
+    /// counter up would change nothing until the table is bucketed and has ties
+    /// to break. Kept for that, not load-bearing today.
     pub fn new_search(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
@@ -179,8 +185,14 @@ impl TranspositionTable {
     /// Keeps a deeper entry for the same position rather than replacing it: a
     /// shallow iteration of a new search would otherwise discard the deep
     /// result the previous one left there, which is the entry the new search
-    /// most wants. A different position takes the slot regardless of depth,
-    /// and an entry from an older search loses ties.
+    /// most wants. A different position takes the slot regardless of depth, so
+    /// the effective policy is always-replace: measured over `bench`, the depth
+    /// test rejects 51 stores out of 63998 (0.08%), because a slot holding the
+    /// same position at greater depth is rare next to one holding some other
+    /// position entirely.
+    ///
+    /// Age does not enter into it. The generation counter is written into the
+    /// entry and never read back - see [`TranspositionTable::new_search`].
     pub fn store(&self, key: u64, score: i32, best_move: Option<Move>, depth: u32, bound: Bound) {
         let slot = &self.slots[self.index(key)];
         let generation = self.generation.load(Ordering::Relaxed);

@@ -1174,10 +1174,12 @@ enum Stage {
 
 /// Whether `mv` is safe to play on this position.
 ///
-/// A move from the transposition table survived a 48-bit key check, not a full
-/// one, so it can decode to something impossible here - and `Board::make`
-/// panics when the origin square is empty. This screens for that: the mover
-/// must be ours, and a capture must have something of theirs to take.
+/// A move from the transposition table can decode to something impossible
+/// here - and `Board::make` panics when the origin square is empty. The key
+/// check is a full 64 bits, so this is not about hash collisions: an entry can
+/// be torn between its two atomic stores under SMP, or carry a move from an
+/// earlier game. This screens for that: the mover must be ours, and a capture
+/// must have something of theirs to take.
 ///
 /// Deliberately cheap rather than a full re-derivation of the generator. A
 /// structurally impossible move that slips through (a knight moving like a
