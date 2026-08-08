@@ -14,6 +14,8 @@ pub mod search;
 pub mod tactics;
 /// Transposition table.
 pub mod tt;
+/// Evaluation weight tuning.
+pub mod tuner;
 /// UCI command parsing and move notation.
 pub mod uci;
 
