@@ -56,6 +56,13 @@ const ASPIRATION_DELTA: i32 = 45;
 /// that a re-search costs more than the narrow window saves, and the score is
 /// still moving too much between iterations for the last one to predict it.
 const ASPIRATION_MIN_DEPTH: u32 = 4;
+/// Depth at or above which a node with no transposition table move is searched
+/// one ply shallower. See the internal iterative reduction in [`negamax`].
+///
+/// Bounded below because the reduction pays for itself out of a wide tree, and
+/// a shallow node does not have one: at depth 3 the ply given up is a third of
+/// the search, while the ordering it buys back applies to a handful of nodes.
+const IIR_MIN_DEPTH: u32 = 4;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
 /// Scale on the `ln(depth) * ln(move number)` reduction, and the constant
@@ -396,6 +403,8 @@ struct Ctx<'a> {
     #[cfg(test)]
     nmp: bool,
     #[cfg(test)]
+    iir: bool,
+    #[cfg(test)]
     rfp: bool,
     #[cfg(test)]
     check_extension: bool,
@@ -452,6 +461,8 @@ pub(crate) fn search_inner(
         aspiration: true,
         #[cfg(test)]
         nmp: true,
+        #[cfg(test)]
+        iir: true,
         #[cfg(test)]
         rfp: true,
         #[cfg(test)]
@@ -828,6 +839,22 @@ fn negamax(
     let tt_move = entry
         .and_then(|entry| entry.best_move)
         .filter(|&mv| is_pseudo_legal(board, mv));
+
+    // Internal iterative reduction. A node this deep with no stored move has
+    // nothing better than history to sort by, and searching it at full depth
+    // with poor ordering is the most expensive way to discover the move a
+    // shallower search would have named. Taking a ply here costs less than the
+    // wide tree that bad ordering produces, and the shallower search leaves a
+    // TT entry, so the re-visit at full depth is ordered.
+    //
+    // The engine's table is 71.5% empty over the bench, so this is not a rare
+    // path: it is most of the frontier.
+    let depth = if ctx.iir_enabled() && tt_move.is_none() && depth >= IIR_MIN_DEPTH {
+        depth - 1
+    } else {
+        depth
+    };
+
     let mut moves = MoveList::new();
     let mut best = -INFINITY;
     let mut best_move = None;
@@ -1354,6 +1381,17 @@ fn cheapest_attacker(
 }
 
 impl Ctx<'_> {
+    fn iir_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.iir
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    }
+
     fn nmp_enabled(&self) -> bool {
         #[cfg(test)]
         {
@@ -1566,6 +1604,7 @@ mod tests {
             pvs: true,
             aspiration: true,
             nmp: true,
+            iir: true,
             rfp: true,
             #[cfg(test)]
             check_extension: true,
@@ -2554,6 +2593,25 @@ mod tests {
             );
         }
         assert!(checks > 0, "position has no checks to decline");
+    }
+
+    /// Giving up a ply at unordered nodes has to shrink the tree, or it is
+    /// paying depth for nothing. This is the mirror of `checks_are_extended`:
+    /// that one asserts a feature spends nodes, this one that it saves them.
+    #[test]
+    fn internal_iterative_reduction_shrinks_the_tree() {
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let nodes = |iir: bool| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = Ctx { iir, ..test_ctx(8) };
+            negamax_root(&mut board, 8, -INFINITY, INFINITY, &mut ctx).unwrap();
+            ctx.total()
+        };
+        let (on, off) = (nodes(true), nodes(false));
+        assert!(
+            on < off,
+            "internal iterative reduction did not shrink the tree: {on} vs {off}"
+        );
     }
 
     #[test]
