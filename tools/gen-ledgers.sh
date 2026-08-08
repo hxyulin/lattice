@@ -49,6 +49,11 @@ rows=$(git log --reverse \
         n = split(sprt, a, " "); tc = a[1]; verdict = a[n]; games = "-"; elo = "-"
         for (i = 1; i <= n; i++) {
           if (a[i] ~ /^\([0-9]+g\)$/) { g = a[i]; gsub(/[()g]/, "", g); games = g }
+          # `(N pairs)` splits into two tokens on space. A pair is two games -
+          # same opening played both ways - so it doubles into the games column.
+          if (a[i] ~ /^\([0-9]+$/ && a[i + 1] == "pairs)") {
+            g = a[i]; gsub(/[()]/, "", g); games = g * 2
+          }
           if (a[i] == "Elo" && i > 1) { elo = (a[i - 2] == "+-") ? a[i - 3] : a[i - 1] }
         }
         print "| " subject " | " tc " | " games " | " elo " | " verdict " |"

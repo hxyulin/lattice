@@ -86,3 +86,12 @@ e191886,2026-08-08,"fix(tools): stop stamping merge commits, and identify ab-ben
 2fac8d5,2026-08-08,"feat(eval): score piece mobility",945884
 1e936c7,2026-08-08,"docs: record the mobility SPRT result",
 9f60137,2026-08-08,"feat(eval): score rooks on open and semi-open files",942174
+4787958,2026-08-08,"docs: record the rook file SPRT result",
+600b931,2026-08-08,"test(search): raise the null move node test clear of the noise floor",942174
+3ffe086,2026-08-08,"feat(eval): score passed, isolated and doubled pawns",882946
+0cae1d0,2026-08-07,"feat(search): aspiration windows",856189
+ecc537a,2026-08-08,"perf(search): widen the aspiration window to 45",857463
+538ac22,2026-08-08,"fix(search): adapt the reverse futility tests to the aspiration signature",857463
+88451e1,2026-08-08,"feat(search): extend checking moves",995498
+277a010,2026-08-08,"fix(search): adapt the check extension tests to the aspiration signature",995498
+4e34374,2026-08-08,"feat(search): reduce unordered nodes by a ply",962849

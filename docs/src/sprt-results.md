@@ -55,9 +55,13 @@ authoritative result.
 | SEE pruning in quiescence | STC | 1152 | +27.1 | pass |
 | movegen, ordering, and allocation optimization pass | STC | 456 | +55.5 | pass |
 | detect draws by repetition and the fifty-move rule | STC | 454 | +73.0 | pass |
-| bonus for having the move | STC | - | +12.3 | pass |
-| reverse futility pruning | STC | - | +41.1 | pass |
-| scale the late move reduction with depth and move number | STC | - | +38.4 | pass |
-| score piece mobility | STC | - | +27.4 | pass |
-| score rooks on open and semi-open files | STC | - | +23.0 | pass |
+| bonus for having the move | STC | 4278 | +12.3 | pass |
+| reverse futility pruning | STC | 1100 | +41.1 | pass |
+| scale the late move reduction with depth and move number | STC | 1166 | +38.4 | pass |
+| score piece mobility | STC | 1874 | +27.4 | pass |
+| score rooks on open and semi-open files | STC | 2094 | +23.0 | pass |
+| score passed, isolated and doubled pawns | STC | 9620 | +7.3 | pass |
+| aspiration windows | STC | 3244 | +15.0 | pass |
+| extend checking moves | STC | 5924 | +9.6 | pass |
+| reduce unordered nodes by a ply | STC | 4352 | +12.2 | pass |
 <!-- END generated -->
