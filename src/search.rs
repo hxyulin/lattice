@@ -2494,7 +2494,7 @@ mod tests {
     fn the_ply_bound_terminates_a_check_sequence() {
         let mut board: Board = "7k/8/8/8/8/8/5RR1/6K1 w - - 0 1".parse().expect("fen");
         let mut ctx = test_ctx(6);
-        let nodes = negamax_root(&mut board, 6, &mut ctx).map(|_| ctx.total());
+        let nodes = negamax_root(&mut board, 6, -INFINITY, INFINITY, &mut ctx).map(|_| ctx.total());
         assert!(
             nodes.is_ok_and(|nodes| nodes < 5_000_000),
             "the ply bound did not contain the check sequence"
@@ -2513,7 +2513,7 @@ mod tests {
                 check_extension,
                 ..test_ctx(6)
             };
-            negamax_root(&mut board, 6, &mut ctx).unwrap();
+            negamax_root(&mut board, 6, -INFINITY, INFINITY, &mut ctx).unwrap();
             ctx.total()
         };
         let (on, off) = (nodes(true), nodes(false));
