@@ -333,6 +333,37 @@ const ROOK_SEMI_EG: i32 = 6;
 ///
 /// The endgame weight is the smaller one: with the board emptying, most files
 /// are open and the distinction stops separating good rooks from bad ones.
+/// `rook_files`, reading the cached open-file masks instead of scanning the
+/// pawns again.
+///
+/// Same score by construction: "no pawn of ours on this file" and "no pawn of
+/// theirs on this file" are exactly the two tests the scanning version makes,
+/// and both are answered by a bit of the cached mask.
+fn rook_files_cached(board: &Board, us: Color, pawns: &PawnEntry) -> (i32, i32) {
+    let ours_empty = pawns.no_pawn[us as usize];
+    let theirs_empty = pawns.no_pawn[us.flip() as usize];
+    let (mut mg, mut eg) = (0, 0);
+    for square in board.pieces(PieceType::Rook) & board.color(us) {
+        let file = square.file();
+        if ours_empty & (1 << file) == 0 {
+            continue;
+        }
+        if theirs_empty & (1 << file) != 0 {
+            mg += ROOK_OPEN_MG;
+            eg += ROOK_OPEN_EG;
+        } else {
+            mg += ROOK_SEMI_MG;
+            eg += ROOK_SEMI_EG;
+        }
+    }
+    (mg, eg)
+}
+
+/// Rook file bonuses by scanning the pawns directly.
+///
+/// Superseded on the hot path by [`rook_files_cached`]; kept as the independent
+/// definition that one is checked against.
+#[cfg(test)]
 fn rook_files(board: &Board, us: Color) -> (i32, i32) {
     const FILE_A: u64 = 0x0101_0101_0101_0101;
     let ours = board.pieces(PieceType::Pawn) & board.color(us);
@@ -354,15 +385,91 @@ fn rook_files(board: &Board, us: Color) -> (i32, i32) {
     (mg, eg)
 }
 
+/// Cached pawn-derived evaluation for one position's pawn structure.
+///
+/// Both halves are a function of pawn placement alone, which is what lets one
+/// key cover them: `pawn_structure` reads only pawns, and the part of
+/// `rook_files` that costs anything is deciding which files are open or
+/// semi-open, which is also only about pawns. Where the rooks actually stand is
+/// then a popcount against these masks.
+#[derive(Clone, Copy, Default)]
+struct PawnEntry {
+    key: u64,
+    /// Midgame and endgame pawn structure, indexed by [`Color`].
+    structure: [(i32, i32); 2],
+    /// Files with no pawn of that colour, indexed by [`Color`], as a mask of
+    /// the eight file bits.
+    no_pawn: [u8; 2],
+}
+
+/// Direct-mapped pawn cache.
+///
+/// Thread-local rather than shared: it is written on almost every miss, so a
+/// shared table would be a contended cache line on the hottest path in the
+/// evaluation. Losing it between searches costs nothing, since it refills
+/// within a few thousand nodes.
+///
+/// 4096 entries is far more than the distinct pawn structures a search visits -
+/// pawn moves are a small fraction of a tree - so collisions are rare and cost
+/// only a recompute.
+const PAWN_CACHE_SLOTS: usize = 4096;
+
+thread_local! {
+    static PAWN_CACHE: std::cell::RefCell<Vec<PawnEntry>> =
+        std::cell::RefCell::new(vec![PawnEntry::default(); PAWN_CACHE_SLOTS]);
+}
+
+/// Pawn structure and open-file masks for both sides, from the cache when the
+/// pawn key matches and recomputed into it when it does not.
+///
+/// A zero key is treated as a miss rather than as "no pawns": an empty slot is
+/// also zero, and a pawnless position recomputes to nothing in no time at all.
+fn pawn_entry(board: &Board) -> PawnEntry {
+    let key = board.state().pawn_key();
+    let slot = (key as usize) & (PAWN_CACHE_SLOTS - 1);
+    PAWN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if key != 0 && cache[slot].key == key {
+            return cache[slot];
+        }
+        let entry = PawnEntry {
+            key,
+            structure: [
+                pawn_structure(board, Color::White),
+                pawn_structure(board, Color::Black),
+            ],
+            no_pawn: [
+                empty_files(board, Color::White),
+                empty_files(board, Color::Black),
+            ],
+        };
+        cache[slot] = entry;
+        entry
+    })
+}
+
+/// The eight file bits, set where `us` has no pawn.
+fn empty_files(board: &Board, us: Color) -> u8 {
+    const FILE_A: u64 = 0x0101_0101_0101_0101;
+    let ours = board.pieces(PieceType::Pawn) & board.color(us);
+    let mut mask = 0;
+    for file in 0..8 {
+        if (ours & Bitboard::new(FILE_A << file)).is_empty() {
+            mask |= 1 << file;
+        }
+    }
+    mask
+}
+
 /// Every scored term other than the piece-square tables, for one side, in
 /// midgame and endgame centipawns.
 ///
 /// One place for `evaluate` to call, so adding a term is one line here rather
 /// than another pair of bindings threaded through the blend.
-fn term_sum(board: &Board, us: Color) -> (i32, i32) {
+fn term_sum(board: &Board, us: Color, pawns: &PawnEntry) -> (i32, i32) {
     let (mobility_mg, mobility_eg) = mobility(board, us);
-    let (rook_mg, rook_eg) = rook_files(board, us);
-    let (pawn_mg, pawn_eg) = pawn_structure(board, us);
+    let (rook_mg, rook_eg) = rook_files_cached(board, us, pawns);
+    let (pawn_mg, pawn_eg) = pawns.structure[us as usize];
     (
         mobility_mg + rook_mg + pawn_mg,
         mobility_eg + rook_eg + pawn_eg,
@@ -468,8 +575,9 @@ fn ahead_of(square: Square, color: Color) -> Bitboard {
 /// and `TEMPO` for the side to move.
 pub fn evaluate(board: &Board) -> i32 {
     let Accumulator { mg, eg, phase } = *board.accumulator();
-    let (white_mg, white_eg) = term_sum(board, Color::White);
-    let (black_mg, black_eg) = term_sum(board, Color::Black);
+    let pawns = pawn_entry(board);
+    let (white_mg, white_eg) = term_sum(board, Color::White, &pawns);
+    let (black_mg, black_eg) = term_sum(board, Color::Black, &pawns);
     let score = blend(mg + white_mg - black_mg, eg + white_eg - black_eg, phase);
     let score = if board.state().side_to_move() == Color::White {
         score
@@ -779,6 +887,77 @@ mod tests {
                     && MOBILITY_EG[PieceType::Queen as usize] > 0
             )
         };
+    }
+
+    // catches: the cached rook term drifting from the scanning one, a stale
+    // cache entry surviving a pawn move, and the pawn key colliding across
+    // structures that score differently.
+    //
+    // Every position is scored twice, the second time with the cache already
+    // warm from the first, so a hit that returns another position's entry shows
+    // up as a mismatch rather than as a plausible wrong number.
+    #[test]
+    fn the_pawn_cache_agrees_with_a_direct_scan() {
+        let positions = [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "4k3/8/8/8/8/8/8/3RK3 w - - 0 1",
+            "4k3/3p4/8/8/8/8/3P4/3RK3 w - - 0 1",
+            "3rk3/8/8/8/3R4/8/8/3R1K2 w - - 0 1",
+            // No pawns at all: the pawn key is zero here, which is also what an
+            // empty cache slot holds.
+            "4k3/8/8/8/8/8/8/R3K2R w - - 0 1",
+        ];
+        for fen in positions {
+            let board: Board = fen.parse().unwrap();
+            for _ in 0..2 {
+                let pawns = pawn_entry(&board);
+                for us in [Color::White, Color::Black] {
+                    assert_eq!(
+                        rook_files_cached(&board, us, &pawns),
+                        rook_files(&board, us),
+                        "cached rook files disagree for {us:?} on {fen}"
+                    );
+                    assert_eq!(
+                        pawns.structure[us as usize],
+                        pawn_structure(&board, us),
+                        "cached pawn structure disagrees for {us:?} on {fen}"
+                    );
+                }
+            }
+        }
+    }
+
+    // catches: a pawn key that does not change when the structure does, which
+    // would serve the pre-move score for the post-move position. The push is
+    // chosen to change the score: e2-e4 leaves the d-file rook's file alone but
+    // moves the pawn two ranks up the passed-pawn table.
+    #[test]
+    fn a_pawn_move_changes_the_pawn_key() {
+        crate::movegen::init();
+        let mut board: Board = "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1".parse().unwrap();
+        let before_key = board.state().pawn_key();
+        let before = pawn_entry(&board).structure[Color::White as usize];
+
+        let mut moves = crate::movegen::MoveList::new();
+        crate::movegen::generate_legal(&mut board, &mut moves);
+        let push = *moves
+            .iter()
+            .find(|mv| mv.from().index() == 12 && mv.to().index() == 28)
+            .expect("e2-e4 must be legal here");
+        board.make(push);
+
+        assert_ne!(
+            board.state().pawn_key(),
+            before_key,
+            "the pawn key survived a pawn move"
+        );
+        assert_ne!(
+            pawn_entry(&board).structure[Color::White as usize],
+            before,
+            "the cache served the pre-move structure"
+        );
     }
 
     // catches: open and semi-open swapped, an enemy pawn treated as blocking

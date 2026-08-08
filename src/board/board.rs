@@ -260,6 +260,9 @@ impl Board {
         self.colors[piece.color() as usize].set(square);
         self.occupied.set(square);
         self.state.zobrist ^= piece_key(piece, square);
+        if piece.piece_type() == PieceType::Pawn {
+            self.state.pawn_key ^= piece_key(piece, square);
+        }
         self.accumulator.add(piece, square);
     }
     fn remove_piece(&mut self, piece: Piece, square: Square) {
@@ -268,6 +271,9 @@ impl Board {
         self.colors[piece.color() as usize].clear(square);
         self.occupied.clear(square);
         self.state.zobrist ^= piece_key(piece, square);
+        if piece.piece_type() == PieceType::Pawn {
+            self.state.pawn_key ^= piece_key(piece, square);
+        }
         self.accumulator.remove(piece, square);
     }
     fn set_ep(&mut self, ep: Option<Square>) {
@@ -281,6 +287,7 @@ impl Board {
     }
     pub(crate) fn finish_setup(&mut self) {
         self.state.zobrist = self.recompute_zobrist();
+        self.state.pawn_key = self.recompute_pawn_key();
         self.debug_check();
     }
     fn recompute_zobrist(&self) -> u64 {
@@ -299,6 +306,19 @@ impl Board {
         }
         z
     }
+    /// Pawn-only Zobrist key from scratch. Castling, en passant and the side to
+    /// move are all absent: none of them changes what the pawn structure is
+    /// worth, and including them would miss transpositions the cache exists to
+    /// catch.
+    fn recompute_pawn_key(&self) -> u64 {
+        let mut key = 0;
+        for square in self.pieces(PieceType::Pawn) {
+            if let Some(piece) = self.piece_on(square) {
+                key ^= piece_key(piece, square);
+            }
+        }
+        key
+    }
     #[cfg(debug_assertions)]
     fn debug_check(&self) {
         assert_eq!(self.occupied, self.colors[0] | self.colors[1]);
@@ -316,6 +336,7 @@ impl Board {
             }
         }
         assert_eq!(self.state.zobrist, self.recompute_zobrist());
+        assert_eq!(self.state.pawn_key, self.recompute_pawn_key());
         assert_eq!(self.accumulator, crate::eval::scan(self));
     }
     #[cfg(not(debug_assertions))]

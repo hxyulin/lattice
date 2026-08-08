@@ -43,6 +43,7 @@ impl FromStr for Board {
             halfmove,
             fullmove,
             zobrist: 0,
+            pawn_key: 0,
         });
         let ranks: Vec<_> = placement.split('/').collect();
         if ranks.len() != 8 {

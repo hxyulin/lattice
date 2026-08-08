@@ -32,6 +32,12 @@ pub struct State {
     pub(crate) halfmove: u8,
     pub(crate) fullmove: u16,
     pub(crate) zobrist: u64,
+    /// Zobrist key over pawns alone, for the pawn structure cache.
+    ///
+    /// Separate from `zobrist` rather than derived from it: the evaluation
+    /// terms it keys are a function of pawn placement only, so two positions
+    /// differing in their pieces must share a key for the cache to hit at all.
+    pub(crate) pawn_key: u64,
 }
 
 impl State {
@@ -58,6 +64,10 @@ impl State {
     /// Returns the position's Zobrist key.
     pub const fn zobrist(&self) -> u64 {
         self.zobrist
+    }
+    /// Returns the Zobrist key over pawns alone.
+    pub const fn pawn_key(&self) -> u64 {
+        self.pawn_key
     }
 }
 
