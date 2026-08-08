@@ -1570,21 +1570,31 @@ mod tests {
         assert_eq!(enabled.nodes, disabled.nodes);
     }
 
-    /// Depth 6, not 5: at depth 5 from this position the saving is under 1% of
-    /// the tree (9418 vs 9505 nodes), small enough that any change to the shape
-    /// of quiescence flips its sign. Depth 6 saves thousands and tests the
-    /// property rather than the noise.
+    /// Depth 8, because the margin at this position decays as other pruning
+    /// lands. Measured from the start position: depth 6 saves 317 nodes (30774
+    /// vs 31091, 1.0%), depth 7 saves 19069 (18.3%), depth 8 saves 53565
+    /// (205632 vs 259197, 20.7%) and depth 9 saves 277021 (36.9%). Depth 6 was
+    /// chosen when it still saved thousands, and this comment previously
+    /// rejected depth 5 for saving "under 1% of the tree" - which is what depth
+    /// 6 now saves, so it had decayed onto the same noise floor and unrelated
+    /// search changes flipped its sign either way.
+    ///
+    /// The saving is still growing at depth 9, so 8 is a floor rather than a
+    /// plateau, chosen for a 20% margin at a quarter of a second. Re-measure
+    /// rather than nudge the depth if this starts failing again: each new
+    /// pruning term takes candidate nodes from the ones already here, so a
+    /// shrinking margin is the search changing shape, not the property dying.
     #[test]
     fn null_move_pruning_reduces_nodes() {
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
         let mut enabled_board: Board = fen.parse().unwrap();
-        let mut enabled = test_ctx(6);
-        negamax_root(&mut enabled_board, 6, &mut enabled).unwrap();
+        let mut enabled = test_ctx(8);
+        negamax_root(&mut enabled_board, 8, &mut enabled).unwrap();
 
         let mut disabled_board: Board = fen.parse().unwrap();
-        let mut disabled = test_ctx(6);
+        let mut disabled = test_ctx(8);
         disabled.nmp = false;
-        negamax_root(&mut disabled_board, 6, &mut disabled).unwrap();
+        negamax_root(&mut disabled_board, 8, &mut disabled).unwrap();
 
         assert!(
             enabled.nodes < disabled.nodes,
