@@ -1066,23 +1066,29 @@ fn qsearch(
     let alpha_original = alpha;
     ctx.qnodes += 1;
     ctx.check_abort()?;
+    // Quiescence can recurse through quiet check evasions, so path-dependent
+    // draws can arise below the main-search leaf just as they can above it.
+    // Check before any future TT probe: a repetition or fifty-move verdict
+    // belongs to this path and must never be cached for another one.
+    if ply > 0 && is_draw(board) {
+        return Ok(DRAW);
+    }
     #[cfg(feature = "profiling")]
     ctx.profile.record_qply(qply);
-    if qply >= MAX_QPLY {
-        let score = evaluate(board);
-        #[cfg(feature = "profiling")]
-        {
-            let us = board.state().side_to_move();
-            ctx.profile
-                .record_q_in_check(is_attacked(board, board.king_square(us), us.flip()));
-            ctx.profile.record_q_bound(score, alpha, beta);
-        }
-        return Ok(score);
-    }
     let us = board.state().side_to_move();
     let in_check = is_attacked(board, board.king_square(us), us.flip());
     #[cfg(feature = "profiling")]
     ctx.profile.record_q_in_check(in_check);
+    // A side in check cannot stand pat at the recursion backstop. Continue
+    // until it escapes, is mated, or reaches the path-draw guard above. Legal
+    // chess makes that finite: captures and pawn moves are finite, while a
+    // quiet cycle is stopped by repetition or the fifty-move clock.
+    if qply >= MAX_QPLY && !in_check {
+        let score = evaluate(board);
+        #[cfg(feature = "profiling")]
+        ctx.profile.record_q_bound(score, alpha, beta);
+        return Ok(score);
+    }
 
     // Stand-pat first, and the list built only once this node is known to
     // need one: 78% of quiescence nodes cut here, and constructing the list
@@ -2453,6 +2459,39 @@ mod tests {
             "no captures, so score is stand-pat"
         );
         assert_eq!(qnodes, 1);
+    }
+
+    /// Quiescence recurses through quiet check evasions, so it can reach the
+    /// same path-dependent draw states as the main search. Both cases disagree
+    /// with the material score, ensuring the draw guard decides the result.
+    #[test]
+    fn quiescence_honors_path_dependent_draws() {
+        crate::movegen::init();
+        let mut expired: Board = "4k3/8/8/8/8/8/8/Q3K3 b - - 100 1".parse().unwrap();
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut expired, 1, 1, -INFINITY, INFINITY, &mut ctx).unwrap();
+        assert_eq!(score, DRAW, "qsearch ignored the fifty-move clock");
+
+        let mut repeated: Board = "4k3/8/8/8/8/8/8/Q3K3 w - - 0 1".parse().unwrap();
+        for mv in ["a1b1", "e8d8", "b1a1", "d8e8"] {
+            let mv = find_move(&mut repeated, mv);
+            repeated.make(mv);
+        }
+        assert!(repeated.is_repetition(), "test setup did not repeat");
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut repeated, 1, 1, -INFINITY, INFINITY, &mut ctx).unwrap();
+        assert_eq!(score, DRAW, "qsearch ignored a repetition");
+    }
+
+    /// The recursion cap is a backstop for unresolved exchanges, not permission
+    /// to stand pat while checked. Checkmate must remain terminal at the cap.
+    #[test]
+    fn qply_cap_does_not_stand_pat_in_check() {
+        crate::movegen::init();
+        let mut board: Board = "R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1".parse().unwrap();
+        let mut ctx = test_ctx(1);
+        let score = qsearch(&mut board, 0, MAX_QPLY, -INFINITY, INFINITY, &mut ctx).unwrap();
+        assert_eq!(score, -MATE, "qsearch stood pat in checkmate at its cap");
     }
 
     /// Reverse futility answers a node with a static score instead of a
