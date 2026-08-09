@@ -7,3 +7,9 @@
 //! training step into a sparse dot product instead of a full re-evaluation.
 
 pub mod data;
+pub(crate) mod dataset;
+pub(crate) mod features;
+pub(crate) mod optimize;
+pub(crate) mod output;
+
+pub use optimize::{TuneConfig, TuneError, TuneSummary, run};

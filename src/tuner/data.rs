@@ -63,8 +63,6 @@ impl std::fmt::Display for DecodeError {
 /// `trailing_zeros`, two per byte, low nibble first. Each is `colour << 3 |
 /// role`, and the roles are in the same order as [`PieceType`].
 fn decode(record: &[u8; RECORD_BYTES]) -> Result<Sample, DecodeError> {
-    let mut occ = u64::from_le_bytes(record[0..8].try_into().expect("8 bytes"));
-    let pcs = &record[8..24];
     let score = i16::from_le_bytes(record[24..26].try_into().expect("2 bytes"));
     let result = match record[26] {
         0 => 0.0,
@@ -73,6 +71,20 @@ fn decode(record: &[u8; RECORD_BYTES]) -> Result<Sample, DecodeError> {
         other => return Err(DecodeError::BadResult(other)),
     };
 
+    let placement: &[u8; 24] = record[0..24].try_into().expect("24 bytes");
+    let board = decode_placement(placement)?;
+
+    Ok(Sample {
+        board,
+        result,
+        score,
+    })
+}
+
+/// Decodes the placement portion shared by all records for one tuning sample.
+pub(crate) fn decode_placement(placement: &[u8; 24]) -> Result<Board, DecodeError> {
+    let mut occ = u64::from_le_bytes(placement[0..8].try_into().expect("8 bytes"));
+    let pcs = &placement[8..24];
     let mut board = Board::empty(State {
         side_to_move: Color::White,
         castling: crate::board::CastlingRights(0),
@@ -115,11 +127,7 @@ fn decode(record: &[u8; RECORD_BYTES]) -> Result<Sample, DecodeError> {
     }
     board.finish_setup();
 
-    Ok(Sample {
-        board,
-        result,
-        score,
-    })
+    Ok(board)
 }
 
 /// Decodes a whole shard.

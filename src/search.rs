@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::eval::{TEMPO, evaluate};
+use crate::eval::{evaluate, tempo};
 use crate::movegen::{
     MoveList, attackers_to, generate_captures, generate_legal_in_check, generate_pseudo,
     generate_quiets, is_attacked,
@@ -811,8 +811,9 @@ fn negamax(
         // The tempo bonus does not survive a null move: it is added to
         // whoever is on move, and a null changes only that, so the score this
         // gate reads and the score the null search returns are inflated
-        // `2 * TEMPO` apart. Withholding it here compares like with like.
-        && static_eval - TEMPO >= beta
+        // twice the active tempo apart. Withholding it here compares like
+        // with like.
+        && static_eval - tempo() >= beta
         && !is_attacked(board, board.king_square(us), us.flip())
     {
         #[cfg(feature = "profiling")]
@@ -1716,8 +1717,8 @@ mod tests {
 
     /// catches: the tempo bonus leaking into the null-move gate.
     ///
-    /// `evaluate` adds `TEMPO` to whoever is on move, and a null move changes
-    /// only that, so a position and its null differ by `2 * TEMPO` where they
+    /// `evaluate` adds the active tempo to whoever is on move, and a null move
+    /// changes only that, so a position and its null differ by twice tempo where they
     /// should be exact negations. The gate reads a pre-null score and compares
     /// it against one returned through a null, so the bonus has to come off or
     /// null-move pruning cuts on an advantage it invented.
@@ -1739,12 +1740,12 @@ mod tests {
             board.unmake_null();
             assert_eq!(
                 before + after,
-                2 * TEMPO,
+                2 * tempo(),
                 "a null move should leave the position worth its negation \
                  plus the bonus both sides collected: {fen}"
             );
             assert_eq!(
-                (before - TEMPO) + (after - TEMPO),
+                (before - tempo()) + (after - tempo()),
                 0,
                 "stripping the bonus must make the two exact negations: {fen}"
             );
@@ -2525,12 +2526,21 @@ mod tests {
     /// feature is dead code.
     #[test]
     fn reverse_futility_prunes() {
-        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
         let nodes = |rfp: bool| {
-            let mut board: Board = fen.parse().unwrap();
-            let mut ctx = Ctx { rfp, ..test_ctx(6) };
-            negamax_root(&mut board, 6, -INFINITY, INFINITY, &mut ctx).unwrap();
-            ctx.total()
+            [
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 1",
+                "r1bq1rk1/ppp2ppp/2np1n2/4p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8",
+                "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
+            ]
+            .into_iter()
+            .map(|fen| {
+                let mut board: Board = fen.parse().unwrap();
+                let mut ctx = Ctx { rfp, ..test_ctx(5) };
+                negamax_root(&mut board, 5, -INFINITY, INFINITY, &mut ctx).unwrap();
+                ctx.total()
+            })
+            .sum::<u64>()
         };
         let (on, off) = (nodes(true), nodes(false));
         assert!(on < off, "reverse futility did not prune: {on} vs {off}");

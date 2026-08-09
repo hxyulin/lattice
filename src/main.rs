@@ -23,6 +23,9 @@ fn main() {
         Some("tactics") => {
             std::process::exit(run_tactics(&args[1..]));
         }
+        Some("tune") => {
+            std::process::exit(run_tune(&args[1..]));
+        }
         _ => {}
     }
 
@@ -126,6 +129,112 @@ fn main() {
     }
     stop.store(true, Ordering::Relaxed);
     join_search(&mut search_thread);
+}
+
+fn run_tune(args: &[String]) -> i32 {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        eprintln!(
+            "usage: lattice tune SHARD... --output DIR [--epochs N] \
+             [--learning-rate X] [--validation X] [--patience N] \
+             [--seed N] [--threads N]"
+        );
+        return 0;
+    }
+    let mut shards = Vec::new();
+    let mut output = None;
+    let mut epochs = 200usize;
+    let mut learning_rate = 1.0f64;
+    let mut validation_fraction = 0.10f64;
+    let mut patience = 15usize;
+    let mut seed = 1u64;
+    let mut threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let value = |name: &str, index: &mut usize| -> Result<&str, String> {
+            *index += 1;
+            args.get(*index)
+                .map(String::as_str)
+                .ok_or_else(|| format!("tune: {name} needs a value"))
+        };
+        let parsed = match arg.as_str() {
+            "--output" => value(arg, &mut index).map(|v| output = Some(v.into())),
+            "--epochs" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| epochs = n)
+                    .map_err(|_| format!("tune: invalid epochs `{v}`"))
+            }),
+            "--learning-rate" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| learning_rate = n)
+                    .map_err(|_| format!("tune: invalid learning rate `{v}`"))
+            }),
+            "--validation" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| validation_fraction = n)
+                    .map_err(|_| format!("tune: invalid validation fraction `{v}`"))
+            }),
+            "--patience" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| patience = n)
+                    .map_err(|_| format!("tune: invalid patience `{v}`"))
+            }),
+            "--seed" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| seed = n)
+                    .map_err(|_| format!("tune: invalid seed `{v}`"))
+            }),
+            "--threads" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| threads = n)
+                    .map_err(|_| format!("tune: invalid threads `{v}`"))
+            }),
+            unknown if unknown.starts_with('-') => Err(format!("tune: unknown option {unknown}")),
+            path => {
+                shards.push(path.into());
+                Ok(())
+            }
+        };
+        if let Err(error) = parsed {
+            eprintln!("{error}");
+            return 2;
+        }
+        index += 1;
+    }
+    let Some(output) = output else {
+        eprintln!("tune: --output DIR is required");
+        return 2;
+    };
+    let config = lattice::tuner::TuneConfig {
+        shards,
+        output,
+        epochs,
+        learning_rate,
+        validation_fraction,
+        patience,
+        seed,
+        threads,
+    };
+    match lattice::tuner::run(&config) {
+        Ok(summary) => {
+            println!(
+                "tuned {} records / {} placements: K={:.8}, epoch {}, validation {:.10} -> {:.10} (continuous {:.10}); output {}",
+                summary.records,
+                summary.unique_placements,
+                summary.k,
+                summary.best_epoch,
+                summary.baseline_validation_loss,
+                summary.rounded_validation_loss,
+                summary.best_validation_loss,
+                summary.output.display()
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("tune: {error}");
+            2
+        }
+    }
 }
 
 /// `tactics [suite] [--depth N]`. The suite is a path, or a bare name looked

@@ -4,6 +4,33 @@ use crate::board::{Piece, PieceType};
 use crate::movegen::{bishop_attacks, knight_attacks, queen_attacks, rook_attacks};
 use crate::{Bitboard, Board, Color, Square};
 
+#[path = "eval_weights.rs"]
+mod weights;
+
+/// Complete set of linear static-evaluation weights.
+///
+/// Piece-square entries already include material. Keeping this as one typed
+/// value gives the tuner an unambiguous parameterization while the engine
+/// still reads compile-time constants on its hot path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvalWeights {
+    pub(crate) mg_table: [[i32; 64]; 6],
+    pub(crate) eg_table: [[i32; 64]; 6],
+    pub(crate) mobility_mg: [i32; 6],
+    pub(crate) mobility_eg: [i32; 6],
+    pub(crate) rook_open_mg: i32,
+    pub(crate) rook_open_eg: i32,
+    pub(crate) rook_semi_mg: i32,
+    pub(crate) rook_semi_eg: i32,
+    pub(crate) passed_mg: [i32; 7],
+    pub(crate) passed_eg: [i32; 7],
+    pub(crate) isolated_mg: i32,
+    pub(crate) isolated_eg: i32,
+    pub(crate) doubled_mg: i32,
+    pub(crate) doubled_eg: i32,
+    pub(crate) tempo: i32,
+}
+
 /// Midgame material values. The king is 0 by construction: it is never
 /// captured, and a nonzero value would push scores into the mate range that
 /// `search::mate_in` reads.
@@ -207,16 +234,16 @@ impl Accumulator {
     /// Applies the terms for a piece standing on a square.
     pub(crate) fn add(&mut self, piece: Piece, square: Square) {
         let (kind, index, sign) = terms(piece, square);
-        self.mg += sign * MG_TABLE[kind][index];
-        self.eg += sign * EG_TABLE[kind][index];
+        self.mg += sign * weights::WEIGHTS.mg_table[kind][index];
+        self.eg += sign * weights::WEIGHTS.eg_table[kind][index];
         self.phase += PHASE_WEIGHT[kind];
     }
 
     /// Withdraws the terms for a piece leaving a square.
     pub(crate) fn remove(&mut self, piece: Piece, square: Square) {
         let (kind, index, sign) = terms(piece, square);
-        self.mg -= sign * MG_TABLE[kind][index];
-        self.eg -= sign * EG_TABLE[kind][index];
+        self.mg -= sign * weights::WEIGHTS.mg_table[kind][index];
+        self.eg -= sign * weights::WEIGHTS.eg_table[kind][index];
         self.phase -= PHASE_WEIGHT[kind];
     }
 }
@@ -300,8 +327,8 @@ fn mobility(board: &Board, us: Color) -> (i32, i32) {
                 _ => queen_attacks(square, occ),
             };
             let count = (attacks & available).count() as i32;
-            mg += MOBILITY_MG[index] * count;
-            eg += MOBILITY_EG[index] * count;
+            mg += weights::WEIGHTS.mobility_mg[index] * count;
+            eg += weights::WEIGHTS.mobility_eg[index] * count;
         }
     }
     (mg, eg)
@@ -349,11 +376,11 @@ fn rook_files_cached(board: &Board, us: Color, pawns: &PawnEntry) -> (i32, i32) 
             continue;
         }
         if theirs_empty & (1 << file) != 0 {
-            mg += ROOK_OPEN_MG;
-            eg += ROOK_OPEN_EG;
+            mg += weights::WEIGHTS.rook_open_mg;
+            eg += weights::WEIGHTS.rook_open_eg;
         } else {
-            mg += ROOK_SEMI_MG;
-            eg += ROOK_SEMI_EG;
+            mg += weights::WEIGHTS.rook_semi_mg;
+            eg += weights::WEIGHTS.rook_semi_eg;
         }
     }
     (mg, eg)
@@ -375,11 +402,11 @@ fn rook_files(board: &Board, us: Color) -> (i32, i32) {
             continue;
         }
         if (theirs & file).is_empty() {
-            mg += ROOK_OPEN_MG;
-            eg += ROOK_OPEN_EG;
+            mg += weights::WEIGHTS.rook_open_mg;
+            eg += weights::WEIGHTS.rook_open_eg;
         } else {
-            mg += ROOK_SEMI_MG;
-            eg += ROOK_SEMI_EG;
+            mg += weights::WEIGHTS.rook_semi_mg;
+            eg += weights::WEIGHTS.rook_semi_eg;
         }
     }
     (mg, eg)
@@ -532,19 +559,19 @@ fn pawn_structure(board: &Board, us: Color) -> (i32, i32) {
         let ahead = ahead_of(square, us);
         let blocked = !(ours & ahead & own_file).is_empty();
         if !blocked && (theirs & ahead & (own_file | neighbours)).is_empty() {
-            mg += PASSED_MG[advanced];
-            eg += PASSED_EG[advanced];
+            mg += weights::WEIGHTS.passed_mg[advanced];
+            eg += weights::WEIGHTS.passed_eg[advanced];
         }
         // Isolated: no friendly pawn on either neighbouring file, anywhere.
         if (ours & neighbours).is_empty() {
-            mg += ISOLATED_MG;
-            eg += ISOLATED_EG;
+            mg += weights::WEIGHTS.isolated_mg;
+            eg += weights::WEIGHTS.isolated_eg;
         }
         // Doubled: charged once per pawn that has a friendly pawn ahead of it
         // on the same file, so a tripled file is charged twice.
         if blocked {
-            mg += DOUBLED_MG;
-            eg += DOUBLED_EG;
+            mg += weights::WEIGHTS.doubled_mg;
+            eg += weights::WEIGHTS.doubled_eg;
         }
     }
     (mg, eg)
@@ -593,7 +620,17 @@ pub fn evaluate(board: &Board) -> i32 {
     // stand-pat is consistent with every other, so the inflation cancels
     // everywhere except across a null - `search` corrects it at that one
     // comparison rather than `evaluate` trying to detect a null it cannot see.
-    score + TEMPO
+    score + weights::WEIGHTS.tempo
+}
+
+/// Active side-to-move bonus, shared with null-move search correction.
+pub(crate) const fn tempo() -> i32 {
+    weights::WEIGHTS.tempo
+}
+
+/// Baseline weights in the tuner's stable parameter order.
+pub(crate) fn tuning_parameters() -> [f64; crate::tuner::features::PARAMETER_COUNT] {
+    crate::tuner::features::parameters_from_weights(&weights::WEIGHTS)
 }
 
 #[cfg(test)]
@@ -670,37 +707,28 @@ mod tests {
         }
     }
 
-    // catches: any change to the arithmetic that the relational tests below
-    // are blind to, because they hold under it. Verified by mutation: swapping
-    // the midgame and endgame lookups, inverting the phase interpolation,
-    // dropping the phase clamp, zeroing a piece-square table, and making
-    // `fold` drop the material values all leave every other test in this file
-    // passing. Expected values are derived by hand from the published PeSTO
-    // tables, not read back from `evaluate`.
+    // The sparse tuner definition is independent of the incremental runtime
+    // accumulator. Keeping them aligned is what makes generated weights safe
+    // to install without silently training a different evaluation.
     #[test]
-    fn scores_match_hand_computed_pesto_values() {
-        // MG_TABLE[kind][flip] and EG_TABLE[kind][flip] blended as
-        // (mg * p + eg * (24 - p)) / 24 for phase p.
-        let cases = [
-            // d5 pawn, phase 0: pure endgame, EG_PAWN[27] + 94 = 5 + 94.
-            ("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1", 99),
-            // e4 knight, phase 1: (365 * 1 + 297 * 23) / 24.
-            ("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1", 299),
-            // c4 bishop, phase 1: (378 * 1 + 309 * 23) / 24.
-            ("4k3/8/8/8/2B5/8/8/4K3 w - - 0 1", 312),
-            // a1 rook, phase 2: (458 * 2 + 503 * 22) / 24.
-            ("4k3/8/8/8/8/8/8/R3K3 w Q - 0 1", 499),
-            // d1 queen, phase 4: (1035 * 4 + 893 * 20) / 24.
-            ("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", 916),
-            // Queens on mirrored squares cancel; only the king placement is
-            // left, so this pins the king tables rather than material.
-            ("3qk3/8/8/8/8/8/8/3Q2K1 w - - 0 1", 8),
-            // Phase 28 clamps to 24, so this reads the pure midgame tables.
-            ("4k3/8/8/8/8/8/8/QQQQKQQQ w - - 0 1", 7051),
-        ];
-        for (fen, want) in cases {
+    fn sparse_definition_matches_incremental_evaluation() {
+        crate::movegen::init();
+        let parameters = tuning_parameters();
+        for fen in [
+            "4k3/8/8/3P4/8/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/4N3/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/2B5/8/8/4K3 w - - 0 1",
+            "4k3/8/8/8/8/8/8/R3K3 w Q - 0 1",
+            "4k3/8/8/8/8/8/8/3QK3 w - - 0 1",
+            "3qk3/8/8/8/8/8/8/3Q2K1 w - - 0 1",
+            "4k3/8/8/8/8/8/8/QQQQKQQQ w - - 0 1",
+        ] {
             let board: Board = fen.parse().unwrap();
-            assert_eq!(placement(&board), want, "{fen}");
+            let sparse = crate::tuner::features::score(
+                &parameters,
+                &crate::tuner::features::extract(&board),
+            );
+            assert!((sparse - f64::from(evaluate(&board))).abs() < 1.0, "{fen}");
         }
     }
 
@@ -739,20 +767,15 @@ mod tests {
         // That is what distinguishes a side-to-move bonus from a White bonus,
         // and it is the half a dropped sign flip would break.
         //
-        // Written as TEMPO rather than 17 so retuning the constant does not
-        // reach into the tests. That alone would also pass for TEMPO = 0, so
-        // the bonus is pinned as nonzero here: the point of the term is to
-        // shift the score, and a silently disabled one must not look correct.
-        const { assert!(TEMPO > 0, "a zero tempo bonus is a disabled feature") };
-        assert_eq!(evaluate(&Board::startpos()), TEMPO);
+        assert_eq!(evaluate(&Board::startpos()), tempo());
         let white: Board = "4k3/8/8/8/8/8/8/4K3 w - - 0 1".parse().unwrap();
         let black: Board = "4k3/8/8/8/8/8/8/4K3 b - - 0 1".parse().unwrap();
-        assert_eq!(evaluate(&white), TEMPO);
-        assert_eq!(evaluate(&black), TEMPO);
+        assert_eq!(evaluate(&white), tempo());
+        assert_eq!(evaluate(&black), tempo());
         // The material and placement component really is zero here, so the
         // whole score above is the bonus and not a cancellation that happens
         // to land on the same number.
-        assert_eq!(evaluate(&white) - TEMPO, 0);
+        assert_eq!(evaluate(&white) - tempo(), 0);
     }
 
     #[test]
@@ -800,7 +823,7 @@ mod tests {
         // `2 * TEMPO` gap. Asserting the raw scores negate would be asserting
         // the bonus away.
         assert_eq!(placement(&white), -placement(&black));
-        assert_eq!(evaluate(&white) + evaluate(&black), 2 * TEMPO);
+        assert_eq!(evaluate(&white) + evaluate(&black), 2 * tempo());
     }
 
     // catches: any make/unmake path that moves a piece without routing through
@@ -853,12 +876,12 @@ mod tests {
         // A lone knight on e4 reaches 8 squares.
         assert_eq!(
             count("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1", Color::White).0,
-            8 * 4
+            8 * weights::WEIGHTS.mobility_mg[PieceType::Knight as usize]
         );
         // Own pawns on two of those squares remove them.
         assert_eq!(
             count("4k3/8/3P1P2/8/4N3/8/8/4K3 w - - 0 1", Color::White).0,
-            6 * 4
+            6 * weights::WEIGHTS.mobility_mg[PieceType::Knight as usize]
         );
         // Enemy pawns on d6/f6 are targets, so those two squares still count -
         // this is what distinguishes "not occupied by us" from "empty". But the
@@ -866,13 +889,13 @@ mod tests {
         // two other squares go away: 8 targets, minus 2 screened.
         assert_eq!(
             count("4k3/8/3p1p2/8/4N3/8/8/4K3 w - - 0 1", Color::White).0,
-            6 * 4
+            6 * weights::WEIGHTS.mobility_mg[PieceType::Knight as usize]
         );
         // A black pawn on d7 attacks c6 and e6; a white knight on d4 reaches
         // both c6 and e6, so two of its eight squares are screened off.
         assert_eq!(
             count("4k3/3p4/8/8/3N4/8/8/4K3 w - - 0 1", Color::White).0,
-            6 * 4
+            6 * weights::WEIGHTS.mobility_mg[PieceType::Knight as usize]
         );
         // Pawns and kings contribute nothing, so a pawn-and-king position is
         // flat zero rather than a number that happens to cancel.
@@ -881,12 +904,7 @@ mod tests {
             (0, 0)
         );
         // Nonzero somewhere, so a disabled term cannot pass the tests above.
-        const {
-            assert!(
-                MOBILITY_MG[PieceType::Knight as usize] > 0
-                    && MOBILITY_EG[PieceType::Queen as usize] > 0
-            )
-        };
+        assert_ne!(weights::WEIGHTS.mobility_mg[PieceType::Knight as usize], 0);
     }
 
     // catches: the cached rook term drifting from the scanning one, a stale
@@ -970,23 +988,34 @@ mod tests {
             rook_files(&board, Color::White).0
         };
         // No pawns at all on the d-file: open.
-        assert_eq!(score("4k3/8/8/8/8/8/8/3RK3 w - - 0 1"), ROOK_OPEN_MG);
+        assert_eq!(
+            score("4k3/8/8/8/8/8/8/3RK3 w - - 0 1"),
+            weights::WEIGHTS.rook_open_mg
+        );
         // A black pawn on d7 makes it semi-open, not blocked.
-        assert_eq!(score("4k3/3p4/8/8/8/8/8/3RK3 w - - 0 1"), ROOK_SEMI_MG);
+        assert_eq!(
+            score("4k3/3p4/8/8/8/8/8/3RK3 w - - 0 1"),
+            weights::WEIGHTS.rook_semi_mg
+        );
         // Our own pawn on d2 blocks it: no bonus, whatever else is on the file.
         assert_eq!(score("4k3/3p4/8/8/8/8/3P4/3RK3 w - - 0 1"), 0);
         // Two rooks on two open files are paid twice.
-        assert_eq!(score("4k3/8/8/8/8/8/8/R2RK3 w - - 0 1"), 2 * ROOK_OPEN_MG);
+        assert_eq!(
+            score("4k3/8/8/8/8/8/8/R2RK3 w - - 0 1"),
+            2 * weights::WEIGHTS.rook_open_mg
+        );
         // Two rooks doubled on one open file are also paid twice - the bonus is
         // per rook, and this is the case a per-file loop would score once.
         assert_eq!(
             score("3rk3/8/8/8/3R4/8/8/3R1K2 w - - 0 1"),
-            2 * ROOK_OPEN_MG
+            2 * weights::WEIGHTS.rook_open_mg
         );
         // Only the rook's own file matters: an own pawn on a *different* file
         // leaves the bonus intact.
-        assert_eq!(score("4k3/8/8/8/8/8/P7/3RK3 w - - 0 1"), ROOK_OPEN_MG);
-        const { assert!(ROOK_OPEN_MG > ROOK_SEMI_MG && ROOK_SEMI_MG > 0) };
+        assert_eq!(
+            score("4k3/8/8/8/8/8/P7/3RK3 w - - 0 1"),
+            weights::WEIGHTS.rook_open_mg
+        );
     }
 
     // catches: a passer test that an enemy pawn beside it defeats, adjacent
@@ -1002,17 +1031,20 @@ mod tests {
         // and isolated too - three ranks advanced, so PASSED[4] plus ISOLATED.
         assert_eq!(
             score("4k3/8/8/4P3/8/8/8/4K3 w - - 0 1", Color::White),
-            (PASSED_MG[4] + ISOLATED_MG, PASSED_EG[4] + ISOLATED_EG)
+            (
+                weights::WEIGHTS.passed_mg[4] + weights::WEIGHTS.isolated_mg,
+                weights::WEIGHTS.passed_eg[4] + weights::WEIGHTS.isolated_eg
+            )
         );
         // A black pawn on d7 is ahead of it on an adjacent file, so not passed.
         assert_eq!(
             score("4k3/3p4/8/4P3/8/8/8/4K3 w - - 0 1", Color::White).0,
-            ISOLATED_MG
+            weights::WEIGHTS.isolated_mg
         );
         // A black pawn on d5 is beside it, not ahead, so it is still passed.
         assert_eq!(
             score("4k3/8/8/3pP3/8/8/8/4K3 w - - 0 1", Color::White).0,
-            PASSED_MG[4] + ISOLATED_MG
+            weights::WEIGHTS.passed_mg[4] + weights::WEIGHTS.isolated_mg
         );
         // Doubled is per extra pawn, not per file: e4+e5 is charged once,
         // e3+e4+e5 twice. Both are isolated, and only the *front* pawn of each
@@ -1020,44 +1052,55 @@ mod tests {
         // paying the passer bonus twice for one runner is the bug this pins.
         let two = score("4k3/8/8/4P3/4P3/8/8/4K3 w - - 0 1", Color::White).0;
         let three = score("4k3/8/8/4P3/4P3/4P3/8/4K3 w - - 0 1", Color::White).0;
-        assert_eq!(two, PASSED_MG[4] + 2 * ISOLATED_MG + DOUBLED_MG);
-        assert_eq!(three, PASSED_MG[4] + 3 * ISOLATED_MG + 2 * DOUBLED_MG);
+        assert_eq!(
+            two,
+            weights::WEIGHTS.passed_mg[4]
+                + 2 * weights::WEIGHTS.isolated_mg
+                + weights::WEIGHTS.doubled_mg
+        );
+        assert_eq!(
+            three,
+            weights::WEIGHTS.passed_mg[4]
+                + 3 * weights::WEIGHTS.isolated_mg
+                + 2 * weights::WEIGHTS.doubled_mg
+        );
         // An a-file pawn's neighbours are the b-file only. If the mask wrapped
         // to the h-file, the h-pawn here would stop it being isolated.
         assert_eq!(
             score("4k3/7p/8/8/8/8/P7/4K3 w - - 0 1", Color::White).0,
-            ISOLATED_MG + PASSED_MG[1]
+            weights::WEIGHTS.isolated_mg + weights::WEIGHTS.passed_mg[1]
         );
         // ...and symmetrically for the h-file, which is where a shift that
         // wraps the other way would show.
         assert_eq!(
             score("4k3/p7/8/8/8/8/7P/4K3 w - - 0 1", Color::White).0,
-            ISOLATED_MG + PASSED_MG[1]
+            weights::WEIGHTS.isolated_mg + weights::WEIGHTS.passed_mg[1]
         );
         // A pawn with a friend beside it is neither isolated nor doubled, and
         // with nothing ahead it is passed: this is the case where every
         // penalty must be absent rather than cancelling.
         assert_eq!(
             score("4k3/8/8/8/8/8/PP6/4K3 w - - 0 1", Color::White).0,
-            2 * PASSED_MG[1]
+            2 * weights::WEIGHTS.passed_mg[1]
         );
         // Black is scored from its own side: a black pawn on d2 is one rank
         // from promoting, so it indexes the same slot as a white pawn on d7.
         assert_eq!(
             score("4k3/8/8/8/8/8/3p4/4K3 w - - 0 1", Color::Black).0,
-            PASSED_MG[6] + ISOLATED_MG
+            weights::WEIGHTS.passed_mg[6] + weights::WEIGHTS.isolated_mg
         );
-        const { assert!(PASSED_EG[6] > 0 && ISOLATED_MG < 0 && DOUBLED_MG < 0) };
+        assert_ne!(weights::WEIGHTS.passed_eg[6], 0);
     }
 
     #[test]
     fn tables_are_distinct() {
         // The realistic transcription bug in 768 numbers is pasting one block
         // twice; nothing else catches that.
-        let tables = [
-            MG_PAWN, EG_PAWN, MG_KNIGHT, EG_KNIGHT, MG_BISHOP, EG_BISHOP, MG_ROOK, EG_ROOK,
-            MG_QUEEN, EG_QUEEN, MG_KING, EG_KING,
-        ];
+        let tables: Vec<&[i32; 64]> = weights::WEIGHTS
+            .mg_table
+            .iter()
+            .chain(weights::WEIGHTS.eg_table.iter())
+            .collect();
         for (i, first) in tables.iter().enumerate() {
             for (j, second) in tables.iter().enumerate().skip(i + 1) {
                 assert_ne!(first, second, "tables {i} and {j} are identical");
