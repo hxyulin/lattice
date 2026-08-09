@@ -1,6 +1,5 @@
 //! Iterative-deepening negamax search.
 
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -69,10 +68,168 @@ const ASPIRATION_MIN_DEPTH: u32 = 4;
 const IIR_MIN_DEPTH: u32 = 4;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_INDEX: usize = 4;
-/// Scale on the `ln(depth) * ln(move number)` reduction, and the constant
-/// subtracted from it. See [`LMR_TABLE`].
+/// Scale on the `ln(depth) * ln(move number)` reduction, and its base constant.
+/// See [`build_lmr_table`].
 const LMR_SCALE: f64 = 0.40;
 const LMR_BASE: f64 = 0.10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchOptionKey {
+    RfpMargin,
+    AspirationDelta,
+    AspirationMinDepth,
+    IirMinDepth,
+    LmrMinDepth,
+    LmrMinMoves,
+    LmrScale,
+    LmrBase,
+}
+
+/// One bounded integer UCI option exposed for search tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UciSpinOption {
+    /// Stable UCI option name used by tuning manifests.
+    pub name: &'static str,
+    /// Engine default.
+    pub default: i32,
+    /// Inclusive lower bound.
+    pub min: i32,
+    /// Inclusive upper bound.
+    pub max: i32,
+    key: SearchOptionKey,
+}
+
+/// Search parameters supported by Nyquist's bounded integer SPSA contract.
+pub const UCI_SPIN_OPTIONS: [UciSpinOption; 8] = [
+    UciSpinOption {
+        name: "RfpMargin",
+        default: RFP_MARGIN,
+        min: 100,
+        max: 600,
+        key: SearchOptionKey::RfpMargin,
+    },
+    UciSpinOption {
+        name: "AspirationDelta",
+        default: ASPIRATION_DELTA,
+        min: 10,
+        max: 150,
+        key: SearchOptionKey::AspirationDelta,
+    },
+    UciSpinOption {
+        name: "AspirationMinDepth",
+        default: ASPIRATION_MIN_DEPTH as i32,
+        min: 2,
+        max: 8,
+        key: SearchOptionKey::AspirationMinDepth,
+    },
+    UciSpinOption {
+        name: "IirMinDepth",
+        default: IIR_MIN_DEPTH as i32,
+        min: 2,
+        max: 8,
+        key: SearchOptionKey::IirMinDepth,
+    },
+    UciSpinOption {
+        name: "LmrMinDepth",
+        default: LMR_MIN_DEPTH as i32,
+        min: 2,
+        max: 8,
+        key: SearchOptionKey::LmrMinDepth,
+    },
+    UciSpinOption {
+        name: "LmrMinMoves",
+        default: LMR_MIN_INDEX as i32,
+        min: 2,
+        max: 16,
+        key: SearchOptionKey::LmrMinMoves,
+    },
+    UciSpinOption {
+        name: "LmrScale",
+        default: (LMR_SCALE * 100.0) as i32,
+        min: 10,
+        max: 100,
+        key: SearchOptionKey::LmrScale,
+    },
+    UciSpinOption {
+        name: "LmrBase",
+        default: (LMR_BASE * 100.0) as i32,
+        min: -50,
+        max: 100,
+        key: SearchOptionKey::LmrBase,
+    },
+];
+
+/// Immutable parameters and derived tables used by one search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOptions {
+    rfp_margin: i32,
+    aspiration_delta: i32,
+    aspiration_min_depth: u32,
+    iir_min_depth: u32,
+    lmr_min_depth: u32,
+    lmr_min_moves: usize,
+    lmr_scale: i32,
+    lmr_base: i32,
+    lmr_table: Box<[[u8; 64]; 64]>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        let lmr_scale = (LMR_SCALE * 100.0) as i32;
+        let lmr_base = (LMR_BASE * 100.0) as i32;
+        Self {
+            rfp_margin: RFP_MARGIN,
+            aspiration_delta: ASPIRATION_DELTA,
+            aspiration_min_depth: ASPIRATION_MIN_DEPTH,
+            iir_min_depth: IIR_MIN_DEPTH,
+            lmr_min_depth: LMR_MIN_DEPTH,
+            lmr_min_moves: LMR_MIN_INDEX,
+            lmr_scale,
+            lmr_base,
+            lmr_table: Box::new(build_lmr_table(lmr_scale, lmr_base)),
+        }
+    }
+}
+
+impl SearchOptions {
+    /// Applies a named UCI spin value. `Ok(false)` means the name is unknown.
+    pub fn set_spin(&mut self, name: &str, value: &str) -> Result<bool, String> {
+        let Some(spec) = UCI_SPIN_OPTIONS
+            .iter()
+            .find(|spec| spec.name.eq_ignore_ascii_case(name.trim()))
+        else {
+            return Ok(false);
+        };
+        let value: i32 = value
+            .trim()
+            .parse()
+            .map_err(|_| format!("{} requires an integer value", spec.name))?;
+        if !(spec.min..=spec.max).contains(&value) {
+            return Err(format!(
+                "{} value {value} is outside [{}, {}]",
+                spec.name, spec.min, spec.max
+            ));
+        }
+        match spec.key {
+            SearchOptionKey::RfpMargin => self.rfp_margin = value,
+            SearchOptionKey::AspirationDelta => self.aspiration_delta = value,
+            SearchOptionKey::AspirationMinDepth => self.aspiration_min_depth = value as u32,
+            SearchOptionKey::IirMinDepth => self.iir_min_depth = value as u32,
+            SearchOptionKey::LmrMinDepth => self.lmr_min_depth = value as u32,
+            SearchOptionKey::LmrMinMoves => self.lmr_min_moves = value as usize,
+            SearchOptionKey::LmrScale => self.lmr_scale = value,
+            SearchOptionKey::LmrBase => self.lmr_base = value,
+        }
+        if matches!(
+            spec.key,
+            SearchOptionKey::LmrScale | SearchOptionKey::LmrBase
+        ) {
+            *self.lmr_table = build_lmr_table(self.lmr_scale, self.lmr_base);
+        }
+        Ok(true)
+    }
+}
+
 /// Reduction depth by `[depth][move number]`, both clamped to the table.
 ///
 /// A flat reduction is the wrong shape: it says a late move at depth 4 and a
@@ -84,16 +241,17 @@ const LMR_BASE: f64 = 0.10;
 /// Logarithms because both terms have diminishing returns: the 30th move is
 /// barely less promising than the 20th, while the 5th is much less promising
 /// than the 3rd. Tabulated at startup so the search does no float work.
-static LMR_TABLE: LazyLock<[[u8; 64]; 64]> = LazyLock::new(|| {
+fn build_lmr_table(scale: i32, base: i32) -> [[u8; 64]; 64] {
     let mut table = [[0u8; 64]; 64];
     for (depth, row) in table.iter_mut().enumerate().skip(1) {
         for (index, slot) in row.iter_mut().enumerate().skip(1) {
-            let reduction = LMR_BASE + (depth as f64).ln() * (index as f64).ln() * LMR_SCALE;
+            let reduction = f64::from(base) / 100.0
+                + (depth as f64).ln() * (index as f64).ln() * f64::from(scale) / 100.0;
             *slot = reduction.max(0.0) as u8;
         }
     }
     table
-});
+}
 /// Killer ply ceiling. Search depth is bounded by the clock long before this;
 /// past it the killer slots are simply skipped.
 const MAX_PLY: usize = 64;
@@ -380,6 +538,7 @@ fn score_bound(score: i32, alpha: i32, beta: i32) -> Bound {
 }
 
 struct Ctx<'a> {
+    options: SearchOptions,
     limits: Limits,
     stop: &'a AtomicBool,
     deadline: Option<Instant>,
@@ -430,7 +589,19 @@ pub fn search(
     tt: &TranspositionTable,
     listener: &mut dyn SearchListener,
 ) -> Option<Move> {
-    search_inner(board, limits, stop, tt, listener).best_move
+    search_with_options(board, limits, stop, tt, &SearchOptions::default(), listener)
+}
+
+/// Searches with an explicit immutable parameter snapshot.
+pub fn search_with_options(
+    board: &mut Board,
+    limits: Limits,
+    stop: &AtomicBool,
+    tt: &TranspositionTable,
+    options: &SearchOptions,
+    listener: &mut dyn SearchListener,
+) -> Option<Move> {
+    search_inner_with_options(board, limits, stop, tt, options, listener).best_move
 }
 
 pub(crate) fn search_inner(
@@ -440,11 +611,23 @@ pub(crate) fn search_inner(
     tt: &TranspositionTable,
     listener: &mut dyn SearchListener,
 ) -> SearchResult {
+    search_inner_with_options(board, limits, stop, tt, &SearchOptions::default(), listener)
+}
+
+fn search_inner_with_options(
+    board: &mut Board,
+    limits: Limits,
+    stop: &AtomicBool,
+    tt: &TranspositionTable,
+    options: &SearchOptions,
+    listener: &mut dyn SearchListener,
+) -> SearchResult {
     let start = Instant::now();
     let deadline =
         time_budget(board, limits).and_then(|ms| start.checked_add(Duration::from_millis(ms)));
     tt.new_search();
     let mut ctx = Ctx {
+        options: options.clone(),
         limits,
         stop,
         deadline,
@@ -554,12 +737,14 @@ fn aspirate(
     ctx: &mut Ctx<'_>,
 ) -> Result<(Option<Move>, i32), Aborted> {
     let narrow = prev_score.filter(|score| {
-        ctx.aspiration_enabled() && depth >= ASPIRATION_MIN_DEPTH && score.abs() <= MATE_BOUND
+        ctx.aspiration_enabled()
+            && depth >= ctx.options.aspiration_min_depth
+            && score.abs() <= MATE_BOUND
     });
     if let Some(score) = narrow {
         let (alpha, beta) = (
-            score.saturating_sub(ASPIRATION_DELTA),
-            score.saturating_add(ASPIRATION_DELTA),
+            score.saturating_sub(ctx.options.aspiration_delta),
+            score.saturating_add(ctx.options.aspiration_delta),
         );
         let (best_move, score) = negamax_root(board, depth, alpha, beta, ctx)?;
         // Strictly inside: a score sitting on either bound was only proved to
@@ -677,7 +862,7 @@ fn search_move(
             }
             let reduced = -negamax(
                 board,
-                depth.saturating_sub(1 + lmr_reduction(depth, index)),
+                depth.saturating_sub(1 + lmr_reduction_with_options(depth, index, &ctx.options)),
                 child_ply,
                 -alpha - 1,
                 -alpha,
@@ -795,7 +980,7 @@ fn negamax(
         // A mate bound is not a material claim, so a margin in centipawns
         // cannot say anything about the distance to it.
         && beta.abs() <= MATE_BOUND
-        && static_eval - RFP_MARGIN * depth as i32 >= beta
+        && static_eval - ctx.options.rfp_margin * depth as i32 >= beta
         && !is_attacked(board, board.king_square(us), us.flip())
     {
         #[cfg(feature = "profiling")]
@@ -854,7 +1039,7 @@ fn negamax(
     //
     // The engine's table is 71.5% empty over the bench, so this is not a rare
     // path: it is most of the frontier.
-    let depth = if ctx.iir_enabled() && tt_move.is_none() && depth >= IIR_MIN_DEPTH {
+    let depth = if ctx.iir_enabled() && tt_move.is_none() && depth >= ctx.options.iir_min_depth {
         depth - 1
     } else {
         depth
@@ -1002,9 +1187,14 @@ fn negamax(
 /// rather than something the search relies on today. It is kept, unlike the
 /// depth ceiling a flat reduction would need, because raising the scale is an
 /// expected next step and the failure it prevents is silent.
-fn lmr_reduction(depth: u32, index: usize) -> u32 {
-    let reduction = u32::from(LMR_TABLE[(depth as usize).min(63)][index.min(63)]);
+fn lmr_reduction_with_options(depth: u32, index: usize, options: &SearchOptions) -> u32 {
+    let reduction = u32::from(options.lmr_table[(depth as usize).min(63)][index.min(63)]);
     reduction.clamp(1, depth.saturating_sub(2).max(1))
+}
+
+#[cfg(test)]
+fn lmr_reduction(depth: u32, index: usize) -> u32 {
+    lmr_reduction_with_options(depth, index, &SearchOptions::default())
 }
 
 fn lmr_eligible(
@@ -1015,8 +1205,8 @@ fn lmr_eligible(
     gives_check: bool,
     ctx: &Ctx<'_>,
 ) -> bool {
-    depth >= LMR_MIN_DEPTH
-        && legal >= LMR_MIN_INDEX
+    depth >= ctx.options.lmr_min_depth
+        && legal >= ctx.options.lmr_min_moves
         && !mv.is_capture()
         && !mv.is_promotion()
         && !gives_check
@@ -1585,6 +1775,42 @@ mod tests {
     use crate::movegen::{MoveList, generate_legal};
     use crate::uci::{UciListener, move_text};
 
+    #[test]
+    fn every_advertised_spin_accepts_its_bounds_and_rejects_values_outside_them() {
+        for spec in UCI_SPIN_OPTIONS {
+            let mut options = SearchOptions::default();
+            assert_eq!(options.set_spin(spec.name, &spec.min.to_string()), Ok(true));
+            assert_eq!(options.set_spin(spec.name, &spec.max.to_string()), Ok(true));
+            let at_max = options.clone();
+            assert!(
+                options
+                    .set_spin(spec.name, &(spec.max + 1).to_string())
+                    .is_err()
+            );
+            assert_eq!(options, at_max, "invalid {} changed the value", spec.name);
+        }
+    }
+
+    #[test]
+    fn spin_names_are_case_insensitive_and_unknown_names_are_not_claimed() {
+        let mut options = SearchOptions::default();
+        assert_eq!(options.set_spin("lmrscale", "55"), Ok(true));
+        assert_eq!(options.lmr_scale, 55);
+        assert_eq!(options.set_spin("NotALatticeOption", "1"), Ok(false));
+    }
+
+    #[test]
+    fn lmr_coefficient_changes_rebuild_the_reduction_table() {
+        let mut options = SearchOptions::default();
+        let before = options.lmr_table.clone();
+        options.set_spin("LmrScale", "100").unwrap();
+        assert_ne!(options.lmr_table, before);
+        assert!(
+            options.lmr_table[32][32] > before[32][32],
+            "a larger scale did not increase a representative reduction"
+        );
+    }
+
     fn run(fen: &str, depth: u32) -> (SearchResult, String) {
         let mut board: Board = fen.parse().unwrap();
         let mut listener = UciListener::new(Vec::new());
@@ -1607,6 +1833,7 @@ mod tests {
         let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
         let tt: &'static TranspositionTable = Box::leak(Box::new(TranspositionTable::new()));
         Ctx {
+            options: SearchOptions::default(),
             limits: Limits::default(),
             stop,
             deadline: None,

@@ -67,6 +67,40 @@ fn handshake_answers_uciok_and_readyok() {
     assert!(uciok < readyok, "uciok must precede readyok");
 }
 
+/// Nyquist's strict tune preflight requires every manifest coordinate to be a
+/// uniquely advertised, bounded integer spin option.
+#[test]
+fn handshake_advertises_the_complete_spsa_spin_contract() {
+    let text = stdout("uci\nquit\n");
+    for option in lattice::search::UCI_SPIN_OPTIONS {
+        let expected = format!(
+            "option name {} type spin default {} min {} max {}",
+            option.name, option.default, option.min, option.max
+        );
+        assert_eq!(
+            text.lines().filter(|line| *line == expected).count(),
+            1,
+            "missing or duplicated {expected:?} in {text:?}"
+        );
+    }
+}
+
+#[test]
+fn invalid_spsa_values_are_reported_without_ending_the_session() {
+    let text = stdout(concat!(
+        "uci\n",
+        "setoption name RfpMargin value 601\n",
+        "isready\n",
+        "quit\n",
+    ));
+    assert!(
+        text.lines()
+            .any(|line| line == "info string ignored RfpMargin value 601 is outside [100, 600]"),
+        "invalid value was silently accepted: {text:?}"
+    );
+    assert!(text.lines().any(|line| line == "readyok"));
+}
+
 /// catches: a search producing no `bestmove`, producing one that is not legal
 /// in the position it was given, and `position` being ignored so the engine
 /// searches the start position instead. Legality is checked by replaying the

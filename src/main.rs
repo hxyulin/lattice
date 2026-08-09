@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use lattice::Board;
 use lattice::bench;
 use lattice::movegen::perft::perft_divide;
-use lattice::search::search;
+use lattice::search::{SearchOptions, UCI_SPIN_OPTIONS, search_with_options};
 use lattice::tactics;
 use lattice::tt::TranspositionTable;
 use lattice::uci::{Command, UciListener, move_text, parse};
@@ -32,6 +32,7 @@ fn main() {
     // Outlives each `go` so one move's tree seeds the next.
     let mut tt = Arc::new(TranspositionTable::new());
     let default_hash_mb = tt.size_mb();
+    let mut search_options = SearchOptions::default();
     let mut search_thread: Option<JoinHandle<()>> = None;
     for line in stdin.lock().lines().map_while(Result::ok) {
         reap_finished(&mut search_thread);
@@ -44,10 +45,21 @@ fn main() {
                 // Off the clock: building these lazily inside the first search
                 // charges roughly 150ms to that move. The handshake has seconds.
                 lattice::movegen::init();
+                let tuning_options = UCI_SPIN_OPTIONS
+                    .iter()
+                    .map(|option| {
+                        format!(
+                            "option name {} type spin default {} min {} max {}",
+                            option.name, option.default, option.min, option.max
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 write_protocol(&format!(
                     "id name Lattice\nid author hxyulin\n\
                      option name Hash type spin default {default_hash_mb} min 1 max 4096\n\
                      option name Threads type spin default 1 min 1 max 1\n\
+                     {tuning_options}\n\
                      uciok"
                 ));
             }
@@ -64,14 +76,16 @@ fn main() {
                 let mut search_board = board.clone();
                 let search_stop = Arc::clone(&stop);
                 let search_tt = Arc::clone(&tt);
+                let search_options = search_options.clone();
                 search_thread = Some(thread::spawn(move || {
                     let stdout = io::stdout();
                     let mut listener = UciListener::new(stdout.lock());
-                    search(
+                    search_with_options(
                         &mut search_board,
                         limits,
                         &search_stop,
                         &search_tt,
+                        &search_options,
                         &mut listener,
                     );
                     let _ = io::stdout().flush();
@@ -107,18 +121,29 @@ fn main() {
                 // Replacing the Arc under a running search would leave that
                 // search on the old table; UCI only sends options when idle.
                 "hash" if search_thread.is_none() => {
-                    if let Some(mb) = value.and_then(|v| v.trim().parse::<usize>().ok()) {
+                    if let Some(mb) = value
+                        .as_deref()
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                    {
                         tt = Arc::new(TranspositionTable::with_size_mb(mb.clamp(1, 4096)));
                     }
                 }
                 "threads"
                     if value
+                        .as_deref()
                         .and_then(|v| v.trim().parse::<usize>().ok())
                         .is_some_and(|n| n > 1) =>
                 {
                     write_protocol(
                         "info string Threads > 1 is not supported; searching with 1 thread",
                     );
+                }
+                _ if search_thread.is_none() => {
+                    match search_options.set_spin(&name, value.as_deref().unwrap_or("")) {
+                        Ok(true) => tt.clear(),
+                        Ok(false) => {}
+                        Err(error) => write_protocol(&format!("info string ignored {error}")),
+                    }
                 }
                 _ => {}
             },
