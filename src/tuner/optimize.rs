@@ -25,6 +25,10 @@ pub struct TuneConfig {
     pub validation_fraction: f64,
     /// Validation checks without improvement before early stopping.
     pub patience: usize,
+    /// Strength of the mean squared displacement penalty around baseline.
+    pub regularization: f64,
+    /// Per-parameter trust-region radius in centipawns.
+    pub max_delta: f64,
     /// Stable partition seed.
     pub seed: u64,
     /// Worker threads used for loss and gradient accumulation.
@@ -103,6 +107,7 @@ pub fn run(config: &TuneConfig) -> Result<TuneSummary, TuneError> {
     let mut second_moment = [0.0; PARAMETER_COUNT];
     let mut best_parameters = parameters;
     let mut best_validation = baseline_validation;
+    let mut best_objective = baseline_validation;
     let mut best_epoch = 0usize;
     let mut stale = 0usize;
     let unsupported: std::collections::HashSet<_> = dataset
@@ -121,13 +126,16 @@ pub fn run(config: &TuneConfig) -> Result<TuneSummary, TuneError> {
             if unsupported.contains(&index) {
                 continue;
             }
-            let gradient = accumulation.gradient[index] / dataset.train.total_weight as f64;
+            let gradient = accumulation.gradient[index] / dataset.train.total_weight as f64
+                + regularization_gradient(config, parameters[index], baseline[index]);
             first_moment[index] = 0.9 * first_moment[index] + 0.1 * gradient;
             second_moment[index] = 0.999 * second_moment[index] + 0.001 * gradient * gradient;
             let corrected_first = first_moment[index] / (1.0 - beta1_power);
             let corrected_second = second_moment[index] / (1.0 - beta2_power);
             parameters[index] -=
                 config.learning_rate * corrected_first / (corrected_second.sqrt() + 1.0e-8);
+            parameters[index] =
+                project_parameter(index, parameters[index], baseline[index], config.max_delta);
             if !parameters[index].is_finite() {
                 return Err(TuneError(format!(
                     "parameter {index} became non-finite at epoch {epoch}"
@@ -136,12 +144,15 @@ pub fn run(config: &TuneConfig) -> Result<TuneSummary, TuneError> {
         }
 
         let validation_loss = loss(&dataset.validation, &parameters, k, config.threads);
+        let validation_objective =
+            validation_loss + regularization_penalty(config, &parameters, &baseline);
         if !validation_loss.is_finite() || !train_loss_before_update.is_finite() {
             return Err(TuneError(format!("non-finite loss at epoch {epoch}")));
         }
-        let improved = validation_loss + 1.0e-12 < best_validation;
+        let improved = validation_objective + 1.0e-12 < best_objective;
         if improved {
             best_validation = validation_loss;
+            best_objective = validation_objective;
             best_parameters = parameters;
             best_epoch = epoch;
             stale = 0;
@@ -150,7 +161,7 @@ pub fn run(config: &TuneConfig) -> Result<TuneSummary, TuneError> {
         }
         if epoch == 1 || epoch % 5 == 0 || improved && epoch <= 10 {
             eprintln!(
-                "tune: epoch {epoch:>3} train(pre)={train_loss_before_update:.10} validation={validation_loss:.10} best={best_validation:.10}"
+                "tune: epoch {epoch:>3} train(pre)={train_loss_before_update:.10} validation={validation_loss:.10} objective={validation_objective:.10} best={best_validation:.10}"
             );
         }
         if stale >= config.patience {
@@ -175,6 +186,9 @@ pub fn run(config: &TuneConfig) -> Result<TuneSummary, TuneError> {
         std::array::from_fn(|index| f64::from(rounded[index]));
     let rounded_train = loss(&dataset.train, &rounded_f64, k, config.threads);
     let rounded_validation = loss(&dataset.validation, &rounded_f64, k, config.threads);
+    let continuous_drift = drift_stats(&best_parameters, &baseline, config.max_delta);
+    let rounded_drift = drift_stats(&rounded_f64, &baseline, config.max_delta);
+    validate_boundary_pressure(&rounded_drift)?;
     if rounded_validation > best_validation * 1.001 {
         return Err(TuneError(format!(
             "integer rounding regressed validation loss by more than 0.1% ({best_validation:.10} -> {rounded_validation:.10})"
@@ -196,8 +210,11 @@ pub fn run(config: &TuneConfig) -> Result<TuneSummary, TuneError> {
         best_epoch,
         best_train,
         best_validation,
+        best_objective,
+        continuous_drift,
         rounded_train,
         rounded_validation,
+        rounded_drift,
         elapsed.as_secs_f64(),
     );
     write_artifacts(&config.output, &rounded, &report)
@@ -231,8 +248,91 @@ fn validate_config(config: &TuneConfig) -> Result<(), TuneError> {
     if config.patience == 0 {
         return Err(TuneError("patience must be greater than zero".to_owned()));
     }
+    if !(config.regularization.is_finite() && config.regularization >= 0.0) {
+        return Err(TuneError(
+            "regularization must be finite and non-negative".to_owned(),
+        ));
+    }
+    if !(config.max_delta.is_finite() && config.max_delta > 0.0) {
+        return Err(TuneError(
+            "max delta must be finite and positive".to_owned(),
+        ));
+    }
     if config.threads == 0 {
         return Err(TuneError("threads must be greater than zero".to_owned()));
+    }
+    Ok(())
+}
+
+fn regularization_penalty(
+    config: &TuneConfig,
+    parameters: &[f64; PARAMETER_COUNT],
+    baseline: &[f64; PARAMETER_COUNT],
+) -> f64 {
+    let squared = parameters
+        .iter()
+        .zip(baseline)
+        .map(|(parameter, baseline)| ((parameter - baseline) / config.max_delta).powi(2))
+        .sum::<f64>();
+    config.regularization * squared / PARAMETER_COUNT as f64
+}
+
+fn regularization_gradient(config: &TuneConfig, parameter: f64, baseline: f64) -> f64 {
+    2.0 * config.regularization * (parameter - baseline)
+        / (PARAMETER_COUNT as f64 * config.max_delta.powi(2))
+}
+
+fn project_parameter(index: usize, parameter: f64, baseline: f64, max_delta: f64) -> f64 {
+    let mut projected = parameter.clamp(baseline - max_delta, baseline + max_delta);
+    projected = match index {
+        // Mobility, rook-file and passed-pawn bonuses must remain bonuses.
+        768..=793 => projected.max(0.0),
+        // Isolated and doubled pawn terms must remain penalties.
+        794..=797 => projected.min(0.0),
+        // A side-to-move bonus must not become a penalty.
+        798 => projected.max(0.0),
+        _ => projected,
+    };
+    projected
+}
+
+#[derive(Debug, Clone)]
+struct DriftStats {
+    rms: f64,
+    max: f64,
+    at_limit: Vec<usize>,
+}
+
+fn drift_stats(
+    parameters: &[f64; PARAMETER_COUNT],
+    baseline: &[f64; PARAMETER_COUNT],
+    max_delta: f64,
+) -> DriftStats {
+    let mut squared = 0.0;
+    let mut max: f64 = 0.0;
+    let mut at_limit = Vec::new();
+    for (index, (&parameter, &baseline)) in parameters.iter().zip(baseline).enumerate() {
+        let delta = (parameter - baseline).abs();
+        squared += delta * delta;
+        max = max.max(delta);
+        if delta >= max_delta - 1.0e-9 {
+            at_limit.push(index);
+        }
+    }
+    DriftStats {
+        rms: (squared / PARAMETER_COUNT as f64).sqrt(),
+        max,
+        at_limit,
+    }
+}
+
+fn validate_boundary_pressure(drift: &DriftStats) -> Result<(), TuneError> {
+    let boundary_budget = PARAMETER_COUNT.div_ceil(100);
+    if drift.at_limit.len() > boundary_budget {
+        return Err(TuneError(format!(
+            "{} parameters hit the trust-region boundary (budget {boundary_budget}); increase regularization rather than emitting a saturated fit",
+            drift.at_limit.len()
+        )));
     }
     Ok(())
 }
@@ -422,8 +522,11 @@ fn training_report(
     best_epoch: usize,
     best_train: f64,
     best_validation: f64,
+    best_objective: f64,
+    continuous_drift: DriftStats,
     rounded_train: f64,
     rounded_validation: f64,
+    rounded_drift: DriftStats,
     elapsed_seconds: f64,
 ) -> String {
     let shards = config
@@ -442,13 +545,17 @@ fn training_report(
          sparse_feature_entries: {}\nunsupported_parameters: {:?}\nmax_baseline_parity_error_cp: {:.9}\n\
          seed: {}\nvalidation_fraction: {}\nthreads: {}\n\
          max_epochs: {}\nlearning_rate: {}\npatience: {}\n\
+         regularization: {}\nmax_delta_cp: {}\nsemantic_constraints: nonnegative bonuses, nonpositive pawn penalties\n\
          logistic_k: {k:.12}\nbest_epoch: {best_epoch}\n\
          baseline_train_loss: {baseline_train:.12}\n\
          baseline_validation_loss: {baseline_validation:.12}\n\
          best_continuous_train_loss: {best_train:.12}\n\
          best_continuous_validation_loss: {best_validation:.12}\n\
+         best_regularized_validation_objective: {best_objective:.12}\n\
+         continuous_drift_rms_cp: {:.6}\ncontinuous_drift_max_cp: {:.6}\ncontinuous_parameters_at_limit: {:?}\n\
          rounded_train_loss: {rounded_train:.12}\n\
          rounded_validation_loss: {rounded_validation:.12}\n\
+         rounded_drift_rms_cp: {:.6}\nrounded_drift_max_cp: {:.6}\nrounded_parameters_at_limit: {:?}\n\
          elapsed_seconds: {elapsed_seconds:.3}\n",
         stats.bytes,
         stats.records,
@@ -470,6 +577,14 @@ fn training_report(
         config.epochs,
         config.learning_rate,
         config.patience,
+        config.regularization,
+        config.max_delta,
+        continuous_drift.rms,
+        continuous_drift.max,
+        continuous_drift.at_limit,
+        rounded_drift.rms,
+        rounded_drift.max,
+        rounded_drift.at_limit,
     )
 }
 
@@ -477,6 +592,21 @@ fn training_report(
 mod tests {
     use super::*;
     use crate::tuner::features::FeatureTerm;
+
+    fn regularized_config() -> TuneConfig {
+        TuneConfig {
+            shards: Vec::new(),
+            output: PathBuf::new(),
+            epochs: 10,
+            learning_rate: 1.0,
+            validation_fraction: 0.1,
+            patience: 5,
+            regularization: 0.01,
+            max_delta: 32.0,
+            seed: 1,
+            threads: 1,
+        }
+    }
 
     #[test]
     fn aggregate_loss_and_gradient_match_expanded_labels() {
@@ -563,5 +693,62 @@ mod tests {
         let many = accumulate(&partition, &parameters, 0.8, 4, true);
         assert_eq!(one.loss, many.loss);
         assert_eq!(one.gradient, many.gradient);
+    }
+
+    #[test]
+    fn baseline_centered_penalty_and_gradient_agree() {
+        let config = regularized_config();
+        let baseline = [10.0; PARAMETER_COUNT];
+        let mut parameters = baseline;
+        parameters[123] += 7.0;
+        assert!(regularization_penalty(&config, &parameters, &baseline) > 0.0);
+        assert_eq!(regularization_penalty(&config, &baseline, &baseline), 0.0);
+
+        let epsilon = 1.0e-4;
+        parameters[123] += epsilon;
+        let plus = regularization_penalty(&config, &parameters, &baseline);
+        parameters[123] -= 2.0 * epsilon;
+        let minus = regularization_penalty(&config, &parameters, &baseline);
+        parameters[123] += epsilon;
+        let numeric = (plus - minus) / (2.0 * epsilon);
+        let analytic = regularization_gradient(&config, parameters[123], baseline[123]);
+        assert!((analytic - numeric).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn projection_enforces_trust_region_and_semantic_signs() {
+        assert_eq!(project_parameter(10, 200.0, 100.0, 32.0), 132.0);
+        assert_eq!(project_parameter(10, 0.0, 100.0, 32.0), 68.0);
+        assert_eq!(project_parameter(768, -5.0, 4.0, 32.0), 0.0);
+        assert_eq!(project_parameter(776, -8.0, 20.0, 32.0), 0.0);
+        assert_eq!(project_parameter(780, -3.0, 0.0, 32.0), 0.0);
+        assert_eq!(project_parameter(794, 5.0, -10.0, 32.0), 0.0);
+        assert_eq!(project_parameter(798, -2.0, 12.0, 32.0), 0.0);
+    }
+
+    #[test]
+    fn drift_stats_report_boundary_pressure() {
+        let baseline = [0.0; PARAMETER_COUNT];
+        let mut parameters = baseline;
+        parameters[0] = 32.0;
+        parameters[1] = -16.0;
+        let drift = drift_stats(&parameters, &baseline, 32.0);
+        assert_eq!(drift.max, 32.0);
+        assert_eq!(drift.at_limit, vec![0]);
+        assert!((drift.rms - (1280.0 / PARAMETER_COUNT as f64).sqrt()).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn saturated_fit_is_rejected() {
+        let baseline = [0.0; PARAMETER_COUNT];
+        let mut parameters = baseline;
+        for parameter in parameters
+            .iter_mut()
+            .take(PARAMETER_COUNT.div_ceil(100) + 1)
+        {
+            *parameter = 32.0;
+        }
+        let drift = drift_stats(&parameters, &baseline, 32.0);
+        assert!(validate_boundary_pressure(&drift).is_err());
     }
 }

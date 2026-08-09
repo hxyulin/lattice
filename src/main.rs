@@ -136,7 +136,7 @@ fn run_tune(args: &[String]) -> i32 {
         eprintln!(
             "usage: lattice tune SHARD... --output DIR [--epochs N] \
              [--learning-rate X] [--validation X] [--patience N] \
-             [--seed N] [--threads N]"
+             [--regularization X] [--max-delta CP] [--seed N] [--threads N]"
         );
         return 0;
     }
@@ -146,6 +146,8 @@ fn run_tune(args: &[String]) -> i32 {
     let mut learning_rate = 1.0f64;
     let mut validation_fraction = 0.10f64;
     let mut patience = 15usize;
+    let mut regularization = 0.01f64;
+    let mut max_delta = 32.0f64;
     let mut seed = 1u64;
     let mut threads = std::thread::available_parallelism().map_or(1, usize::from);
     let mut index = 0;
@@ -178,6 +180,16 @@ fn run_tune(args: &[String]) -> i32 {
                 v.parse()
                     .map(|n| patience = n)
                     .map_err(|_| format!("tune: invalid patience `{v}`"))
+            }),
+            "--regularization" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| regularization = n)
+                    .map_err(|_| format!("tune: invalid regularization `{v}`"))
+            }),
+            "--max-delta" => value(arg, &mut index).and_then(|v| {
+                v.parse()
+                    .map(|n| max_delta = n)
+                    .map_err(|_| format!("tune: invalid max delta `{v}`"))
             }),
             "--seed" => value(arg, &mut index).and_then(|v| {
                 v.parse()
@@ -212,6 +224,8 @@ fn run_tune(args: &[String]) -> i32 {
         learning_rate,
         validation_fraction,
         patience,
+        regularization,
+        max_delta,
         seed,
         threads,
     };
