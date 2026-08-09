@@ -58,7 +58,7 @@ fn main() {
                 // may reach by another path; carrying them over is wrong.
                 tt.clear();
             }
-            Command::Position(position) => board = position,
+            Command::Position(position) => board = *position,
             Command::Go(limits) if search_thread.is_none() => {
                 stop.store(false, Ordering::Relaxed);
                 let mut search_board = board.clone();

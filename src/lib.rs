@@ -8,6 +8,8 @@ pub mod board;
 pub mod eval;
 /// Chess attack and move generation.
 pub mod movegen;
+/// Efficiently updatable neural evaluation primitives.
+pub mod nnue;
 /// Position search and time management.
 pub mod search;
 /// Tactical test-suite runner.

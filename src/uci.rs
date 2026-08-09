@@ -16,7 +16,7 @@ pub enum Command {
     /// Reset state for a new game.
     NewGame,
     /// Replace the current position.
-    Position(Board),
+    Position(Box<Board>),
     /// Start a search.
     Go(Limits),
     /// Stop the active search.
@@ -43,7 +43,9 @@ pub fn parse(line: &str) -> Option<Command> {
         "uci" => Some(Command::Uci),
         "isready" => Some(Command::IsReady),
         "ucinewgame" => Some(Command::NewGame),
-        "position" => parse_position(words.collect()).map(Command::Position),
+        "position" => parse_position(words.collect())
+            .map(Box::new)
+            .map(Command::Position),
         "go" => parse_go(words).map(Command::Go),
         "stop" => Some(Command::Stop),
         "quit" => Some(Command::Quit),

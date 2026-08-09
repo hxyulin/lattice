@@ -5,9 +5,11 @@ authors = ["hxyulin <hxyulin@proton.me>"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/hxyulin/lattice"
+build = "build.rs"
 
 [features]
 profiling = []
+nnue-eval = []
 
 [dependencies]
 nonmax = "0.5"

@@ -573,6 +573,7 @@ fn ahead_of(square: Square, color: Color) -> Bitboard {
 /// Material and piece placement are scored from separate midgame and endgame
 /// tables, interpolated by how much material remains, plus rook file control
 /// and `TEMPO` for the side to move.
+#[cfg(not(feature = "nnue-eval"))]
 pub fn evaluate(board: &Board) -> i32 {
     let Accumulator { mg, eg, phase } = *board.accumulator();
     let pawns = pawn_entry(board);
@@ -594,6 +595,12 @@ pub fn evaluate(board: &Board) -> i32 {
     // everywhere except across a null - `search` corrects it at that one
     // comparison rather than `evaluate` trying to detect a null it cannot see.
     score + TEMPO
+}
+
+/// Returns the neural static evaluation relative to the side to move.
+#[cfg(feature = "nnue-eval")]
+pub fn evaluate(board: &Board) -> i32 {
+    crate::nnue::evaluate(board)
 }
 
 #[cfg(test)]

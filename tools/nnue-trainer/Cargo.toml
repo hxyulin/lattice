@@ -1,0 +1,27 @@
+[package]
+name = "lattice-nnue-trainer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["metal"]
+cuda = ["bullet_lib/cuda"]
+metal = ["bullet_lib/metal"]
+rocm = ["bullet_lib/rocm"]
+
+[dependencies]
+bullet_lib = { git = "https://github.com/jw1912/bullet", rev = "cebc78a093d92cbc87e56cfef049184c225270b0", default-features = false }
+bulletformat = "=1.8.0"
+
+[[bin]]
+name = "lattice-nnue-trainer"
+path = "src/main.rs"
+
+[[bin]]
+name = "pack-network"
+path = "src/bin/pack_network.rs"
+
+[[bin]]
+name = "eval-network"
+path = "src/bin/eval_network.rs"

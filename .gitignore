@@ -1,4 +1,6 @@
 target/
+/tools/nnue-trainer/target/
+/tools/nnue-trainer/checkpoints/
 /.claude/*
 /.worktrees
 /docs/book

@@ -2,6 +2,7 @@ use super::{
     Bitboard, CastlingRights, Color, Move, MoveType, Piece, PieceType, Square, State, Undo,
 };
 use crate::eval::Accumulator;
+use crate::nnue::{Accumulator as NnueAccumulator, network as nnue_network};
 
 const CASTLE_MASK: [u8; 64] = castle_masks();
 const fn castle_masks() -> [u8; 64] {
@@ -61,6 +62,7 @@ pub struct Board {
     state: State,
     history: Vec<Undo>,
     accumulator: Accumulator,
+    nnue: NnueAccumulator,
 }
 
 impl Board {
@@ -85,10 +87,14 @@ impl Board {
             state,
             history: Vec::with_capacity(256),
             accumulator: Accumulator::default(),
+            nnue: NnueAccumulator::default(),
         }
     }
     pub(crate) fn accumulator(&self) -> &Accumulator {
         &self.accumulator
+    }
+    pub(crate) fn nnue_accumulator(&self) -> &NnueAccumulator {
+        &self.nnue
     }
     /// Returns the piece occupying a square.
     pub fn piece_on(&self, square: Square) -> Option<Piece> {
@@ -196,6 +202,7 @@ impl Board {
         }
         self.state.side_to_move = self.state.side_to_move.flip();
         self.state.zobrist ^= side_key();
+        self.refresh_dirty_nnue();
         self.debug_check();
     }
     /// Undoes the most recently applied move.
@@ -232,6 +239,7 @@ impl Board {
             self.add_piece(piece, square);
         }
         self.state = undo.state;
+        self.refresh_dirty_nnue();
         self.debug_check();
     }
     pub(crate) fn make_null(&mut self) {
@@ -264,6 +272,7 @@ impl Board {
             self.state.pawn_key ^= piece_key(piece, square);
         }
         self.accumulator.add(piece, square);
+        self.nnue.add_piece(piece, square, nnue_network());
     }
     fn remove_piece(&mut self, piece: Piece, square: Square) {
         self.mailbox[square.index() as usize] = None;
@@ -275,6 +284,7 @@ impl Board {
             self.state.pawn_key ^= piece_key(piece, square);
         }
         self.accumulator.remove(piece, square);
+        self.nnue.remove_piece(piece, square, nnue_network());
     }
     fn set_ep(&mut self, ep: Option<Square>) {
         if let Some(s) = self.state.ep {
@@ -288,7 +298,18 @@ impl Board {
     pub(crate) fn finish_setup(&mut self) {
         self.state.zobrist = self.recompute_zobrist();
         self.state.pawn_key = self.recompute_pawn_key();
+        self.refresh_all_nnue();
         self.debug_check();
+    }
+    fn refresh_all_nnue(&mut self) {
+        let mut nnue = core::mem::take(&mut self.nnue);
+        nnue.refresh_all(self, nnue_network());
+        self.nnue = nnue;
+    }
+    fn refresh_dirty_nnue(&mut self) {
+        let mut nnue = core::mem::take(&mut self.nnue);
+        nnue.refresh_dirty(self, nnue_network());
+        self.nnue = nnue;
     }
     fn recompute_zobrist(&self) -> u64 {
         let mut z = castle_key(self.state.castling);
@@ -338,6 +359,10 @@ impl Board {
         assert_eq!(self.state.zobrist, self.recompute_zobrist());
         assert_eq!(self.state.pawn_key, self.recompute_pawn_key());
         assert_eq!(self.accumulator, crate::eval::scan(self));
+        assert_eq!(
+            self.nnue,
+            crate::nnue::Accumulator::scanned(self, nnue_network())
+        );
     }
     #[cfg(not(debug_assertions))]
     fn debug_check(&self) {}
