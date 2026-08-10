@@ -1421,11 +1421,19 @@ impl Ctx<'_> {
     }
 
     fn rfp_enabled(&self) -> bool {
-        #[cfg(test)]
+        // The 300 cp/ply margin was tuned against HCE.  The first NNUE has a
+        // different score distribution and can make this gate turn a forced
+        // mate into an ordinary static score, so leave it off until it has an
+        // NNUE-specific safety condition and margin.
+        #[cfg(feature = "nnue-eval")]
+        {
+            false
+        }
+        #[cfg(all(not(feature = "nnue-eval"), test))]
         {
             self.rfp
         }
-        #[cfg(not(test))]
+        #[cfg(all(not(feature = "nnue-eval"), not(test)))]
         {
             true
         }
@@ -1730,6 +1738,7 @@ mod tests {
     ///
     /// Written against the raw difference rather than a node count: a node
     /// count would also move for a dozen unrelated reasons.
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn the_tempo_bonus_does_not_survive_a_null_move() {
         crate::movegen::init();
@@ -2504,6 +2513,7 @@ mod tests {
     /// search, so both directions have a mate answer to preserve. Comparing
     /// the gate against itself disabled is what makes this a test of the
     /// pruning rather than of the eval.
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn reverse_futility_does_not_change_a_mate_verdict() {
         let fen = "7k/7p/5R1R/8/8/8/8/6K1 b - - 0 1";
@@ -2536,6 +2546,7 @@ mod tests {
     /// in-check node was observed clearing beta at all, instrumented over
     /// kiwipete to depth 6 - so this pins the intended behaviour ahead of the
     /// margin coming down rather than catching a live defect.
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn reverse_futility_does_not_prune_in_check() {
         let fen = "4k3/8/8/8/8/8/4r3/4K2Q w - - 0 1";
@@ -2562,6 +2573,7 @@ mod tests {
     /// The gate is load-bearing rather than decorative: turning it off has to
     /// move the node count, or the margin is so wide it never fires and the
     /// feature is dead code.
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn reverse_futility_prunes() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
@@ -3008,6 +3020,7 @@ mod tests {
         assert!(elapsed < Duration::from_millis(150), "took {elapsed:?}");
     }
 
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn depth_one_completes_despite_stop() {
         let mut board = Board::startpos();

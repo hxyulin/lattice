@@ -738,6 +738,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn symmetric_positions_score_the_tempo_bonus_for_either_side() {
         // A position with nothing between the sides is worth exactly the tempo
@@ -792,6 +793,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn material_delta_is_relative_to_side_to_move() {
         let white: Board = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w KQkq - 0 1"
