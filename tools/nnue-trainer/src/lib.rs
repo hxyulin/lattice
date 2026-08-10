@@ -15,6 +15,30 @@ pub const QB: i16 = 64;
 pub const SCALE: i32 = 400;
 /// Bytes emitted by Bullet before its optional 64-byte padding.
 pub const RAW_NETWORK_BYTES: usize = 2 * (HIDDEN + FEATURES * HIDDEN + 1 + 2 * HIDDEN);
+const NETWORK_VALUES: usize = HIDDEN + FEATURES * HIDDEN + 1 + 2 * HIDDEN;
+
+/// Feature ABI written into a packed Lattice network header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkArchitecture {
+    /// King-anchored 40,960-input HalfKP.
+    HalfKp,
+    /// Absolute 768-input piece-square features.
+    Chess768,
+}
+
+impl NetworkArchitecture {
+    fn header(self) -> (u32, usize) {
+        match self {
+            Self::HalfKp => (1, FEATURES),
+            Self::Chess768 => (2, 768),
+        }
+    }
+
+    fn raw_bytes(self) -> usize {
+        let (_, features) = self.header();
+        2 * (HIDDEN + features * HIDDEN + 1 + 2 * HIDDEN)
+    }
+}
 
 /// HalfKP inputs in the mover-relative representation stored by bulletformat.
 #[derive(Clone, Copy, Debug, Default)]
@@ -60,13 +84,20 @@ impl SparseInputType for HalfKp {
 
 /// Wraps Bullet's fixed raw layout in Lattice's strict network header.
 pub fn pack_network(raw: &[u8]) -> Result<Vec<u8>, String> {
-    if raw.len() < RAW_NETWORK_BYTES {
+    pack_network_for(raw, NetworkArchitecture::HalfKp)
+}
+
+/// Wraps a Bullet checkpoint for the selected feature ABI.
+pub fn pack_network_for(raw: &[u8], architecture: NetworkArchitecture) -> Result<Vec<u8>, String> {
+    let raw_network_bytes = architecture.raw_bytes();
+    let (feature_abi, features) = architecture.header();
+    if raw.len() < raw_network_bytes {
         return Err(format!(
-            "network is truncated: got {} bytes, need {RAW_NETWORK_BYTES}",
-            raw.len()
+            "network is truncated: got {} bytes, need {raw_network_bytes}",
+            raw.len(),
         ));
     }
-    let padding = &raw[RAW_NETWORK_BYTES..];
+    let padding = &raw[raw_network_bytes..];
     if padding.len() >= 64
         || padding
             .iter()
@@ -75,10 +106,10 @@ pub fn pack_network(raw: &[u8]) -> Result<Vec<u8>, String> {
     {
         return Err("Bullet padding is malformed".to_string());
     }
-    let payload = &raw[..RAW_NETWORK_BYTES];
+    let payload = &raw[..raw_network_bytes];
     let mut output = Vec::with_capacity(56 + payload.len());
     output.extend_from_slice(b"LTNNUE01");
-    for value in [1_u32, 1, FEATURES as u32, HIDDEN as u32] {
+    for value in [1_u32, feature_abi, features as u32, HIDDEN as u32] {
         output.extend_from_slice(&value.to_le_bytes());
     }
     for value in [i32::from(QA), i32::from(QB), SCALE, 0] {
@@ -154,14 +185,7 @@ impl QuantizedNetwork {
 
     /// Evaluates one mover-relative Bullet record in centipawns.
     pub fn evaluate(&self, board: &ChessBoard) -> i32 {
-        let mut stm = self.feature_bias.map(i32::from);
-        let mut ntm = stm;
-        HalfKp.map_features(board, |stm_feature, ntm_feature| {
-            for neuron in 0..HIDDEN {
-                stm[neuron] += i32::from(self.feature_weights[stm_feature * HIDDEN + neuron]);
-                ntm[neuron] += i32::from(self.feature_weights[ntm_feature * HIDDEN + neuron]);
-            }
-        });
+        let (stm, ntm) = self.accumulators(board);
         let mut output = 0_i64;
         for (&value, &weight) in stm.iter().zip(&self.output_weights[..HIDDEN]) {
             let clipped = i64::from(value).clamp(0, i64::from(QA));
@@ -176,6 +200,92 @@ impl QuantizedNetwork {
         output *= i64::from(SCALE);
         output /= i64::from(QA) * i64::from(QB);
         output as i32
+    }
+
+    /// Returns the exact pre-activation accumulator bounds for one record.
+    /// Values outside `i16` cannot be represented by Lattice's runtime.
+    pub fn accumulator_bounds(&self, board: &ChessBoard) -> (i32, i32) {
+        let (stm, ntm) = self.accumulators(board);
+        stm.into_iter()
+            .chain(ntm)
+            .fold((i32::MAX, i32::MIN), |(lo, hi), value| {
+                (lo.min(value), hi.max(value))
+            })
+    }
+
+    fn accumulators(&self, board: &ChessBoard) -> ([i32; HIDDEN], [i32; HIDDEN]) {
+        let mut stm = self.feature_bias.map(i32::from);
+        let mut ntm = stm;
+        HalfKp.map_features(board, |stm_feature, ntm_feature| {
+            for neuron in 0..HIDDEN {
+                stm[neuron] += i32::from(self.feature_weights[stm_feature * HIDDEN + neuron]);
+                ntm[neuron] += i32::from(self.feature_weights[ntm_feature * HIDDEN + neuron]);
+            }
+        });
+        (stm, ntm)
+    }
+}
+
+/// Bullet's unquantised affine weights in the trainer's saved-format order.
+/// This reconstructs the floating-point graph independently of the packed
+/// engine evaluator.
+pub struct FloatNetwork {
+    feature_bias: [f32; HIDDEN],
+    feature_weights: Vec<f32>,
+    output_bias: f32,
+    output_weights: [f32; 2 * HIDDEN],
+}
+
+impl FloatNetwork {
+    /// Parses Bullet's `raw.bin` for the current `l0b,l0w,l1b,l1w` contract.
+    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != 4 * NETWORK_VALUES {
+            return Err(format!(
+                "invalid floating network size: got {}, need {}",
+                bytes.len(),
+                4 * NETWORK_VALUES
+            ));
+        }
+        let mut cursor = 0;
+        let mut next = || {
+            let value = f32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            value
+        };
+        let mut feature_bias = [0.0; HIDDEN];
+        feature_bias.fill_with(&mut next);
+        let feature_weights = (0..FEATURES * HIDDEN).map(|_| next()).collect();
+        let output_bias = next();
+        let mut output_weights = [0.0; 2 * HIDDEN];
+        output_weights.fill_with(next);
+        debug_assert_eq!(cursor, bytes.len());
+        Ok(Self {
+            feature_bias,
+            feature_weights,
+            output_bias,
+            output_weights,
+        })
+    }
+
+    /// Evaluates Bullet's floating graph and converts its logit to centipawns.
+    pub fn evaluate_cp(&self, board: &ChessBoard) -> f32 {
+        let mut stm = self.feature_bias;
+        let mut ntm = stm;
+        HalfKp.map_features(board, |stm_feature, ntm_feature| {
+            for neuron in 0..HIDDEN {
+                stm[neuron] += self.feature_weights[stm_feature * HIDDEN + neuron];
+                ntm[neuron] += self.feature_weights[ntm_feature * HIDDEN + neuron];
+            }
+        });
+        let activate = |value: f32| value.clamp(0.0, 1.0).powi(2);
+        let mut output = self.output_bias;
+        for (&value, &weight) in stm.iter().zip(&self.output_weights[..HIDDEN]) {
+            output += activate(value) * weight;
+        }
+        for (&value, &weight) in ntm.iter().zip(&self.output_weights[HIDDEN..]) {
+            output += activate(value) * weight;
+        }
+        output * SCALE as f32
     }
 }
 
@@ -244,5 +354,13 @@ mod tests {
         let network = QuantizedNetwork::parse(&packed).unwrap();
         assert_eq!(network.evaluate(&position(false)), 0);
         assert_eq!(network.evaluate(&position(true)), 0);
+    }
+
+    #[test]
+    fn floating_zero_network_parses_and_evaluates_to_zero() {
+        let raw = vec![0; 4 * NETWORK_VALUES];
+        let network = FloatNetwork::parse(&raw).unwrap();
+        assert_eq!(network.evaluate_cp(&position(false)), 0.0);
+        assert_eq!(network.evaluate_cp(&position(true)), 0.0);
     }
 }

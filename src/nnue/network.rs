@@ -1,13 +1,30 @@
 use core::fmt;
 
-use super::features::FEATURES;
+use super::features::{CHESS768_FEATURES, FEATURES};
 
 /// Neurons in one HalfKP perspective accumulator.
 pub const HIDDEN: usize = 256;
 const MAGIC: &[u8; 8] = b"LTNNUE01";
 const HEADER_LEN: usize = 56;
 const VERSION: u32 = 1;
-const FEATURE_ABI: u32 = 1;
+const HALFKP_ABI: u32 = 1;
+const CHESS768_ABI: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeatureAbi {
+    HalfKp,
+    Chess768,
+}
+
+impl FeatureAbi {
+    fn parse(id: u32, features: usize) -> Option<Self> {
+        match (id, features) {
+            (HALFKP_ABI, FEATURES) => Some(Self::HalfKp),
+            (CHESS768_ABI, CHESS768_FEATURES) => Some(Self::Chess768),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone)]
 #[repr(C, align(64))]
@@ -15,6 +32,7 @@ pub(crate) struct FeatureColumn(pub(crate) [i16; HIDDEN]);
 
 /// A parsed, quantised Lattice NNUE.
 pub struct Network {
+    pub(crate) feature_abi: FeatureAbi,
     pub(crate) feature_bias: [i16; HIDDEN],
     pub(crate) feature_weights: Box<[FeatureColumn]>,
     output_bias: i16,
@@ -91,11 +109,11 @@ impl Network {
         if bytes.get(..8) != Some(MAGIC) {
             return Err(NetworkError::Header);
         }
-        if read_u32(bytes, 8)? != VERSION
-            || read_u32(bytes, 12)? != FEATURE_ABI
-            || read_u32(bytes, 16)? as usize != FEATURES
-            || read_u32(bytes, 20)? as usize != HIDDEN
-        {
+        let features = read_u32(bytes, 16)? as usize;
+        let Some(feature_abi) = FeatureAbi::parse(read_u32(bytes, 12)?, features) else {
+            return Err(NetworkError::Layout);
+        };
+        if read_u32(bytes, 8)? != VERSION || read_u32(bytes, 20)? as usize != HIDDEN {
             return Err(NetworkError::Layout);
         }
         let qa = read_i32(bytes, 24)?;
@@ -104,7 +122,7 @@ impl Network {
         if qa <= 0 || qb <= 0 || scale <= 0 || read_u32(bytes, 36)? != 0 {
             return Err(NetworkError::Layout);
         }
-        let expected_payload = 2 * (HIDDEN + FEATURES * HIDDEN + 1 + 2 * HIDDEN);
+        let expected_payload = 2 * (HIDDEN + features * HIDDEN + 1 + 2 * HIDDEN);
         let payload_len =
             usize::try_from(read_u64(bytes, 40)?).map_err(|_| NetworkError::Length)?;
         if payload_len != expected_payload || bytes.len() != HEADER_LEN + payload_len {
@@ -120,8 +138,8 @@ impl Network {
         for value in &mut feature_bias {
             *value = read_i16(payload, &mut cursor);
         }
-        let mut columns = Vec::with_capacity(FEATURES);
-        for _ in 0..FEATURES {
+        let mut columns = Vec::with_capacity(features);
+        for _ in 0..features {
             let mut values = [0; HIDDEN];
             for value in &mut values {
                 *value = read_i16(payload, &mut cursor);
@@ -136,6 +154,7 @@ impl Network {
         debug_assert_eq!(cursor, payload.len());
 
         Ok(Self {
+            feature_abi,
             feature_bias,
             feature_weights: columns.into_boxed_slice(),
             output_bias,
@@ -271,7 +290,10 @@ mod tests {
     #[test]
     fn embedded_network_parses_and_has_the_fixed_shape() {
         let network = Network::parse(include_bytes!(env!("LATTICE_NNUE_FILE"))).unwrap();
-        assert_eq!(network.feature_weights.len(), FEATURES);
+        assert!(matches!(
+            (network.feature_abi, network.feature_weights.len()),
+            (FeatureAbi::HalfKp, FEATURES) | (FeatureAbi::Chess768, CHESS768_FEATURES)
+        ));
         assert_eq!(network.qa, 255);
         assert_eq!(network.qb, 64);
         assert_eq!(network.scale, 400);

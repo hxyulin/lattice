@@ -781,6 +781,7 @@ mod tests {
         assert_eq!(placement(&many), 0);
     }
 
+    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn placement_beats_material_alone() {
         let centre: Board = "4k3/8/8/8/4N3/8/8/4K3 w - - 0 1".parse().unwrap();

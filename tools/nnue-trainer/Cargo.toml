@@ -6,6 +6,7 @@ publish = false
 
 [features]
 default = ["metal"]
+audit = ["dep:lattice"]
 cuda = ["bullet_lib/cuda"]
 metal = ["bullet_lib/metal"]
 rocm = ["bullet_lib/rocm"]
@@ -13,6 +14,7 @@ rocm = ["bullet_lib/rocm"]
 [dependencies]
 bullet_lib = { git = "https://github.com/jw1912/bullet", rev = "cebc78a093d92cbc87e56cfef049184c225270b0", default-features = false }
 bulletformat = "=1.8.0"
+lattice = { path = "../..", features = ["nnue-eval"], optional = true }
 
 [[bin]]
 name = "lattice-nnue-trainer"
@@ -25,3 +27,12 @@ path = "src/bin/pack_network.rs"
 [[bin]]
 name = "eval-network"
 path = "src/bin/eval_network.rs"
+
+[[bin]]
+name = "eval-checkpoint"
+path = "src/bin/eval_checkpoint.rs"
+
+[[bin]]
+name = "audit-network"
+path = "src/bin/audit_network.rs"
+required-features = ["audit"]

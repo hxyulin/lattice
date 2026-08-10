@@ -5,7 +5,7 @@ mod features;
 mod network;
 
 pub(crate) use accumulator::Accumulator;
-pub use features::{FEATURES, feature_index};
+pub use features::{CHESS768_FEATURES, FEATURES, feature_index};
 pub use network::{HIDDEN, Network, NetworkError};
 
 use std::sync::OnceLock;

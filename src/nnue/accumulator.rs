@@ -1,6 +1,9 @@
 use crate::{Board, Color, Piece, PieceType, Square};
 
-use super::{features::feature_index, network::HIDDEN, network::Network};
+use super::{
+    features::{chess768_indices, feature_index},
+    network::{FeatureAbi, HIDDEN, Network},
+};
 
 /// Two king-perspective feature-transformer sums maintained by the board.
 #[derive(Clone, PartialEq, Eq)]
@@ -130,6 +133,17 @@ unsafe fn apply_avx2(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN], add: bool) {
 
 impl Accumulator {
     pub(crate) fn add_piece(&mut self, piece: Piece, square: Square, net: &Network) {
+        if net.feature_abi == FeatureAbi::Chess768 {
+            if piece.piece_type() == PieceType::King {
+                self.kings[piece.color() as usize] = Some(square);
+            }
+            for (side, index) in chess768_indices(piece, square).into_iter().enumerate() {
+                if !self.dirty[side] {
+                    apply(&mut self.values[side], &net.feature_weights[index].0, true);
+                }
+            }
+            return;
+        }
         if piece.piece_type() == PieceType::King {
             let side = piece.color() as usize;
             self.kings[side] = Some(square);
@@ -147,6 +161,17 @@ impl Accumulator {
     }
 
     pub(crate) fn remove_piece(&mut self, piece: Piece, square: Square, net: &Network) {
+        if net.feature_abi == FeatureAbi::Chess768 {
+            if piece.piece_type() == PieceType::King {
+                self.kings[piece.color() as usize] = None;
+            }
+            for (side, index) in chess768_indices(piece, square).into_iter().enumerate() {
+                if !self.dirty[side] {
+                    apply(&mut self.values[side], &net.feature_weights[index].0, false);
+                }
+            }
+            return;
+        }
         if piece.piece_type() == PieceType::King {
             let side = piece.color() as usize;
             self.kings[side] = None;
@@ -179,7 +204,11 @@ impl Accumulator {
             self.values[side] = net.feature_bias;
             for square in board.occupied() {
                 let piece = board.piece_on(square).unwrap();
-                if let Some(index) = feature_index(perspective, king, piece, square) {
+                let index = match net.feature_abi {
+                    FeatureAbi::HalfKp => feature_index(perspective, king, piece, square),
+                    FeatureAbi::Chess768 => Some(chess768_indices(piece, square)[side]),
+                };
+                if let Some(index) = index {
                     apply(&mut self.values[side], &net.feature_weights[index].0, true);
                 }
             }
