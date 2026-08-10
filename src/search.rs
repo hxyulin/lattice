@@ -33,6 +33,10 @@ const MAX_QPLY: u32 = 8;
 /// verdict on a position that cannot legally arise, which is too thin to trust.
 /// Also the depth at which `depth - 1 - R` bottoms out at exactly 0.
 const MIN_NULL_DEPTH: u32 = 3;
+/// Maximum remaining depth for reverse futility pruning.  RFP substitutes a
+/// static score for a search, so keep it at the shallow frontier where a
+/// depth-scaled margin is meaningful.
+const RFP_MAX_DEPTH: u32 = 6;
 /// Per-ply reverse futility margin, in centipawns. Read as: one ply is assumed
 /// to be worth at most this much to the side to move.
 ///
@@ -773,12 +777,6 @@ fn negamax(
     // Unlike the null-move gate below, both sides of this comparison are the
     // same node's score, so the tempo bonus cancels and is not withheld.
     //
-    // No depth ceiling. The usual one exists because a linear margin stops
-    // bounding anything once the search can recover more than `margin * depth`,
-    // but this margin is wide enough that the product outruns any static score
-    // long before that: capping at 4, 5, 6, 8 or 10 plies leaves the bench at
-    // 886840 in every case, so a ceiling here would be a knob that does nothing.
-    //
     // The in-check guard is last because `is_attacked` generates attacks and is
     // the expensive term here, while the margin test is a subtract and a
     // compare that rejects most nodes. Testing it first cost 25% of NPS: every
@@ -790,6 +788,10 @@ fn negamax(
     // overstates the position. It costs nothing there, and the margin is meant
     // to come down once the evaluation improves, which is when it would fire.
     if ctx.rfp_enabled()
+        // A PV node owes an exact score.  RFP only proves a fail-high, so it is
+        // valid solely in a null-window non-PV search.
+        && beta - alpha == 1
+        && depth <= RFP_MAX_DEPTH
         // A mate bound is not a material claim, so a margin in centipawns
         // cannot say anything about the distance to it.
         && beta.abs() <= MATE_BOUND
@@ -1421,19 +1423,11 @@ impl Ctx<'_> {
     }
 
     fn rfp_enabled(&self) -> bool {
-        // The 300 cp/ply margin was tuned against HCE.  The first NNUE has a
-        // different score distribution and can make this gate turn a forced
-        // mate into an ordinary static score, so leave it off until it has an
-        // NNUE-specific safety condition and margin.
-        #[cfg(feature = "nnue-eval")]
-        {
-            false
-        }
-        #[cfg(all(not(feature = "nnue-eval"), test))]
+        #[cfg(test)]
         {
             self.rfp
         }
-        #[cfg(all(not(feature = "nnue-eval"), not(test)))]
+        #[cfg(not(test))]
         {
             true
         }
@@ -2538,6 +2532,34 @@ mod tests {
         );
     }
 
+    /// RFP is a fail-high proof, not an exact search, so it must never answer a
+    /// PV node.  This winning position deliberately has a static score that
+    /// clears the depth-one margin: without the null-window guard RFP answers
+    /// immediately instead of searching any move.  The fixture works under
+    /// both HCE and NNUE, unlike the deeper HCE-specific mate above.
+    #[test]
+    fn reverse_futility_does_not_prune_a_pv_node() {
+        let fen = "7k/8/5KQ1/8/8/8/8/8 w - - 0 1";
+        let board: Board = fen.parse().unwrap();
+        let static_eval = evaluate(&board);
+        assert!(
+            static_eval - RFP_MARGIN > 0,
+            "the static score must clear beta for the guard to be exercised: {static_eval}"
+        );
+        let search = |rfp: bool| {
+            let mut board: Board = fen.parse().unwrap();
+            let mut ctx = Ctx { rfp, ..test_ctx(1) };
+            let score = negamax(&mut board, 1, 1, -100, 0, true, &mut ctx).unwrap();
+            (score, ctx.total())
+        };
+        let (with, without) = (search(true), search(false));
+        assert!(
+            without.1 > 1,
+            "the unpruned search must visit a child for the test to say anything"
+        );
+        assert_eq!(with, without, "reverse futility pruned a PV node");
+    }
+
     /// A node in check has no static score worth pruning on: the side to move
     /// must answer the check, and the reply may be forced and losing however
     /// good the material looks.
@@ -2546,7 +2568,6 @@ mod tests {
     /// in-check node was observed clearing beta at all, instrumented over
     /// kiwipete to depth 6 - so this pins the intended behaviour ahead of the
     /// margin coming down rather than catching a live defect.
-    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn reverse_futility_does_not_prune_in_check() {
         let fen = "4k3/8/8/8/8/8/4r3/4K2Q w - - 0 1";
@@ -2573,7 +2594,6 @@ mod tests {
     /// The gate is load-bearing rather than decorative: turning it off has to
     /// move the node count, or the margin is so wide it never fires and the
     /// feature is dead code.
-    #[cfg(not(feature = "nnue-eval"))]
     #[test]
     fn reverse_futility_prunes() {
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
