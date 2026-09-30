@@ -52,8 +52,8 @@ machine). OpenBench reads this line to confirm a worker built the exact commit
 under test.
 
 Commits that touch engine source get a `Bench: <nodes>` trailer stamped
-automatically (the `tools/stamp-bench.sh` pre-commit hook; docs/tooling commits
-skip it). Reading the trailer:
+automatically (the `tools/stamp-bench.sh` hook, wired up by prek; docs/tooling
+commits skip it). Reading the trailer:
 
 - **The number changes** on a search change - expected. More nodes is not "worse":
   an extension *grows* the tree on purpose, pruning *shrinks* it. The number is an
@@ -125,11 +125,11 @@ markers is left alone. Commit the regenerated files alongside the amendment.
 - `cargo test` - unit tests plus **perft**, the exhaustive move-generation
   correctness check (leaf-node counts against known references). Any change near
   move generation, make/unmake, or board state must keep perft green.
-- Pre-commit hooks enforce `cargo fmt --check`, `cargo test`, spelling
+- prek hooks enforce `cargo fmt --check`, `cargo test`, spelling
   (`typos`), and the bench trailer. Enable them once per clone:
 
   ```
-  pre-commit install
+  prek install
   ```
 
 A green `cargo test` is the gate to *running* an SPRT; a passed SPRT is the gate

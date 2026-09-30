@@ -43,6 +43,6 @@ engine stays testable without going through stdin. Documentation lives in
   standard correctness check for move generation.
 - Commits: Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`,
   `refactor:`, `test:`).
-- Formatting and spelling are enforced via [pre-commit](https://pre-commit.com)
+- Formatting and spelling are enforced via [prek](https://prek.j178.dev)
   (`cargo fmt --check` plus `typos`), configured in `.pre-commit-config.yaml`.
-  Enable it once per clone with `pre-commit install`.
+  Enable it once per clone with `prek install`.

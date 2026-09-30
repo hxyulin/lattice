@@ -1,7 +1,7 @@
 # Configuration for the typos spell checker (https://github.com/crate-ci/typos).
 # Run with `typos` (install: `cargo install typos-cli`).
 #
-# The pre-commit hook runs in report-only mode (`--no-check-filenames` aside,
+# The prek hook runs in report-only mode (`--no-check-filenames` aside,
 # the upstream hook's default `--write-changes` is overridden in
 # .pre-commit-config.yaml). Corrections are applied by hand: this repo is full
 # of FENs, UCI move lists, and hex constants that a silent rewrite would

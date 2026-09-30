@@ -4,10 +4,10 @@
 # that change engine source, so each carries its node-count signature (the same
 # number ChessEval reads from `lattice bench`). Docs/tooling commits skip it.
 #
-# Wired via .pre-commit-config.yaml (installed by `pre-commit install`).
+# Wired via .pre-commit-config.yaml (installed by `prek install`).
 # Bypass for one commit:  SKIP_BENCH=1 git commit ...
 set -e
-msg="$1" # pre-commit passes the commit-message file path here
+msg="$1" # prek passes the commit-message file path here
 [ -n "$SKIP_BENCH" ] && exit 0
 case "$PRE_COMMIT_COMMIT_MSG_SOURCE" in merge | squash) exit 0 ;; esac
 # The env var alone is not enough. `git merge --no-ff` leaves
